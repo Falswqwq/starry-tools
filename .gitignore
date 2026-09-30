@@ -1,0 +1,14 @@
+# 依赖
+node_modules/
+
+# 前端构建产物（`npm run build` 生成，Tauri 打包时读它）
+dist/
+
+# Rust 构建产物
+src-tauri/target/
+
+# Tauri 按 capabilities 生成的 schema
+src-tauri/gen/schemas/
+
+.DS_Store
+*.log

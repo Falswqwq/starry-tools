@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StarryTools",
+  "version": "0.1.0",
+  "identifier": "com.falsw.starrytools",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "StarryTools · 节点工具箱",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1040,
+        "minHeight": 660,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "节点式的小工具集合",
+    "longDescription": "把每个小功能做成一个节点，用连线把它们串成一条可以保存、随时重跑的工作流。面向像素画与游戏素材的日常处理。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
