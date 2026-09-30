@@ -29,7 +29,7 @@ const edgeTypes: EdgeTypes = { wire: WireEdge };
  * 所在的区域就可能要跟着重绘。怀疑它是拖动卡顿的元凶，先关掉验证。
  * 改回 `true` 就回来了（Vite 会热更新，不用重启）。
  */
-const SHOW_DOT_BACKGROUND = true;
+const SHOW_DOT_BACKGROUND = false;
 
 /**
  * 这几个得提到组件外面。画布每拖一帧就会重渲染一次，写成字面量的话
