@@ -122,7 +122,7 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 - **参数可以条件显示。** `visible_when("mode", &["lossy"])` 是「或」，
   后面还可以 `.and_visible_when("lossyFormat", &["palette"])` 加一条「而且」。
 - **输出端口类型依赖参数**时用 `NodeSpec::dynamic(kind, resolve_outputs, run)`
-  （「输入」「图像格式转换」「图像压缩」就是这么做的），别在 `fixed` 里写死。
+  （「读取」「输入框」「图像格式转换」「图像压缩」就是这么做的），别在 `fixed` 里写死。
 - **别在节点里 panic。** 出错就返回 `NodeError`，它会按节点归类写进运行报告。
 
 ### 节点 id 与老存档
@@ -143,7 +143,9 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 Cargo.toml          根工作区（成员：core/、app/）
 core/               纯逻辑，不依赖任何 GUI 框架
   src/model/        port_type / node_kind / value / params / workflow
-  src/nodes/        内置工具，一个文件一个
+                    （node_kind 里放着「参数 → 可选输入端口」的推导规则）
+  src/nodes/        内置工具，一个文件一个（literal.rs = 文本/数字/布尔字面量）
+                    read.rs = 读文件；input_box.rs = 拖放 / 打字的输入区（控件种类 DropZone）
   src/engine/       静态检查 + 执行引擎（含测试）
   src/png_opt/      无损 PNG 优化：颜色类型 / 位深 / 调色板 / 逐行 filter / zopfli / 元数据
   src/png_quant.rs  调色板量化（有损）
@@ -175,6 +177,12 @@ app/                egui 界面
 - **两块工具栏**浮在画布上、不用胶囊外框：左上角是「节点库 / 工作流名 / 说明」，
   右上角是「N 处问题 / 加载 / 保存（底下一颗未保存小蓝点）/ 运行」。底部居中一颗
   状态药丸，点开向上弹出运行记录。左下角一竖条缩放控件。
+- **一种节点样式**：所有节点都是「标题栏 + 端口列 + 参数区」的卡片。字面量节点
+  （文本 / 数字 / 布尔）只是没有输入，其余完全一样。
+- **参数端口**：能被上游喂的参数，会在参数名前多一颗**小圆点**和一个类型徽标。
+  从同类节点接进来后，那一行的控件就变成它自己的**禁用态**（每种控件各画各的，
+  见 `widgets` 一层），不是统一换成灰块。这是从 `NodeKind::inputs_for(params)`
+  **推导**出来的，不是一个参数一个参数手写的 —— 加新节点、新参数都不用碰界面代码。
 - **颜色、圆角、阴影、字号**都收在 `theme.rs` 一处。
 - **图标**不引第三方图标库、也不打包位图字体：图标是 vendored 在 `app/assets/icons/` 的
   lucide 原始 SVG。`icons.rs` 把路径折成中心线，再按「到中心线的距离」光栅化成一张贴图
@@ -195,7 +203,7 @@ app/                egui 界面
 egui 是每帧重绘的，所以「哪些活儿不该每帧做」值得记一笔：
 
 - **静态检查按画布版本号缓存。** `graph.revision` 内容一变才加一（平移缩放不算），
-  `run::Check` 只在版本号变了时才重跑，否则每帧都会去读输入节点选的文件头。
+  `run::Check` 只在版本号变了时才重跑，否则每帧都会去读「读取」节点选的文件头（真的磁盘 IO）。
 - **运行放后台线程。** zopfli 那一档能把界面卡死，`run::Runner` 在单独线程上跑、
   外壳轮询结果。
 - **只有真的在动才申请重绘。** 动画自己会 `request_repaint`，外壳只在「时间在走」的

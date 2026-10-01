@@ -127,6 +127,21 @@ impl Value {
         }
     }
 
+    /// 这个值当作**参数**用时，转成参数的 JSON 形态；转不了返回 `None`。
+    ///
+    /// 参数端口把上游的值覆盖到参数上时用它 —— 能让参数吃下的就三种基本类型，
+    /// 图像不行。
+    pub fn to_param_json(&self) -> Option<serde_json::Value> {
+        Some(match self.inner() {
+            Value::Text(text) => serde_json::json!(text.as_ref()),
+            Value::Number(number) => serde_json::json!(number),
+            Value::Bool(value) => serde_json::json!(value),
+            // `inner()` 已经把名字剥光了，这里只是给编译器一个交代。
+            Value::Named(named) => named.inner.to_param_json()?,
+            Value::Image(_) => return None,
+        })
+    }
+
     pub fn as_image(&self) -> Result<&ImageValue, NodeError> {
         match self {
             Value::Named(named) => named.inner.as_image(),

@@ -20,6 +20,12 @@ pub struct Marks {
 }
 
 impl Marks {
+    /// 点过空白处之后，把「跑过了」的高亮收起来 —— 节点蓝色边框、蓝色连线都靠它。
+    /// （失败的红色激光留着：那是出错提示，不是高亮。）
+    pub fn dismiss_ok_highlight(&mut self) {
+        self.ok_nodes.clear();
+    }
+
     pub fn build(resolved: &ResolvedWorkflow, report: Option<&RunReport>) -> Self {
         let mut marks = Marks::default();
 

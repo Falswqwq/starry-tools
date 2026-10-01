@@ -246,17 +246,6 @@ pub enum PortType {
 }
 
 impl PortType {
-    /// 类型族，界面上用来决定配色分组。
-    pub fn family(self) -> &'static str {
-        match self {
-            PortType::Any => "any",
-            PortType::Text => "text",
-            PortType::Number => "number",
-            PortType::Bool => "bool",
-            PortType::Image(_) => "image",
-        }
-    }
-
     /// 运行期真的拿到它时，这个类型算不算「说清楚了」。
     /// 通配本身不是具体类型，格式未知的图像也不是。
     pub fn is_concrete(self) -> bool {

@@ -3,7 +3,9 @@
 pub mod compress;
 pub mod convert;
 pub mod crop;
-pub mod input;
+pub mod input_box;
+pub mod literal;
+pub mod read;
 pub mod rename;
 pub mod save;
 pub mod upscale;

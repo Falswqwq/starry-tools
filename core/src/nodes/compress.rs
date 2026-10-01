@@ -55,10 +55,12 @@ pub fn spec() -> NodeSpec {
                     .required()
                     .hint("任何可解码的图像"),
             ],
+            // 声明里的输出是泛化的「图像」（卡片上显示 `IMG`）——
+            // 真正的输出格式由 `output_ports` 按压缩方式现算。
             outputs: vec![PortDef::new(
                 "image",
-                "PNG 图像",
-                PortType::Image(ImageFormat::Png),
+                "图像",
+                PortType::Image(ImageFormat::Any),
             )],
             params: vec![
                 ParamDef::new(

@@ -138,7 +138,7 @@ impl eframe::App for App {
         // 静态检查按画布版本号缓存 —— 它会去读输入节点选中的文件（要读文件头），
         // 不能每帧跑。借用在块里结束，免得和下面画布的 `&mut self` 撞上。
         let workflow = self.graph.to_workflow(self.workspace.workflow());
-        let (marks, runnable, errors, first_bad) = {
+        let (mut marks, runnable, errors, first_bad) = {
             let resolved = self.check.get(self.graph.revision, &workflow);
             let bad = resolved
                 .issues
@@ -155,6 +155,10 @@ impl eframe::App for App {
                 bad,
             )
         };
+        // 点过空白处之后，把「跑过了」的高亮收起来。
+        if self.graph.run_marks_hidden() {
+            marks.dismiss_ok_highlight();
+        }
 
         if let Some(node_id) = self
             .graph

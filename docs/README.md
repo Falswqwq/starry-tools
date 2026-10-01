@@ -17,7 +17,13 @@
 
 | 节点 | id | 一句话 |
 | --- | --- | --- |
-| [输入](nodes/input.md) | `input` | 工作流的起点：读一张图，或者给一段文本 / 数字 |
+| [读取](nodes/read.md) | `read` | 从硬盘读一个文件：图像按图像解码，文本按文本读（输出类型自动推断） |
+| [输入框](nodes/input_box.md) | `input_box` | 一块大输入区：拖入文件 / `Ctrl+V` / 点击打字 |
+| [文本](nodes/literal_text.md) | `literal_text` | 一段文本（字面量） |
+| [数字](nodes/literal_number.md) | `literal_number` | 一个数字（字面量） |
+| [布尔](nodes/literal_bool.md) | `literal_bool` | 一个开关（字面量） |
+
+字面量节点一个装一个值，接到别的节点的参数端口上就能把那个参数改从这里取。
 
 ### 图像
 

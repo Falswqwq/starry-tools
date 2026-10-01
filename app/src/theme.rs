@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextStyle};
 use egui::epaint::Shadow;
+use starrytools_core::model::port_type::{ImageFormat, PortType};
 
 // 画布
 pub const CANVAS: Color32 = Color32::from_rgb(0xfb, 0xfb, 0xfc);
@@ -22,11 +23,18 @@ pub const INK_3: Color32 = Color32::from_rgb(0x8b, 0x93, 0xa1);
 
 // 主题蓝
 pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x63, 0xeb);
+/// 浅一号的蓝：**参数端口**用它 —— 可选的东西，存在感比必填的端口弱一档。
+pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x8f, 0xb5, 0xf7);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1d, 0x4e, 0xd8);
 pub const ACCENT_SOFT: Color32 = Color32::from_rgb(0xef, 0xf4, 0xff);
 pub const ACCENT_LINE: Color32 = Color32::from_rgb(0xc3, 0xd6, 0xfe);
 
 // 类型：蓝灰一条梯度，具体格式是蓝，通配和其余几种是灰
+//
+// 这几个是**徽标专用**的配色，只回答「这个端口是什么类型」一个问题。特意不复用
+// `ACCENT`（那个蓝表示选中 / 焦点 / 端点），也不跟节点的状态色（报错 / 运行）混用 ——
+// 类型是类型，状态是状态。
+pub const TYPE_IMAGE: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 pub const TYPE_UNKNOWN: Color32 = Color32::from_rgb(0x94, 0xa3, 0xb8);
 pub const TYPE_TEXT: Color32 = Color32::from_rgb(0x33, 0x41, 0x55);
 pub const TYPE_NUMBER: Color32 = Color32::from_rgb(0x47, 0x55, 0x69);
@@ -44,19 +52,20 @@ pub const WIRE: Color32 = Color32::from_rgb(0xc3, 0xc9, 0xd2);
 pub const R_CARD: u8 = 8;
 pub const R_CTL: u8 = 6;
 
-/// 端口配色：具体图像走强调色，通配和其余一律留在灰阶里 ——
-/// 「到底是 PNG 还是 JPG」由徽标上的字说，不靠颜色猜。
+/// 类型徽标的颜色 —— **全应用唯一的一处**。端口列上的徽标、参数名前的徽标、
+/// 节点库卡片和详情里的徽标，全部走它，因此**同一类型的徽标在哪儿都同色**。
 ///
-/// `family` 里的 `image-any` 是「格式未知的图像」（对应 CSS 的 `--type-unknown`）。
-pub fn port_color(family: &str) -> Color32 {
-    match family {
-        "image" => ACCENT,
-        "image-any" => TYPE_UNKNOWN,
-        "any" => TYPE_UNKNOWN,
-        "text" => TYPE_TEXT,
-        "number" => TYPE_NUMBER,
-        "bool" => TYPE_BOOL,
-        _ => TYPE_UNKNOWN,
+/// 它只取决于**类型本身**（`PortType`），与节点、与选中 / 悬停 / 报错等状态无关，
+/// 也不借用 `ACCENT`（那个蓝表示选中 / 焦点）—— 徽标标的是类型，不是状态。
+/// 到底是 PNG 还是 JPG，由徽标上的字来说，颜色只分「图像 / 文本 / 数字 / 布尔 / 通配」。
+pub fn badge_color(ty: PortType) -> Color32 {
+    match ty {
+        // 格式未知的通配图像，和 `Any` 一样留在灰阶里。
+        PortType::Image(ImageFormat::Any) | PortType::Any => TYPE_UNKNOWN,
+        PortType::Image(_) => TYPE_IMAGE,
+        PortType::Text => TYPE_TEXT,
+        PortType::Number => TYPE_NUMBER,
+        PortType::Bool => TYPE_BOOL,
     }
 }
 
@@ -246,6 +255,30 @@ pub fn apply(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 徽标配色只有 [`badge_color`] 这一处：同一类型任何地方都同色，
+    /// 不同类型要能分得开。这条测试守的就是「别再有人往别处塞一个硬编码颜色」。
+    #[test]
+    fn badge_colors_are_per_type_and_distinct() {
+        let png = badge_color(PortType::Image(ImageFormat::Png));
+        let jpg = badge_color(PortType::Image(ImageFormat::Jpeg));
+        assert_eq!(
+            png, jpg,
+            "同为具体图像格式，徽标同色 —— 格式由字说，不靠颜色"
+        );
+
+        assert_ne!(png, badge_color(PortType::Text));
+        assert_ne!(badge_color(PortType::Text), badge_color(PortType::Number));
+        assert_ne!(badge_color(PortType::Number), badge_color(PortType::Bool));
+
+        // 格式未知的图像是通配，和 `Any` 一起走灰 —— 与具体格式的蓝分得开。
+        let any_image = badge_color(PortType::Image(ImageFormat::Any));
+        assert_ne!(png, any_image);
+        assert_eq!(any_image, badge_color(PortType::Any));
+
+        // 徽标色与「选中 / 焦点」的主题蓝分开：一个蓝色徽标不该被误读成“选中”。
+        assert_ne!(png, ACCENT);
+    }
 
     /// 中文字体能不能真的解析出汉字字形。
     ///

@@ -45,7 +45,7 @@
 
 `core/src/nodes/save.rs`，`NodeSpec::fixed`。
 
-名字的候选来自 `value.name_hint()`（重命名节点挂的）与 `image.origin()`（输入节点留下的
+名字的候选来自 `value.name_hint()`（重命名节点挂的）与 `image.origin()`（读取节点留下的
 原始路径），两者都是跟着值流动的元信息。去重靠 `unique_name()`，从 2 开始试到
 `(10_000)`，实在排不下就退回时间戳。
 

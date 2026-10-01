@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::image_io::ImageValue;
-use crate::model::node_kind::PortDef;
+use crate::model::node_kind::{PortDef, PARAM_PORT_PREFIX};
 use crate::model::port_type::PortType;
 use crate::model::value::{NodeArgs, Value, ValueMap};
 use crate::model::workflow::{now_millis, Workflow};
@@ -203,7 +203,9 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
                 // 用归一后的 id：老存档里写的是老 id，前端要拿它去查元数据。
                 kind: spec.kind.id.clone(),
                 is_source: spec.kind.is_source,
-                inputs: spec.kind.inputs.clone(),
+                // 含**参数端口**（每个能被上游喂的参数各一个）——
+                // 它们也是真正的输入端口，连线、类型检查都走同一套。
+                inputs: spec.kind.inputs_for(&node.params),
                 outputs: spec.outputs_for(&node.params),
             },
             None => {
@@ -452,6 +454,10 @@ pub fn run(
 
         let mut warnings: Vec<String> = Vec::new();
         let mut inputs: ValueMap = ValueMap::new();
+        // 参数可以被上游喂：连到 `param:<id>` 上的值会覆盖掉这个参数。
+        // 覆盖之后才拿去算输出端口、才交给节点 —— 所以「输出跟着参数变」的节点
+        // 也照样对（比如「图像格式转换」的目标格式接了一段字符串）。
+        let mut params = node.params.clone();
         let mut blocked_by: Option<String> = None;
         let mut type_error: Option<String> = None;
 
@@ -483,6 +489,14 @@ pub fn run(
                         actual.label()
                     ));
                 }
+            }
+
+            // 参数端口：值覆盖到那个参数上，不当成节点的输入数据。
+            if let Some(param_id) = edge.target_port.strip_prefix(PARAM_PORT_PREFIX) {
+                if let Some(json) = value.to_param_json() {
+                    params.insert(param_id.to_string(), json);
+                }
+                continue;
             }
             inputs.insert(edge.target_port.clone(), value.clone());
         }
@@ -521,7 +535,7 @@ pub fn run(
         let outcome = {
             let mut args = NodeArgs {
                 node_id,
-                params: &node.params,
+                params: &params,
                 inputs: &inputs,
                 warnings: &mut warnings,
             };
@@ -532,7 +546,7 @@ pub fn run(
         match outcome {
             Ok(outputs) => {
                 let mut port_results = Vec::new();
-                let output_ports = spec.outputs_for(&node.params);
+                let output_ports = spec.outputs_for(&params);
                 let multiple_ports = output_ports.len() > 1;
                 for port in output_ports {
                     let Some(value) = outputs.get(&port.id) else {

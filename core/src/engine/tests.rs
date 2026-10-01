@@ -54,9 +54,9 @@ fn edge(id: &str, source: &str, source_port: &str, target: &str, target_port: &s
 }
 
 fn input_node(id: &str, path: &Path) -> NodeInstance {
-    let mut params = defaults(crate::nodes::input::KIND);
+    let mut params = defaults(crate::nodes::read::KIND);
     params.insert("path".into(), serde_json::json!(path.to_string_lossy()));
-    node(id, crate::nodes::input::KIND, params)
+    node(id, crate::nodes::read::KIND, params)
 }
 
 fn errors(issues: &[Issue]) -> Vec<&str> {
@@ -80,6 +80,7 @@ fn input_port_type_follows_the_selected_file() {
     let resolved = resolve(&workflow);
     assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
 
+    // 输出类型是**自动推断**出来的：选了 png 就是 PNG，选了 jpg 就是 JPEG。
     assert_eq!(
         resolved.nodes[0].outputs[0].ty,
         PortType::Image(ImageFormat::Png)
@@ -88,6 +89,14 @@ fn input_port_type_follows_the_selected_file() {
         resolved.nodes[1].outputs[0].ty,
         PortType::Image(ImageFormat::Jpeg)
     );
+}
+
+#[test]
+fn a_configuringless_input_is_any() {
+    // 还没选文件：类型待定，输出就是 ANY —— 节点库卡片上看到的就是它。
+    let input = registry().get(crate::nodes::read::KIND).unwrap();
+    let ports = input.outputs_for(&input.kind.default_params());
+    assert_eq!(ports[0].ty, PortType::Any);
 }
 
 #[test]
@@ -104,6 +113,7 @@ fn png_only_input_rejects_a_jpeg_source() {
     ));
     workflow.edges.push(edge("e1", "in", "out", "up", "image"));
 
+    // 推断出是 JPEG，而目标端口只收 PNG —— 编辑期就拦下。
     let resolved = resolve(&workflow);
     assert!(!resolved.runnable);
     assert!(
@@ -275,11 +285,11 @@ fn only_node_runs_just_its_upstream() {
 fn missing_file_is_reported_per_node() {
     let dir = workspace("missing-file");
     let mut workflow = Workflow::new("文件不见了");
-    let mut params = defaults(crate::nodes::input::KIND);
+    let mut params = defaults(crate::nodes::read::KIND);
     params.insert("path".into(), serde_json::json!("/definitely/not/here.png"));
     workflow
         .nodes
-        .push(node("in", crate::nodes::input::KIND, params));
+        .push(node("in", crate::nodes::read::KIND, params));
     workflow.nodes.push(node(
         "to_png",
         crate::nodes::convert::KIND,
@@ -341,7 +351,7 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 7);
+    assert_eq!(kinds.len(), 11, "内置工具的数量（改动时请一并更新这条）");
 
     let convert = kinds
         .iter()
@@ -351,8 +361,8 @@ fn kind_metadata_is_a_stable_contract() {
     assert_eq!(convert["isSource"], false);
     assert_eq!(convert["inputs"][0]["ty"]["image"], "any");
     assert_eq!(convert["inputs"][0]["required"], true);
-    // 输出端口跟着「目标格式」走，清单里给的是默认参数下的样子。
-    assert_eq!(convert["outputs"][0]["ty"]["image"], "png");
+    // 输出格式跟着「目标格式」走，清单（节点库卡片）里给的是泛化的 IMG。
+    assert_eq!(convert["outputs"][0]["ty"]["image"], "any");
 
     let format_param = convert["params"]
         .as_array()
@@ -405,13 +415,15 @@ fn kind_metadata_is_a_stable_contract() {
     assert_eq!(auto_extension["control"], "bool");
     assert_eq!(auto_extension["default"], true);
 
-    let input = kinds.iter().find(|kind| kind["id"] == "input").unwrap();
-    assert_eq!(input["isSource"], true);
-    assert_eq!(input["outputs"][0]["ty"]["image"], "any");
-    assert_eq!(input["params"][0]["control"], "select");
-    assert_eq!(input["defaults"]["valueType"], "image");
+    let read = kinds.iter().find(|kind| kind["id"] == "read").unwrap();
+    assert_eq!(read["name"], "读取");
+    assert_eq!(read["isSource"], true);
+    // 输出声明为通配（ANY）：具体类型自动推断。
+    assert_eq!(read["outputs"][0]["ty"], "any");
+    assert_eq!(read["params"][0]["control"], "select");
+    assert_eq!(read["defaults"]["valueType"], "image");
 
-    let file_param = input["params"]
+    let file_param = read["params"]
         .as_array()
         .unwrap()
         .iter()
@@ -423,6 +435,12 @@ fn kind_metadata_is_a_stable_contract() {
         .iter()
         .any(|ext| ext == "png"));
     assert_eq!(file_param["visibleWhen"]["anyOf"][0], "image");
+
+    // 「输入框」是那块大的拖放 / 打字输入区。
+    let input_box = kinds.iter().find(|kind| kind["id"] == "input_box").unwrap();
+    assert_eq!(input_box["name"], "输入框");
+    assert_eq!(input_box["isSource"], true);
+    assert_eq!(input_box["params"][0]["control"], "dropZone");
 
     let upscale = kinds.iter().find(|kind| kind["id"] == "upscale").unwrap();
     assert_eq!(upscale["name"], "缩放图像");
@@ -437,8 +455,8 @@ fn kind_metadata_is_a_stable_contract() {
         .unwrap();
     assert_eq!(compress["name"], "图像压缩");
     assert_eq!(compress["inputs"][0]["ty"]["image"], "any");
-    // 默认无损，输出就是 PNG。
-    assert_eq!(compress["outputs"][0]["ty"]["image"], "png");
+    // 输出格式跟着压缩方式走，卡片上是泛化的 IMG。
+    assert_eq!(compress["outputs"][0]["ty"]["image"], "any");
     let loss = compress["params"]
         .as_array()
         .unwrap()
@@ -1001,17 +1019,83 @@ fn rename_survives_a_re_encode_and_follows_the_real_format() {
 }
 
 #[test]
+fn read_reads_a_text_file_as_text() {
+    let dir = workspace("read-text");
+    let path = dir.join("note.txt");
+    std::fs::write(&path, "你好，世界").unwrap();
+
+    let mut workflow = Workflow::new("读文本");
+    let mut params = defaults(crate::nodes::read::KIND);
+    params.insert("valueType".into(), serde_json::json!("text"));
+    params.insert("textPath".into(), serde_json::json!(path.to_string_lossy()));
+    workflow
+        .nodes
+        .push(node("in", crate::nodes::read::KIND, params));
+
+    let resolved = resolve(&workflow);
+    assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
+    // 文本模式推断出 Text。
+    assert_eq!(resolved.nodes[0].outputs[0].ty, PortType::Text);
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    assert_eq!(report.nodes[0].outputs[0].ty, PortType::Text);
+}
+
+#[test]
+fn input_box_runs_its_typed_text_and_infers_the_type() {
+    let dir = workspace("input-box-text");
+    let mut workflow = Workflow::new("输入框文本");
+    let mut params = defaults(crate::nodes::input_box::KIND);
+    params.insert("value".into(), serde_json::json!("hello"));
+    workflow
+        .nodes
+        .push(node("box", crate::nodes::input_box::KIND, params));
+
+    let resolved = resolve(&workflow);
+    assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
+    assert_eq!(resolved.nodes[0].outputs[0].ty, PortType::Text);
+
+    let report = run(&workflow, None, &dir).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    assert_eq!(report.nodes[0].outputs[0].ty, PortType::Text);
+}
+
+#[test]
+fn input_box_with_an_image_file_infers_the_format() {
+    let dir = workspace("input-box-file");
+    let png = image_fixture(&dir, "png", 4, 3);
+
+    let mut workflow = Workflow::new("输入框装图");
+    let mut params = defaults(crate::nodes::input_box::KIND);
+    params.insert(
+        "value".into(),
+        serde_json::json!({ "file": png.to_string_lossy() }),
+    );
+    workflow
+        .nodes
+        .push(node("box", crate::nodes::input_box::KIND, params));
+
+    let resolved = resolve(&workflow);
+    assert_eq!(
+        resolved.nodes[0].outputs[0].ty,
+        PortType::Image(ImageFormat::Png)
+    );
+    let report = run(&workflow, None, &dir).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+}
+
+#[test]
 fn rename_passes_a_non_image_value_through_untouched() {
     // 重命名是通用节点：文本、数字都能接，类型和内容都不变。
     let dir = workspace("rename-text");
 
     let mut workflow = Workflow::new("重命名文本");
-    let mut input_params = defaults(crate::nodes::input::KIND);
-    input_params.insert("valueType".into(), serde_json::json!("text"));
-    input_params.insert("text".into(), serde_json::json!("hello"));
+    let mut box_params = defaults(crate::nodes::input_box::KIND);
+    box_params.insert("value".into(), serde_json::json!("hello"));
     workflow
         .nodes
-        .push(node("in", crate::nodes::input::KIND, input_params));
+        .push(node("in", crate::nodes::input_box::KIND, box_params));
 
     let mut rename_params = defaults(crate::nodes::rename::KIND);
     rename_params.insert("name".into(), serde_json::json!("note"));
@@ -1068,4 +1152,97 @@ fn a_wildcard_output_may_feed_any_input_at_edit_time() {
 
     let report = run(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
+}
+
+// ---- 参数端口（参数改从上游取）----------------------------------------------
+
+#[test]
+fn params_get_optional_input_ports() {
+    // 参数端口是**推导**出来的：节点只要声明了参数，就自动多一个可选输入。
+    let spec = registry().get(crate::nodes::upscale::KIND).unwrap();
+    let params = spec.kind.default_params();
+    let ports = spec.kind.inputs_for(&params);
+    let ids: Vec<&str> = ports.iter().map(|port| port.id.as_str()).collect();
+
+    assert!(ids.contains(&"image"), "声明里的输入还在：{ids:?}");
+    assert!(
+        ids.contains(&"param:percent"),
+        "数字参数该多一个端口：{ids:?}"
+    );
+    assert!(
+        !ids.contains(&"param:filter"),
+        "下拉框不该被上游喂（合法值是一张固定的表）：{ids:?}"
+    );
+
+    let percent = ports
+        .iter()
+        .find(|port| port.id == "param:percent")
+        .unwrap();
+    assert_eq!(percent.ty, PortType::Number);
+    assert_eq!(percent.param.as_deref(), Some("percent"));
+    assert!(percent.is_param() && !percent.required);
+}
+
+#[test]
+fn source_nodes_have_no_param_ports() {
+    // 字面量节点本身就是那个值，没有上游可接。
+    for id in [
+        crate::nodes::literal::KIND_TEXT,
+        crate::nodes::literal::KIND_NUMBER,
+        crate::nodes::literal::KIND_BOOL,
+    ] {
+        let spec = registry().get(id).unwrap();
+        assert!(spec.kind.is_source, "{id} 该是起点节点");
+        assert!(
+            spec.kind.inputs_for(&spec.kind.default_params()).is_empty(),
+            "{id} 不该有输入端口"
+        );
+    }
+}
+
+#[test]
+fn a_linked_param_port_overrides_the_param() {
+    // 「数字」节点接到「缩放图像」的 percent 端口上：真正生效的是上游那个数字，
+    // 节点自己存的那个值被盖掉。
+    let dir = workspace("param-port");
+    let png = image_fixture(&dir, "png", 2, 2);
+
+    let mut workflow = Workflow::new("参数接上游");
+    workflow.nodes.push(input_node("in", &png));
+
+    let mut upscale = defaults(crate::nodes::upscale::KIND);
+    upscale.insert("percent".into(), serde_json::json!(100));
+    workflow
+        .nodes
+        .push(node("up", crate::nodes::upscale::KIND, upscale));
+
+    let mut number = defaults(crate::nodes::literal::KIND_NUMBER);
+    number.insert("value".into(), serde_json::json!(400));
+    workflow
+        .nodes
+        .push(node("num", crate::nodes::literal::KIND_NUMBER, number));
+
+    workflow.edges.push(edge("e1", "in", "out", "up", "image"));
+    workflow
+        .edges
+        .push(edge("e2", "num", "out", "up", "param:percent"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+
+    let path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "up")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    let out = image::open(path).unwrap();
+    assert_eq!(
+        (out.width(), out.height()),
+        (8, 8),
+        "应当按上游那个 400%（而不是本地的 100%）放大"
+    );
 }

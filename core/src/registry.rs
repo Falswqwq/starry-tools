@@ -48,7 +48,12 @@ impl NodeSpec {
 
 /// 改过 id 的节点。存档里写的是老 id，解析时映射到新 id ——
 /// 缺的参数由默认值补上，所以老工作流还能照常打开和运行。
-const LEGACY_KIND_IDS: &[(&str, &str)] = &[("convert_to_png", nodes::convert::KIND)];
+const LEGACY_KIND_IDS: &[(&str, &str)] = &[
+    ("convert_to_png", nodes::convert::KIND),
+    // 「输入」拆成了「读取」和「输入框」两个节点。老的「输入」按文件读，
+    // 归到「读取」上最接近。
+    ("input", nodes::read::KIND),
+];
 
 /// 把老 id 归一成当前的 id。
 pub fn canonical_kind_id(kind_id: &str) -> &str {
@@ -74,17 +79,16 @@ impl Registry {
     }
 
     /// 交给前端的工具清单。
+    ///
+    /// 端口发的是**声明里的样子**（静态的）—— 节点库卡片是个**模板**：动态输出的节点
+    /// （输入 / 图像格式转换 / 图像压缩）在卡片上显示泛化的类型（`ANY` / `IMG`），
+    /// 具体类型要等拖出来、定下参数才知道。
     pub fn kinds(&self) -> Vec<NodeKindInfo> {
         self.specs
             .iter()
-            .map(|spec| {
-                let defaults = spec.kind.default_params();
-                let mut kind = spec.kind.clone();
-                // 端口类型可能跟着参数走。这里发的是「默认参数下的样子」，
-                // 也就是节点库卡片上画的那个 `IMG → PNG`，和真拖出来的节点一致。
-                kind.outputs = spec.outputs_for(&defaults);
-                kind.inputs = spec.kind.inputs.clone();
-                NodeKindInfo { kind, defaults }
+            .map(|spec| NodeKindInfo {
+                kind: spec.kind.clone(),
+                defaults: spec.kind.default_params(),
             })
             .collect()
     }
@@ -92,7 +96,11 @@ impl Registry {
 
 fn builtin_specs() -> Vec<NodeSpec> {
     vec![
-        nodes::input::spec(),
+        nodes::read::spec(),
+        nodes::input_box::spec(),
+        nodes::literal::text_spec(),
+        nodes::literal::number_spec(),
+        nodes::literal::bool_spec(),
         nodes::convert::spec(),
         nodes::compress::spec(),
         nodes::crop::spec(),

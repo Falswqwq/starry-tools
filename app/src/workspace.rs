@@ -143,15 +143,15 @@ fn data_root() -> PathBuf {
         .join(IDENTIFIER)
 }
 
-/// 一份新的空工作流：只有一个「输入」节点（所有工作流都从它开始）。
+/// 一份新的空工作流：只有一个「读取」节点（所有工作流都从它开始）。
 fn fresh(kinds: &[Kind]) -> Workflow {
     let mut workflow = Workflow::new("未命名工作流");
-    if let Some(input) = kinds.iter().find(|kind| kind.id == "input") {
+    if let Some(read) = kinds.iter().find(|kind| kind.id == "read") {
         workflow.nodes.push(NodeInstance {
             id: uuid::Uuid::new_v4().to_string(),
-            kind: input.id.clone(),
+            kind: read.id.clone(),
             position: Position { x: 120.0, y: 180.0 },
-            params: input.defaults.clone(),
+            params: read.defaults.clone(),
         });
     }
     workflow
@@ -171,17 +171,17 @@ mod tests {
         assert_eq!(IDENTIFIER, "com.falsw.starrytools");
     }
 
-    /// 新建的工作流自带一个「输入」节点 —— 所有工作流都从它开始。
+    /// 新建的工作流自带一个「读取」节点 —— 所有工作流都从它开始。
     #[test]
     fn a_fresh_workflow_starts_with_an_input() {
         let kinds = crate::catalog::all();
         let workflow = fresh(&kinds);
         assert_eq!(workflow.nodes.len(), 1);
-        assert_eq!(workflow.nodes[0].kind, "input");
+        assert_eq!(workflow.nodes[0].kind, "read");
         // 默认参数要从元数据里取，不能在这儿再拄一份。
         assert_eq!(
             workflow.nodes[0].params,
-            kinds.iter().find(|k| k.id == "input").unwrap().defaults
+            kinds.iter().find(|k| k.id == "read").unwrap().defaults
         );
     }
 }

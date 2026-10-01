@@ -23,6 +23,8 @@ const PANEL_W: f32 = 560.0;
 const LIST_W: f32 = PANEL_W - RAIL_W - 1.0;
 const MAX_LIST_H: f32 = 460.0;
 const DRAG_THRESHOLD: f32 = 5.0;
+/// 卡片内容的左右内边距：文字从 `left + CARD_PAD` 起，折到 `right - CARD_PAD`。
+const CARD_PAD: f32 = 11.0;
 
 pub struct Library {
     pub open: bool,
@@ -349,8 +351,13 @@ impl Library {
         if !kind.params.is_empty() {
             rows.push(Row::Section("参数".to_string()));
             for param in &kind.params {
+                let text = if param.label.is_empty() {
+                    param.summary()
+                } else {
+                    format!("{}   {}", param.label, param.summary())
+                };
                 rows.push(Row::Text {
-                    text: format!("{}   {}", param.label, param.summary()),
+                    text,
                     color: theme::INK,
                     indent: 0.0,
                 });
@@ -383,7 +390,7 @@ impl Library {
             for port in &kind.inputs {
                 rows.push(Row::Port {
                     badge: port.badge.clone(),
-                    color: theme::port_color(&port.family),
+                    color: theme::badge_color(port.ty),
                     text: format!("输入 · {}", port.label),
                     flag: port.required.then(|| "必填".to_string()),
                     hint: None,
@@ -392,7 +399,7 @@ impl Library {
             for port in &kind.outputs {
                 rows.push(Row::Port {
                     badge: port.badge.clone(),
-                    color: theme::port_color(&port.family),
+                    color: theme::badge_color(port.ty),
                     text: format!("输出 · {}", port.label),
                     flag: None,
                     hint: None,
@@ -415,7 +422,7 @@ impl Library {
             self.details(&self.kinds[i])
                 .into_iter()
                 .map(|row| {
-                    let h = measure_row(measure, &row, card_w - 2.0);
+                    let h = measure_row(measure, &row, card_w - CARD_PAD * 2.0);
                     (row, h)
                 })
                 .collect()
@@ -508,7 +515,7 @@ impl Library {
             let body = painter.with_clip_rect(rect);
             let mut y = rect.top() + CARD_H + 8.0;
             for (row, h) in &laid {
-                self.draw_row(&body, row, rect, y, t, card_w - 2.0);
+                self.draw_row(&body, row, rect, y, t, card_w - CARD_PAD * 2.0);
                 y += h;
             }
         }
@@ -587,7 +594,7 @@ impl Library {
             for port in &kind.inputs {
                 chip(
                     &port.badge,
-                    theme::port_color(&port.family).gamma_multiply(alpha),
+                    theme::badge_color(port.ty).gamma_multiply(alpha),
                     &mut x,
                 );
             }
@@ -602,7 +609,7 @@ impl Library {
         for port in &kind.outputs {
             chip(
                 &port.badge,
-                theme::port_color(&port.family).gamma_multiply(alpha),
+                theme::badge_color(port.ty).gamma_multiply(alpha),
                 &mut x,
             );
         }
@@ -722,7 +729,7 @@ impl Library {
             .inputs
             .iter()
             .chain(kind.outputs.iter())
-            .map(|port| (port.badge.clone(), theme::port_color(&port.family)))
+            .map(|port| (port.badge.clone(), theme::badge_color(port.ty)))
             .collect();
 
         egui::Area::new(egui::Id::new("lib-ghost"))

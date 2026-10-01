@@ -20,6 +20,12 @@ pub struct PortDef {
     pub required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// 这是某个**参数**的可选输入时，记下参数的 id。
+    ///
+    /// 界面据此把它画在参数那一行（浅蓝的小圆点），而不是端口列里；
+    /// 引擎据此把接上来的值覆盖到那个参数上。见 [`NodeKind::inputs_for`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
 }
 
 impl PortDef {
@@ -30,6 +36,19 @@ impl PortDef {
             ty,
             required: false,
             hint: None,
+            param: None,
+        }
+    }
+
+    /// 某个参数的可选输入端口。端口 id 带前缀，和节点声明的输入不会撞名。
+    pub fn for_param(param_id: &str, label: &str, ty: PortType) -> Self {
+        Self {
+            id: param_port_id(param_id),
+            label: label.to_string(),
+            ty,
+            required: false,
+            hint: None,
+            param: Some(param_id.to_string()),
         }
     }
 
@@ -42,6 +61,19 @@ impl PortDef {
         self.hint = Some(hint.to_string());
         self
     }
+
+    /// 这是不是某个参数的可选输入（而不是节点自己的输入端口）。
+    pub fn is_param(&self) -> bool {
+        self.param.is_some()
+    }
+}
+
+/// 参数端口的 id 前缀。`param:foo` 认的就是参数 `foo`。
+pub const PARAM_PORT_PREFIX: &str = "param:";
+
+/// 某个参数的可选输入端口的 id。
+pub fn param_port_id(param_id: &str) -> String {
+    format!("{PARAM_PORT_PREFIX}{param_id}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,10 +150,36 @@ pub enum ParamSpec {
         #[serde(default, skip_serializing_if = "is_false")]
         directory: bool,
     },
+    /// 一大块输入区：把文件拖进来、`Ctrl+V` 粘贴，或者点一下直接打字。
+    ///
+    /// 值是一个 JSON：空字符串 = 还没输入；字符串 = 文本；`{"file": "路径"}` = 一个文件。
+    /// 具体长什么样、怎么交互由前端决定（见 `app` 里的 `draw_drop_zone`）。
+    DropZone,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+impl ParamSpec {
+    /// 这个参数能被哪种**基本类型**的值从上游喂进来。
+    ///
+    /// 只有「值就是单个标量」的控件才给：数字 / 文本 / 开关 / 路径（路径也是字符串）。
+    /// 下拉框**不给** —— 它的合法值是一张固定的表，随便接一段文字进来只会静默地出错。
+    ///
+    /// 这件事直接决定了节点会不会多出一个可选输入端口，所以写成推导而不是
+    /// 逐个节点去声明 —— 加一个新工具时不用再想着它。
+    pub fn input_type(&self) -> Option<PortType> {
+        match self {
+            ParamSpec::Number { .. } | ParamSpec::Slider { .. } => Some(PortType::Number),
+            ParamSpec::Text { .. } => Some(PortType::Text),
+            ParamSpec::Bool { .. } => Some(PortType::Bool),
+            ParamSpec::File { .. } => Some(PortType::Text),
+            ParamSpec::Select { .. } => None,
+            // 输入区是个「源头」，没有上游可接。
+            ParamSpec::DropZone => None,
+        }
+    }
 }
 
 /// 参数在什么条件下才显示。
@@ -142,6 +200,26 @@ impl VisibleWhen {
             any_of: any_of.iter().map(|value| value.to_string()).collect(),
             all_of: Vec::new(),
         }
+    }
+
+    /// 这一条成立吗。
+    ///
+    /// 参数值一律按字符串比 —— 界面那边也是这么做的（开关就是 `"true"` / `"false"`）。
+    pub fn matches(&self, params: &Params) -> bool {
+        let one = |when: &VisibleWhen| {
+            params
+                .get(&when.param)
+                .map(as_text)
+                .is_some_and(|value| when.any_of.contains(&value))
+        };
+        one(self) && self.all_of.iter().all(one)
+    }
+}
+
+fn as_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -187,6 +265,13 @@ impl ParamDef {
         }
         self
     }
+
+    /// 现在该不该显示这个参数。
+    pub fn visible(&self, params: &Params) -> bool {
+        self.visible_when
+            .as_ref()
+            .is_none_or(|when| when.matches(params))
+    }
 }
 
 /// 一个工具（节点类型）的完整说明。
@@ -209,11 +294,36 @@ pub struct NodeKind {
 
 /// 输出端口的解析函数。
 ///
-/// 绝大多数节点的端口类型是写死的，直接返回 [`NodeKind::outputs`]；输入节点
-/// 是例外：它输出的图像格式取决于用户选了哪个文件，所以要现算。
+/// 绝大多数节点的端口类型是写死的，直接返回 [`NodeKind::outputs`]；像「输入」
+/// （按所选文件的格式）、「图像格式转换」（按目标格式）这种才要现算。
 pub type ResolveOutputsFn = fn(&Params) -> Vec<PortDef>;
 
 impl NodeKind {
+    /// 这个节点在给定参数下的**全部**输入端口。
+    ///
+    /// = 声明里写的输入 + 每个「能被上游喂」的可见参数各一个可选输入。
+    ///
+    /// 参数端口是**推导**出来的，不是逐个节点写的：节点只要正常声明参数，
+    /// 它就自动有了（见 [`ParamSpec::input_type`]）。界面把参数端口画在参数那一行，
+    /// 引擎把接上来的值覆盖到那个参数上 —— 两边都不认识具体工具。
+    ///
+    /// 起点节点不生成：它的参数就是内容本身，没有上游可接。
+    pub fn inputs_for(&self, params: &Params) -> Vec<PortDef> {
+        let mut ports = self.inputs.clone();
+        if self.is_source {
+            return ports;
+        }
+        for def in &self.params {
+            let Some(ty) = def.spec.input_type() else {
+                continue;
+            };
+            if def.visible(params) {
+                ports.push(PortDef::for_param(&def.id, &def.label, ty));
+            }
+        }
+        ports
+    }
+
     /// 从参数声明里推出默认参数值。新建节点时直接用这份，
     /// 免得在前端再抄一遍默认值（抄歪了就很难查）。
     pub fn default_params(&self) -> Params {
@@ -227,6 +337,8 @@ impl NodeKind {
                 ParamSpec::Select { default, .. } => serde_json::json!(default),
                 ParamSpec::Bool { default } => serde_json::json!(default),
                 ParamSpec::File { default, .. } => serde_json::json!(default),
+                // 输入区默认空着。
+                ParamSpec::DropZone => serde_json::json!(""),
             };
             params.insert(def.id.clone(), value);
         }

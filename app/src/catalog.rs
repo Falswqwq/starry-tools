@@ -8,7 +8,7 @@
 use serde_json::Value;
 use starrytools_core::model::node_kind::{ParamDef, ParamSpec, PortDef};
 use starrytools_core::model::params::Params;
-use starrytools_core::model::port_type::{ImageFormat, PortType};
+use starrytools_core::model::port_type::PortType;
 use starrytools_core::registry::registry;
 
 /// 一个端口在界面上需要知道的东西。
@@ -19,11 +19,20 @@ pub struct Port {
     pub label: String,
     /// 短标签，卡片上的 `IMG → PNG` 用它。
     pub badge: String,
-    /// 类型族，用来决定配色（`image` / `text` / `any` …）。
-    pub family: String,
-    /// 真实类型。**连线合不合法就靠它**（`PortType::accepts`）—— 徽标只能给人看。
+    /// 真实类型。**连线合不合法就靠它**（`PortType::accepts`）；
+    /// 徽标的颜色也只看它（见 [`crate::theme::badge_color`]）。
     pub ty: PortType,
     pub required: bool,
+    /// 这是某个**参数**的可选输入时，记下参数的 id。
+    /// 界面据此把它画在参数那一行（浅蓝的小圆点），而不是端口列里。
+    pub param: Option<String>,
+}
+
+impl Port {
+    /// 是不是某个参数的可选输入。
+    pub fn is_param(&self) -> bool {
+        self.param.is_some()
+    }
 }
 
 /// 下拉框里的一个选项。
@@ -71,6 +80,8 @@ pub enum Control {
         extensions: Vec<String>,
         directory: bool,
     },
+    /// 一大块输入区（拖文件 / 粘贴 / 点一下打字）。
+    DropZone,
 }
 
 /// 参数在什么条件下才显示。
@@ -159,6 +170,7 @@ impl Param {
                     .join(" / ")
             ),
             Control::Bool => "开关".to_string(),
+            Control::DropZone => "拖入文件 / 粘贴 / 打字".to_string(),
             Control::File {
                 directory,
                 extensions,
@@ -223,9 +235,25 @@ pub fn all() -> Vec<Kind> {
 /// 类型 id 不认得时返回空端口（老存档里的未知节点）。
 pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<Port>, Vec<Port>) {
     match registry().get(kind_id) {
-        Some(spec) => (ports(&spec.kind.inputs), ports(&spec.outputs_for(params))),
+        Some(spec) => (
+            // 含**参数端口**（每个能被上游喂的参数各一个）。界面会把它们
+            // 从端口列里挑出来，画到各自的参数行上。
+            ports(&spec.kind.inputs_for(params)),
+            ports(&spec.outputs_for(params)),
+        ),
         None => (Vec::new(), Vec::new()),
     }
+}
+
+/// 这个节点有没有「输入区」（`DropZone`）控件。有的话它自己就把值摆出来了 ——
+/// 跑完之后不用再在卡片底下摆一条结果图。
+pub fn has_drop_zone(kind_id: &str) -> bool {
+    registry().get(kind_id).is_some_and(|spec| {
+        spec.kind
+            .params
+            .iter()
+            .any(|param| matches!(param.spec, ParamSpec::DropZone))
+    })
 }
 
 /// 分类列表：按出现顺序排，前面加一个「全部」。不写死分类名 ——
@@ -246,20 +274,11 @@ fn ports(defs: &[PortDef]) -> Vec<Port> {
             id: def.id.clone(),
             label: def.label.clone(),
             badge: def.ty.badge().to_string(),
-            family: port_family(def.ty),
             ty: def.ty,
             required: def.required,
+            param: def.param.clone(),
         })
         .collect()
-}
-
-/// 端口配色用的族。`Image(Any)`（格式未知的图像）单独标出来 ——
-/// 原设计里它走灰，不走图像那支蓝。
-fn port_family(ty: PortType) -> String {
-    match ty {
-        PortType::Image(ImageFormat::Any) => "image-any".to_string(),
-        other => other.family().to_string(),
-    }
 }
 
 fn param(def: &ParamDef) -> Param {
@@ -311,6 +330,7 @@ fn param(def: &ParamDef) -> Param {
                 .collect(),
         },
         ParamSpec::Bool { .. } => Control::Bool,
+        ParamSpec::DropZone => Control::DropZone,
         ParamSpec::File {
             dialog_title,
             extensions,
