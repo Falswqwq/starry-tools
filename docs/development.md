@@ -151,11 +151,12 @@ core/               纯逻辑，不依赖任何 GUI 框架
   src/storage.rs    工作流的读写
   src/image_io.rs   图像值的编解码与缩略图
 app/                egui 界面
-  assets/           窗口图标（PNG / ICO）+ 桌面入口
+  assets/           窗口图标（PNG / ICO）、桌面入口
+  assets/icons/     vendored 的 lucide 原始 SVG（运行时解析，不手抄路径）
   src/catalog.rs    读 core 的注册表 —— 界面认识节点的唯一途径
   src/graph.rs      画布 + 刀光 + 端口连线 + 右键菜单 + 卡片缩略图 + 参数控件 + 缩放控件
   src/geometry.rs   刀光的几何（贝塞尔采样 / 判交 / 切分），有测试
-  src/icons.rs      矢量图标（lucide 的原始路径数据）
+  src/icons.rs      图标：把 assets/icons/ 里的 lucide SVG 光栅化成贴图
   src/widgets.rs    自绘按钮与浮层外壳（实心 / 幽灵 / 主色 / 危险）
   src/library.rs    节点库浮层：分类 / 卡片 / 展开动画 / 拖出
   src/workspace.rs  工作流的存取：数据目录 / 当前是哪一份 / 未保存标记
@@ -175,8 +176,11 @@ app/                egui 界面
   右上角是「N 处问题 / 加载 / 保存（底下一颗未保存小蓝点）/ 运行」。底部居中一颗
   状态药丸，点开向上弹出运行记录。左下角一竖条缩放控件。
 - **颜色、圆角、阴影、字号**都收在 `theme.rs` 一处。
-- **图标**不引第三方图标库、也不打包位图字体：`icons.rs` 里直接用 lucide 的 24×24
-  原始路径现画，任意缩放都锐利。
+- **图标**不引第三方图标库、也不打包位图字体：图标是 vendored 在 `app/assets/icons/` 的
+  lucide 原始 SVG。`icons.rs` 把路径折成中心线，再按「到中心线的距离」光栅化成一张贴图
+  （按实际显示尺寸算、贴到物理像素网格、缓存起来；底色用 tint 染）。圆头端点、圆角连接、
+  抗锯齿都是这个距离场的自然结果，因此不受 epaint 固定像素羽化的影响，小尺寸也不会糊。
+  想加 / 换图标，把对应的 `.svg` 丢进去、在 `icons.rs` 里加一行即可。
 - **动画**：卡片悬停上浮 / 展开、浮层淡入淡出、连线被刀光扫到时搏动、断开时两截回缩、
   开关滑块位移、运行中的 spinner、未保存蓝点的渐显、节点库展开时盖住文字的翻转箭头。
 

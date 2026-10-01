@@ -58,10 +58,17 @@ const PREVIEW_H: f32 = 84.0;
 const CHECKER: f32 = 8.0;
 
 /// 运行痕迹各段的高度（流坐标）。
-const RUN_LINE_H: f32 = 14.0;
-const RUN_WARN_H: f32 = 14.0;
-const RUN_ERROR_H: f32 = 30.0;
 const RUN_ACTIONS_H: f32 = 30.0;
+/// 运行「提示」那一块：上下留白、图标的大小、图标与文字之间的缝、两条提示之间的缝。
+const NOTICE_PAD: f32 = 8.0;
+const NOTICE_ICON: f32 = 12.0;
+const NOTICE_GAP: f32 = 6.0;
+const NOTICE_STACK: f32 = 5.0;
+
+/// 提示文字能用的宽度（流坐标）—— 减掉图标那一截。
+fn notice_text_width() -> f32 {
+    NODE_W - 20.0 - NOTICE_ICON - NOTICE_GAP
+}
 
 /// 节点落到画布上时那段入场动画的时长。
 const ENTER_SECS: f64 = 0.34;
@@ -203,7 +210,24 @@ pub struct Graph {
     clipboard: Option<Node>,
     /// Ctrl+S：交给外壳去落盘。
     save_requested: bool,
+    /// 参数说明 / 运行提示的**折行结果**（流坐标），键是原文。
+    ///
+    /// 折行在缩放前就定死，画的时候只按 `zoom` 缩放 —— 否则每换一个字号就要
+    /// 重新折行，某些缩放下会多出一行，文字于是一跳一跳的。同时卡片高度也照着
+    /// 这个高度算，长说明不会把卡片撑出下边框。
+    notes: HashMap<String, TextBlock>,
 }
+
+/// 一段折好行的文字：每行文本、每行高度、总高。都在流坐标下（未乘缩放）。
+#[derive(Clone)]
+struct TextBlock {
+    lines: Vec<String>,
+    rows: Vec<f32>,
+    height: f32,
+}
+
+/// 说明 / 提示用的字号（流坐标）。
+const NOTE_FONT: f32 = 9.5;
 
 /// 按端口 id 找下标。认不出来就退回第一个 —— 老存档里可能存着已经删掉的端口。
 fn port_index(ports: &[Port], id: &str) -> usize {
@@ -302,12 +326,13 @@ impl Graph {
             entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
+            notes: HashMap::new(),
         }
     }
 
     /// 从节点库拖出来的节点落在哪儿：`screen` 是松手时的屏幕位置。`now` 用来做入场动画。
     pub fn add_node_at(&mut self, screen: Pos2, kind: &Kind, now: f64) {
-        let height = height_of(kind, &kind.defaults);
+        let height = height_of(kind, &kind.defaults, &self.notes);
         let pos = self.to_flow(screen) - egui::vec2(NODE_W, height) * 0.5;
         let mut node = Node {
             id: new_id(),
@@ -430,6 +455,7 @@ impl Graph {
             entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
+            notes: HashMap::new(),
         }
     }
 
@@ -454,7 +480,7 @@ impl Graph {
     fn flow_rect(&self, kinds: &[Kind], i: usize) -> Rect {
         Rect::from_min_size(
             self.nodes[i].pos,
-            egui::vec2(NODE_W, height_of_node(kinds, &self.nodes[i])),
+            egui::vec2(NODE_W, height_of_node(kinds, &self.nodes[i], &self.notes)),
         )
     }
 
@@ -524,6 +550,8 @@ impl Graph {
 
         // 先把这次的缩略图准备好 —— 卡片高度、预览绘制都要用到。
         self.sync_previews(ui.ctx(), report);
+        // 参数说明与运行提示先折好行、量好高 —— 卡片高度靠它，折行也靠它。
+        self.sync_notes(ui, kinds);
 
         self.handle_input(ui, &resp, kinds, now);
         self.advance(now);
@@ -711,8 +739,10 @@ impl Graph {
         }
         let mut bounds: Option<Rect> = None;
         for node in &self.nodes {
-            let rect =
-                Rect::from_min_size(node.pos, egui::vec2(NODE_W, height_of_node(kinds, node)));
+            let rect = Rect::from_min_size(
+                node.pos,
+                egui::vec2(NODE_W, height_of_node(kinds, node, &self.notes)),
+            );
             bounds = Some(match bounds {
                 Some(b) => b.union(rect),
                 None => rect,
@@ -1466,6 +1496,57 @@ impl Graph {
         std::mem::take(&mut self.save_requested)
     }
 
+    /// 量一遍所有参数说明的高度（流坐标）。
+    ///
+    /// 宽度固定（`NODE_W - 20`）、字号固定（9.5），所以按说明文本本身做键就够了 ——
+    /// 画的时候整体乘 `zoom`，和这里的值一一对应。说明是随节点类型静态不变的，
+    /// 量过的就不再算。
+    /// 把参数说明与运行提示都折好行、量好高（流坐标），缓存起来。
+    ///
+    /// 宽度、字号都固定（`NODE_W - 20` / 提示少一个图标的位置，`NOTE_FONT`），
+    /// 所以按文本本身做键就够了 —— 画的时候整体乘 `zoom`。折行在这里定死，
+    /// 缩放时不再重排，文字就不会跳。
+    fn sync_notes(&mut self, ui: &egui::Ui, kinds: &[Kind]) {
+        let painter = ui.painter();
+        for kind in kinds {
+            for param in &kind.params {
+                let Some(note) = &param.description else {
+                    continue;
+                };
+                if self.notes.contains_key(note) {
+                    continue;
+                }
+                let block = measure_block(painter, note, NODE_W - 20.0, theme::INK_3);
+                self.notes.insert(note.clone(), block);
+            }
+        }
+
+        // 运行提示也会折行，而且高度直接决定卡片多高 —— 同样量一遍。
+        // （它们比参数说明多占一个图标的位置，所以按窄一点的宽度量；
+        //  错误那一行没有图标，按整宽量。）
+        let mut warnings: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            let Some(run) = &node.run else { continue };
+            warnings.extend(run.warnings.iter().cloned());
+            errors.extend(run.error.iter().cloned());
+        }
+        for warning in warnings {
+            if self.notes.contains_key(&warning) {
+                continue;
+            }
+            let block = measure_block(painter, &warning, notice_text_width(), theme::INK_2);
+            self.notes.insert(warning, block);
+        }
+        for error in errors {
+            if self.notes.contains_key(&error) {
+                continue;
+            }
+            let block = measure_block(painter, &error, NODE_W - 20.0, theme::DANGER);
+            self.notes.insert(error, block);
+        }
+    }
+
     /// 把这次运行的缩略图传成纹理、并把运行痕迹贴到各节点上。
     ///
     /// 报告一换（`finished_at` 变了）就把旧纹理全丢掉重建 —— `TextureHandle`
@@ -1787,11 +1868,11 @@ impl Graph {
         // 注意这几行放到函数**最后**去画：端口要盖在卡片边线上，不能被它切一刀。
 
         // ---- 参数区底色（浅灰，圆底） ----
-        let (warn_h, error_h, actions_h) = run_extra(node);
+        let (warn_h, error_h, actions_h) = run_extra(node, &self.notes);
         // 参数区是不是最后一段 —— 是的话底角才收圆（且贴到卡片底部）。
-        let params_last = !params_following(node);
+        let params_last = !params_following(node, &self.notes);
         if let Some(kind) = kind_of(kinds, node) {
-            let ph = params_height(kind, &node.params);
+            let ph = params_height(kind, &node.params, &self.notes);
             if ph > 0.0 {
                 let top = r.top() + node_body_top(node) * z;
                 let rect =
@@ -1814,12 +1895,13 @@ impl Graph {
         }
 
         // ---- 参数区以下的几段 ----
-        let body_pad = if params_following(node) {
+        let body_pad = if params_following(node, &self.notes) {
             BODY_PAD
         } else {
             0.0
         };
-        let mut y = r.top() + (node_body_top(node) + params_height_of(kinds, node) + body_pad) * z;
+        let mut y = r.top()
+            + (node_body_top(node) + params_height_of(kinds, node, &self.notes) + body_pad) * z;
 
         if node.preview {
             if let Some(texture) = self.textures.get(&node.id) {
@@ -1836,20 +1918,42 @@ impl Graph {
             y += PREVIEW_H * z;
         }
 
-        let (warn_h, error_h, actions_h) = (warn_h, error_h, actions_h);
+        // ---- 运行提示 ----
+        // 不再是一排橙色的「!」，而是一块淡蓝底 + 信息图标 + 会折行的正文：
+        // 读完是「知道发生了什么」而不是「出事了」。
         if warn_h > 0.0 {
             if let Some(run) = &node.run {
-                for (n, warning) in run.warnings.iter().enumerate() {
-                    body.text(
-                        egui::pos2(
-                            r.left() + 10.0 * z,
-                            y + (RUN_WARN_H * 0.5 + n as f32 * RUN_LINE_H) * z,
-                        ),
-                        Align2::LEFT_CENTER,
-                        format!("! {warning}"),
-                        FontId::monospace(9.5 * z),
-                        theme::WARN,
+                let last = error_h == 0.0 && actions_h == 0.0;
+                let panel =
+                    Rect::from_min_size(egui::pos2(r.left(), y), egui::vec2(r.width(), warn_h * z));
+                painter.rect_filled(
+                    panel,
+                    CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: if last { theme::R_CARD } else { 0 },
+                        se: if last { theme::R_CARD } else { 0 },
+                    },
+                    theme::ACCENT_SOFT,
+                );
+                let mut ny = y + NOTICE_PAD * z;
+                for warning in &run.warnings {
+                    let icon = Rect::from_min_size(
+                        egui::pos2(r.left() + 10.0 * z, ny),
+                        egui::Vec2::splat(NOTICE_ICON * z),
                     );
+                    icons::info(&body, icon, theme::ACCENT);
+                    if let Some(block) = self.notes.get(warning) {
+                        draw_block(
+                            &body,
+                            block,
+                            z,
+                            icon.right() + NOTICE_GAP * z,
+                            ny,
+                            theme::INK_2,
+                        );
+                    }
+                    ny += (notice_height(warning, &self.notes) + NOTICE_STACK) * z;
                 }
             }
             y += warn_h * z;
@@ -1873,13 +1977,17 @@ impl Graph {
                         },
                         theme::DANGER_SOFT,
                     );
-                    body.text(
-                        egui::pos2(r.left() + 10.0 * z, y + error_h * 0.5 * z),
-                        Align2::LEFT_CENTER,
-                        error,
-                        FontId::monospace(9.5 * z),
-                        theme::DANGER,
-                    );
+                    // 错误也是会折行的 —— 同样按定死的折行画，不靠定值。
+                    if let Some(block) = self.notes.get(error) {
+                        draw_block(
+                            &body,
+                            block,
+                            z,
+                            r.left() + 10.0 * z,
+                            y + NOTICE_PAD * z,
+                            theme::DANGER,
+                        );
+                    }
                 }
             }
             y += error_h * z;
@@ -2191,15 +2299,10 @@ impl Graph {
             // 说明一行（自动折行）。
             if let Some(note) = &param.description {
                 y += PARAM_NOTE_GAP * zoom;
-                let galley = ui.painter().layout(
-                    note.clone(),
-                    FontId::monospace(9.5 * zoom),
-                    theme::INK_3,
-                    width,
-                );
-                ui.painter()
-                    .galley(egui::pos2(left, y), galley, theme::INK_3);
-                y += note_height(note, NODE_W - 20.0) * zoom;
+                if let Some(block) = self.notes.get(note) {
+                    draw_block(ui.painter(), block, zoom, left, y, theme::INK_3);
+                }
+                y += note_height(note, &self.notes) * zoom;
             }
 
             y += PARAM_GAP * zoom;
@@ -2209,11 +2312,11 @@ impl Graph {
 }
 
 /// 一个节点的完整高度（流坐标）。
-fn height_of_node(kinds: &[Kind], node: &Node) -> f32 {
-    let (warn, error, actions) = run_extra(node);
+fn height_of_node(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> f32 {
+    let (warn, error, actions) = run_extra(node, notes);
     node_body_top(node)
-        + params_height_of(kinds, node)
-        + if params_following(node) {
+        + params_height_of(kinds, node, notes)
+        + if params_following(node, notes) {
             BODY_PAD
         } else {
             0.0
@@ -2224,10 +2327,10 @@ fn height_of_node(kinds: &[Kind], node: &Node) -> f32 {
         + actions
 }
 
-/// 参数区后面还有没有别的段（缩略图 / 警告 / 错误 / 产物行）。
+/// 参数区后面还有没有别的段（缩略图 / 提示 / 错误 / 产物行）。
 /// 没有的话，参数区的圆底就贴到卡片底部，和卡片自己的圆角对齐。
-fn params_following(node: &Node) -> bool {
-    let (warn, error, actions) = run_extra(node);
+fn params_following(node: &Node, notes: &HashMap<String, TextBlock>) -> bool {
+    let (warn, error, actions) = run_extra(node, notes);
     node.preview || warn > 0.0 || error > 0.0 || actions > 0.0
 }
 
@@ -2237,20 +2340,28 @@ fn node_body_top(node: &Node) -> f32 {
     HEADER_H + rows * PORT_ROW_H
 }
 
-/// 运行痕迹那几段各占多高：`(警告, 错误, 产物操作行)`。
-fn run_extra(node: &Node) -> (f32, f32, f32) {
+/// 运行痕迹那几段各占多高：`(提示, 错误, 产物操作行)`。
+///
+/// 提示 / 错误都会折行，所以高度按实测的折行高度算 —— 否则长提示会被卡片的
+/// 下边框截掉（“图像压缩”运行后那行小结就是这么溢出的）。
+fn run_extra(node: &Node, notes: &HashMap<String, TextBlock>) -> (f32, f32, f32) {
     let Some(run) = &node.run else {
         return (0.0, 0.0, 0.0);
     };
     let warn = if run.warnings.is_empty() {
         0.0
     } else {
-        RUN_WARN_H + run.warnings.len() as f32 * RUN_LINE_H
+        NOTICE_PAD * 2.0
+            + run
+                .warnings
+                .iter()
+                .map(|warning| notice_height(warning, notes))
+                .sum::<f32>()
+            + (run.warnings.len() - 1) as f32 * NOTICE_STACK
     };
-    let error = if run.error.is_some() {
-        RUN_ERROR_H
-    } else {
-        0.0
+    let error = match &run.error {
+        Some(error) => NOTICE_PAD * 2.0 + note_height(error, notes),
+        None => 0.0,
     };
     let actions = if run.file.is_some() {
         RUN_ACTIONS_H
@@ -2260,21 +2371,20 @@ fn run_extra(node: &Node) -> (f32, f32, f32) {
     (warn, error, actions)
 }
 
-fn height_of(kind: &Kind, params: &Params) -> f32 {
+fn height_of(kind: &Kind, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
     let rows = kind.inputs.len().max(kind.outputs.len()).max(1) as f32;
-    HEADER_H + rows * PORT_ROW_H + BODY_PAD + params_height(kind, params)
+    HEADER_H + rows * PORT_ROW_H + BODY_PAD + params_height(kind, params, notes)
 }
 
 /// 参数区占多高。被 `visible_when` 藏掉的不占地方。
-fn params_height(kind: &Kind, params: &Params) -> f32 {
-    let width = NODE_W - 20.0;
+fn params_height(kind: &Kind, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
     let showing: Vec<&Param> = kind.params.iter().filter(|p| p.visible(params)).collect();
     if showing.is_empty() {
         return 0.0;
     }
     let blocks: f32 = showing
         .iter()
-        .map(|param| param_block_height(param, params, width))
+        .map(|param| param_block_height(param, params, notes))
         .sum();
     let gaps = (showing.len() - 1) as f32 * PARAM_GAP;
     PARAMS_GAP + blocks + gaps + PARAMS_BOTTOM
@@ -2286,11 +2396,67 @@ fn multiline_height(text: &str) -> f32 {
     (lines * PARAM_TEXT_LINE + 10.0).max(PARAM_TEXT_ROW_H)
 }
 
-/// 一句参数说明大概占多高（稍微往高了估，宁可多留白也不重叠）。
-fn note_height(note: &str, width: f32) -> f32 {
-    let per_line = (width / 8.0).max(6.0);
-    let lines = (note.chars().count() as f32 / per_line).ceil().max(1.0);
-    lines * 14.0
+/// 一段会折行的文字的**总高**（流坐标）。优先用实测值（`sync_notes` 量的）；
+/// 还没量到（比如刚从节点库拖出来的那一帧）就退回一个粗略估计。
+fn wrapped_height(text: &str, width: f32, notes: &HashMap<String, TextBlock>) -> f32 {
+    notes
+        .get(text)
+        .map(|block| block.height)
+        .unwrap_or_else(|| estimate_wrapped_height(text, width))
+}
+
+/// 一句参数说明占多高（整宽）。
+fn note_height(note: &str, notes: &HashMap<String, TextBlock>) -> f32 {
+    wrapped_height(note, NODE_W - 20.0, notes)
+}
+
+/// 一条运行提示占多高（要减掉前面那个图标）。
+fn notice_height(note: &str, notes: &HashMap<String, TextBlock>) -> f32 {
+    wrapped_height(note, notice_text_width(), notes)
+}
+
+/// 按固定字号、给定宽度折好行，量出行高与总高。
+fn measure_block(painter: &egui::Painter, text: &str, width: f32, color: Color32) -> TextBlock {
+    let galley = painter.layout(text.to_owned(), FontId::monospace(NOTE_FONT), color, width);
+    TextBlock {
+        lines: galley.rows.iter().map(|row| row.text()).collect(),
+        rows: galley.rows.iter().map(|row| row.rect().height()).collect(),
+        height: galley.size().y,
+    }
+}
+
+/// 画一段折好的文字：逐行按 `zoom` 缩放，不再重新折行（位置与预留高度完全一致）。
+fn draw_block(
+    painter: &egui::Painter,
+    block: &TextBlock,
+    zoom: f32,
+    x: f32,
+    y: f32,
+    color: Color32,
+) {
+    let mut yy = y;
+    for (line, row) in block.lines.iter().zip(&block.rows) {
+        let galley =
+            painter.layout_no_wrap(line.clone(), FontId::monospace(NOTE_FONT * zoom), color);
+        painter.galley(egui::pos2(x, yy), galley, color);
+        yy += row * zoom;
+    }
+}
+
+/// 粗略估计：汉字按约 9.6px、半角按约 5.7px 估宽，再按可用宽度折行。
+fn estimate_wrapped_height(text: &str, width: f32) -> f32 {
+    let mut lines = 1.0f32;
+    let mut used = 0.0f32;
+    for ch in text.chars() {
+        let w = if ch.is_ascii() { 5.7 } else { 9.6 };
+        if used > 0.0 && used + w > width {
+            lines += 1.0;
+            used = 0.0;
+        }
+        used += w;
+    }
+    // 行高取彮：与实测（9.5px 等宽约 13px 一行）对齐。
+    lines * 13.0
 }
 
 /// 这个参数的控件占多高（流坐标）。
@@ -2308,21 +2474,21 @@ fn control_height(param: &Param, params: &Params) -> f32 {
 }
 
 /// 一个参数（标签 + 控件 + 说明）一共占多高。
-fn param_block_height(param: &Param, params: &Params, width: f32) -> f32 {
+fn param_block_height(param: &Param, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
     let control = control_height(param, params);
     if matches!(param.control, Control::Bool) {
         return control.max(PARAM_LABEL_H);
     }
     let mut height = PARAM_LABEL_H + PARAM_LABEL_GAP + control;
     if let Some(note) = &param.description {
-        height += PARAM_NOTE_GAP + note_height(note, width);
+        height += PARAM_NOTE_GAP + note_height(note, notes);
     }
     height
 }
 
-fn params_height_of(kinds: &[Kind], node: &Node) -> f32 {
+fn params_height_of(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> f32 {
     match kind_of(kinds, node) {
-        Some(kind) => params_height(kind, &node.params),
+        Some(kind) => params_height(kind, &node.params, notes),
         None => 0.0,
     }
 }
@@ -2716,10 +2882,13 @@ fn toggle(ui: &mut egui::Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool
     }
     let t = ui.ctx().animate_bool_with_time(id, *value, 0.16);
 
-    let height = (rect.height() * 0.6).clamp(11.0, 18.0);
+    // 轨道高矮跟着行高（`rect` 已经乘过缩放）走，不再夹到固定像素 ——
+    // 否则缩放时开关不跟着变大变小。
+    // 右缘对齐到 `rect` 的右缘 —— 与同一列的下拉框 / 输入框居右对齐。
+    let height = rect.height() * 0.8;
     let width = (height * 1.8).min(rect.width());
-    let track = Rect::from_center_size(
-        egui::pos2(rect.left() + width * 0.5, rect.center().y),
+    let track = Rect::from_min_size(
+        egui::pos2(rect.right() - width, rect.center().y - height * 0.5),
         egui::vec2(width, height),
     );
     let radius = CornerRadius::same((height * 0.5) as u8);
@@ -2741,9 +2910,11 @@ fn toggle(ui: &mut egui::Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool
     );
     painter.rect_stroke(track, radius, Stroke::new(1.0, accent), StrokeKind::Inside);
 
-    let dot = height * 0.5 - 2.0;
-    let travel = (track.width() - 2.0 * (dot + 2.0)).max(0.0);
-    let x = track.left() + dot + 2.0 + travel * t;
+    // 圆点和边距也跟着高度走，不然缩放时圆点比例会跑掉。
+    let pad = height * 0.15;
+    let dot = height * 0.5 - pad;
+    let travel = (track.width() - 2.0 * (dot + pad)).max(0.0);
+    let x = track.left() + dot + pad + travel * t;
     painter.circle_filled(egui::pos2(x, track.center().y), dot, theme::SURFACE);
 
     changed
@@ -2877,6 +3048,21 @@ fn dashed_rect(painter: &egui::Painter, rect: Rect, zoom: f32, color: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 汉字说明不能按「字符数 ÷ 固定值」估 —— 那样一条 20 多字的说明会被估成一行，
+    /// 卡片就不够高、把说明截出下边框（“图像压缩”的“元数据”就是这么溢出的）。
+    #[test]
+    fn a_cjk_note_is_estimated_as_multiple_lines() {
+        let note = "ICC 这类影响颜色显示的默认留着，不当垃圾删。";
+        assert!(
+            estimate_wrapped_height(note, NODE_W - 20.0) >= 26.0,
+            "汉字说明该被估成两行以上，实际 {}（{:?}）",
+            estimate_wrapped_height(note, NODE_W - 20.0),
+            note,
+        );
+        // 短的半角说明仍是一行。
+        assert!(estimate_wrapped_height("越大越慢越小。", NODE_W - 20.0) < 26.0);
+    }
 
     /// 换目标格式之后，节点的输出端口必须跟着变。
     ///
@@ -3020,6 +3206,7 @@ mod tests {
             entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
+            notes: HashMap::new(),
         }
     }
 
