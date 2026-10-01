@@ -1,0 +1,16 @@
+# 工作区：`core/` 是纯逻辑，`app/` 是 egui 界面。
+[workspace]
+resolver = "2"
+members = ["core", "app"]
+
+# egui 的应用是每帧重绘的：依赖用 O3 编译，自己用 O1，dev 下才不至于卡。
+# 注意 profile 只有工作区根的这一份算数，成员清单里写会被忽略。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+# 去掉调试符号：一个完整的 wgpu 栈静态链进来之后，这部分占的份额不小。
+strip = true

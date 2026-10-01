@@ -23,17 +23,16 @@
 
 ## 跑起来
 
-需要 Rust 1.90+、Node 18+，以及 Tauri 在各平台的前置依赖
-（Linux 上是 `webkit2gtk-4.1`、`libgtk-3-dev`、`libsoup-3.0-dev` 等）。
+需要 Rust 1.90+ 和一个能跑 egui/wgpu 的图形环境。没有 Node、也不依赖 WebView ——
+界面是纯 Rust（egui + wgpu）画的。
 
 ```sh
-npm install
-npm run tauri dev            # 开发
-npm run tauri build          # 打包
-
-npm test                     # 前端：类型检查 + 单元测试
-cd src-tauri && cargo test   # 后端（要先 npm run build 一次）
+cargo run --release -p starrytools-app   # 直接跑
+cargo test                               # 全部测试（core + app）
+cargo clippy --all-targets               # 静态检查
 ```
+
+打包（桌面入口、图标、安装包）见[开发](docs/development.md#打包)。
 
 ## 文档
 
@@ -46,7 +45,7 @@ cd src-tauri && cargo test   # 后端（要先 npm run build 一次）
 | [界面与交互](docs/interface.md) | 画布、节点库、右键划刀、参数控件 |
 | [配色与样式](docs/theme.md) | 一套 token、类型颜色、组件层的取舍 |
 | [无损 PNG 优化](docs/png-optimization.md) | 「图像压缩」无损模式的内核 |
-| [开发](docs/development.md) | 数据放在哪、怎么加一个新工具、代码结构 |
+| [开发](docs/development.md) | 数据放在哪、怎么加一个新工具、代码结构、打包 |
 
 ## 东西放在哪
 

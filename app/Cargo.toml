@@ -1,0 +1,41 @@
+[package]
+name = "starrytools-app"
+version = "0.1.0"
+description = "StarryTools 的界面：纯 Rust（egui），不依赖 WebView"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "starrytools"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+# 只为了把窗口图标（PNG）解成 egui 要的 RGBA。
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# 类型系统、节点定义、执行引擎、PNG 优化。界面不认识任何具体工具，
+# 只渲染这份元数据 —— 所以加新节点不用改这里的代码。
+starrytools-core = { path = "../core" }
+serde_json = "1"
+# 原生文件 / 目录选择框。
+rfd = "0.17"
+# 数据目录。
+dirs = "7"
+uuid = { version = "1", features = ["v4"] }
+# 在文件管理器里定位目录。
+open = "5"
+
+# 安装包用的元数据：图标、分类、名字。`cargo bundle` 等打包工具会读它。
+# macOS 还需要一个 .icns（生成后加进 icon 列表）。
+[package.metadata.bundle]
+name = "StarryTools"
+identifier = "com.falsw.starrytools"
+icon = ["assets/icon.png", "assets/32x32.png", "assets/128x128.png", "assets/icon.ico"]
+category = "public.app-category.graphics-design"
+short_description = "节点式的小工具集合，面向像素画与游戏素材"
+
+[dev-dependencies]
+# 只为了在测试里直接解析字体文件，验证中文回退真的能出汉字字形。
+ab_glyph = "0.2"

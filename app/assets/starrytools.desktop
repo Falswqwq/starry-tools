@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=StarryTools
+GenericName=节点式图像工具箱
+Comment=节点式的小工具集合，面向像素画与游戏素材
+Exec=starrytools
+Icon=starrytools
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=image;pixel;art;node;workflow;
+StartupNotify=true

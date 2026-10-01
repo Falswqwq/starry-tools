@@ -43,10 +43,10 @@ TGA / PNM）。选完之后节点上会显示缩略图、尺寸、格式和体�
 
 ## 实现
 
-`src-tauri/src/nodes/input.rs`。
+`core/src/nodes/input.rs`。
 
 三个用 `NodeSpec::dynamic` 的节点之一（另外两个是「图像格式转换」和「图像压缩」）：
-端口类型在解析工作流时由 `output_ports(params)` 现算，前端拿到的就是算好的结果。
+端口类型在解析工作流时由 `output_ports(params)` 现算，界面拿到的就是算好的结果。
 
 `run` 里只做一件小事：按「类型」造一个 `Value`。图像走 `ImageValue::open`，它**只读字节、
 不解码** —— 解码推迟到真有节点要看像素的时候。节点之间传递图像因此只是复制一个 `Arc`。

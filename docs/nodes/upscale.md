@@ -41,7 +41,7 @@
 
 ## 实现
 
-`src-tauri/src/nodes/upscale.rs`，`NodeSpec::fixed`。解码 → `resize_exact` → 编 PNG，
+`core/src/nodes/upscale.rs`，`NodeSpec::fixed`。解码 → `resize_exact` → 编 PNG，
 插值算法映射到 `image::imageops::FilterType`。上限是文件里的 `MAX_OUTPUT_PIXELS`。
 
 测试：`engine::tests::upscale_keeps_pixels_crisp_with_nearest_neighbour` ——

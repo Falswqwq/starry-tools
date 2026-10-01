@@ -3,7 +3,7 @@
 「图像压缩」的无损模式不是「重新编码一次 PNG」，而是把能同时满足**像素一个都不变**的
 选择都试一遍，最后留最小的那一份。
 
-实现在 `src-tauri/src/png_opt/`（`mod.rs` + `tests.rs`）。
+实现在 `core/src/png_opt/`（`mod.rs` + `tests.rs`）。
 
 ```rust
 pub enum Scheme { Fast, Balanced, Maximum, Zopfli }
@@ -101,13 +101,13 @@ PNG 的块结构很好拆（长度 + 类型 + 数据 + CRC），所以这里自�
 
 ## 有损那条路
 
-量化在 `src-tauri/src/png_quant.rs`，用最经典的中位切分（4 维含 alpha 一起切）。
+量化在 `core/src/png_quant.rs`，用最经典的中位切分（4 维含 alpha 一起切）。
 它**只在「有损」模式里用**，和无损这条完全分开。量化完那张图会再交给 `png_opt` 去编码 ——
 颜色一少，索引色编码自己就会被选中。详见[图像压缩](nodes/compress.md)。
 
 ## 测试
 
-`src-tauri/src/png_opt/tests.rs`。每条都盯着同一个底线：**优化完的像素必须和原来一模一样**
+`core/src/png_opt/tests.rs`。每条都盯着同一个底线：**优化完的像素必须和原来一模一样**
 （测试里的 `run()` 帮手顺手就断言了这一点）。
 
 | 用例 | 盯什么 |

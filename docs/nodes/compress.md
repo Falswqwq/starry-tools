@@ -66,10 +66,10 @@
 
 ## 实现
 
-`src-tauri/src/nodes/compress.rs` 是外壳，干活的在两个模块：
+`core/src/nodes/compress.rs` 是外壳，干活的在两个模块：
 
-- `src-tauri/src/png_opt/` —— 无损优化管线，见[无损 PNG 优化](../png-optimization.md)；
-- `src-tauri/src/png_quant.rs` —— 中位切分量化。量化完那张图会**再交给** `png_opt`
+- `core/src/png_opt/` —— 无损优化管线，见[无损 PNG 优化](../png-optimization.md)；
+- `core/src/png_quant.rs` —— 中位切分量化。量化完那张图会**再交给** `png_opt`
   去编码，因为颜色一少，索引色编码自己就会被选中。
 
 结果（原大小 → 新大小、节省比例、选中的方案）会写进节点的提示里，在底部运行记录里看得到。

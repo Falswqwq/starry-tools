@@ -34,7 +34,7 @@
 
 ## 实现
 
-`src-tauri/src/nodes/rename.rs`，`NodeSpec::fixed`。名字不是存在图像里的，而是包在值外面：
+`core/src/nodes/rename.rs`，`NodeSpec::fixed`。名字不是存在图像里的，而是包在值外面：
 
 ```rust
 enum Value {

@@ -1,0 +1,38 @@
+[package]
+name = "starrytools-core"
+version = "0.1.0"
+description = "StarryTools 的核心：类型系统、节点定义、执行引擎、PNG 优化"
+authors = ["falsw"]
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[lib]
+name = "starrytools_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+# PNG 无损优化直接用到这几样（都是 image 已经带进来的同一份，不额外拉版本）：
+# png 负责写容器与逐行 filter，flate2 用来在 zopfli 重压缩前解开 IDAT，
+# crc32fast 给自己拼的块算 CRC，zopfli 只在「极限」档用。
+png = "0.18"
+flate2 = "1"
+crc32fast = "1"
+zopfli = "0.8"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "tiff",
+    "ico",
+    "qoi",
+    "tga",
+    "pnm",
+    "rayon",
+] }

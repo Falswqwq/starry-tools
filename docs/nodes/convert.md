@@ -41,7 +41,7 @@
 
 ## 实现
 
-`src-tauri/src/nodes/convert.rs`，用 `NodeSpec::dynamic`。
+`core/src/nodes/convert.rs`，用 `NodeSpec::dynamic`。
 
 `output_ports` 从参数里读「目标格式」再拼端口；`run` 里解码 →（可选）换色彩模式 → 编码。
 透传色彩模式时只复制一个 `Arc`，不复制像素。

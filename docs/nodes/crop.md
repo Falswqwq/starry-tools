@@ -42,7 +42,7 @@
 
 ## 实现
 
-`src-tauri/src/nodes/crop.rs`，`NodeSpec::fixed`。
+`core/src/nodes/crop.rs`，`NodeSpec::fixed`。
 
 裁切矩形由一个 `(x, y, 宽, 高)` 元组算出来，再统一交给 `image::DynamicImage::crop_imm`。
 锚点在 `anchored()` 里用两个 0 / 0.5 / 1 的分数表示 —— 左上角是 `(0, 0)`，右下角是 `(1, 1)`，
