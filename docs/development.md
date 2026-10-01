@@ -23,6 +23,11 @@ cargo clippy --all-targets               # 静态检查
 | --- | --- |
 | 工作流（一个一份 JSON） | `<应用数据目录>/com.falsw.starrytools/workflows/` |
 | 运行产物 | `<应用数据目录>/com.falsw.starrytools/outputs/<工作流名>/` |
+| 下载的 ONNX 模型 | `<应用数据目录>/com.falsw.starrytools/models/` |
+| 应用设置（帧率上限、显示 fps） | `<应用数据目录>/com.falsw.starrytools/settings.json` |
+
+设置和工作流存档**分开放**：设置是「影响运行方式」的，不随工作流走，也不进存档。
+模型的下载与推理见[背景移除](nodes/background_removal.md) —— 模型不带在应用里，用时才下。
 
 应用数据目录在 Linux 上是 `~/.local/share/`，macOS 上是 `~/Library/Application Support/`，
 Windows 上是 `%APPDATA%\`。界面上「工作流 → 打开存放目录」可以直接跳过去。
@@ -123,6 +128,10 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
   后面还可以 `.and_visible_when("lossyFormat", &["palette"])` 加一条「而且」。
 - **输出端口类型依赖参数**时用 `NodeSpec::dynamic(kind, resolve_outputs, run)`
   （「读取」「输入框」「图像格式转换」「图像压缩」就是这么做的），别在 `fixed` 里写死。
+- **停下来问用户的节点**用 `NodeSpec::fixed(..).interactive(fn)` 声明，`fn(params) -> bool`
+  说清哪些参数下它会拦住运行（画布画成紫色）。运行里用 `args.ask(InteractionKind::..)`
+  发请求、阻塞等答复；没有界面时会返回 `NodeError` 而不是 panic。见
+  [紫色节点](interface.md#紫色阻塞节点) 与 `core/src/interaction.rs`。
 - **别在节点里 panic。** 出错就返回 `NodeError`，它会按节点归类写进运行报告。
 
 ### 节点 id 与老存档

@@ -6,6 +6,7 @@
 //! 这个界面会自动长出对应的卡片、节点和参数控件。
 
 use serde_json::Value;
+use starrytools_core::bg_model;
 use starrytools_core::model::node_kind::{ParamDef, ParamSpec, PortDef};
 use starrytools_core::model::params::Params;
 use starrytools_core::model::port_type::PortType;
@@ -63,6 +64,7 @@ pub enum Control {
     Slider {
         min: f64,
         max: f64,
+        #[allow(dead_code)]
         step: f64,
         integer: bool,
         unit: Option<String>,
@@ -74,6 +76,8 @@ pub enum Control {
     Select {
         options: Vec<Choice>,
     },
+    /// 通用取色器：收起时是一条色条，点开选颜色。
+    Color,
     Bool,
     File {
         dialog_title: String,
@@ -169,6 +173,7 @@ impl Param {
                     .collect::<Vec<_>>()
                     .join(" / ")
             ),
+            Control::Color => "颜色".to_string(),
             Control::Bool => "开关".to_string(),
             Control::DropZone => "拖入文件 / 粘贴 / 打字".to_string(),
             Control::File {
@@ -200,8 +205,33 @@ pub struct Kind {
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
     pub params: Vec<Param>,
+    /// 用默认参数时会不会拦住运行（紫色节点）。节点库卡片据此标注。
+    pub interactive: bool,
+    /// 这个节点要一个**得下载的模型**才能跑时，那个「模型」参数的 id（见 [`Kind::model`]）。
+    pub model_param: Option<String>,
     /// 新建节点时用的初始参数，免得在界面里再抄一遍默认值。
     pub defaults: Params,
+}
+
+impl Kind {
+    /// 这个节点当前选中的模型。没有「模型」参数、或参数指向一个不认识的 id 时返回 `None`。
+    pub fn model(&self, params: &Params) -> Option<&'static bg_model::Model> {
+        let param = self.model_param.as_deref()?;
+        let id = params
+            .get(param)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| bg_model::default_model().id);
+        bg_model::find(id)
+    }
+
+    /// 本地还没有这个节点要的模型吗 —— 界面据此把整个节点禁用、挂一个下载面板。
+    /// 需要模型但参数指向一个不认识的 id 时也算「缺」——那样才拦得住运行。
+    pub fn model_missing(&self, params: &Params) -> bool {
+        self.model_param.is_some()
+            && self
+                .model(params)
+                .is_none_or(|model| !bg_model::is_downloaded(model.id))
+    }
 }
 
 /// 全部内置工具，顺序就是 `registry.rs` 里的登记顺序。
@@ -220,6 +250,8 @@ pub fn all() -> Vec<Kind> {
                 inputs: ports(&kind.inputs),
                 outputs: ports(&kind.outputs),
                 params: kind.params.iter().map(param).collect(),
+                interactive: info.interactive,
+                model_param: info.model_param,
                 defaults: info.defaults,
             }
         })
@@ -243,6 +275,13 @@ pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<Port>, Vec<Port>) {
         ),
         None => (Vec::new(), Vec::new()),
     }
+}
+
+/// 某个节点实例在**当前参数**下会不会拦住运行（紫色节点）。
+///
+/// 和端口一样，这件事跟着参数走 —— 「图像裁切」切到形状模式才变紫。
+pub fn is_interactive(kind_id: &str, params: &Params) -> bool {
+    registry().is_interactive(kind_id, params)
 }
 
 /// 这个节点有没有「输入区」（`DropZone`）控件。有的话它自己就把值摆出来了 ——
@@ -320,15 +359,9 @@ fn param(def: &ParamDef) -> Param {
             placeholder: placeholder.clone(),
         },
         ParamSpec::Select { options, .. } => Control::Select {
-            options: options
-                .iter()
-                .map(|option| Choice {
-                    value: option.value.clone(),
-                    label: option.label.clone(),
-                    hint: option.hint.clone(),
-                })
-                .collect(),
+            options: options.iter().map(choice).collect(),
         },
+        ParamSpec::Color { .. } => Control::Color,
         ParamSpec::Bool { .. } => Control::Bool,
         ParamSpec::DropZone => Control::DropZone,
         ParamSpec::File {
@@ -349,6 +382,14 @@ fn param(def: &ParamDef) -> Param {
         description: def.description.clone(),
         control,
         visible_when: def.visible_when.as_ref().map(visible_when),
+    }
+}
+
+fn choice(option: &starrytools_core::model::node_kind::SelectOption) -> Choice {
+    Choice {
+        value: option.value.clone(),
+        label: option.label.clone(),
+        hint: option.hint.clone(),
     }
 }
 

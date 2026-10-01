@@ -49,6 +49,42 @@ pub fn quantize(image: &DynamicImage, colors: usize) -> DynamicImage {
     DynamicImage::ImageRgba8(out)
 }
 
+/// 提取图像的**代表色**（中位切分），按占的像素数从多到少。不动图像本身。
+///
+/// 全透明的像素不算颜色；返回的是 RGB（丢掉 alpha），带 alpha 的图也按 RGB 归类。
+/// 颜色本来就不多于 `colors` 时会原样列出，不会硬凑。
+pub fn representative_colors(image: &DynamicImage, colors: usize) -> Vec<[u8; 3]> {
+    let target = colors.clamp(2, 256);
+    let rgba = image.to_rgba8();
+
+    let mut counts: HashMap<[u8; 4], u32> = HashMap::new();
+    for pixel in rgba.pixels() {
+        if pixel.0[3] == 0 {
+            continue;
+        }
+        *counts.entry(pixel.0).or_insert(0) += 1;
+    }
+    if counts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut points: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+    // 排一下序，保证同样的输入每次得到同样的调色板。
+    points.sort_unstable();
+
+    let mut colors: Vec<([u8; 3], u64)> = median_cut(points, target)
+        .iter()
+        .map(|bucket| {
+            let weight: u64 = bucket.iter().map(|(_, count)| u64::from(*count)).sum();
+            let [r, g, b, _] = average(bucket);
+            ([r, g, b], weight)
+        })
+        .collect();
+    // 出现得多的排前面。
+    colors.sort_by_key(|(_, weight)| std::cmp::Reverse(*weight));
+    colors.into_iter().map(|(color, _)| color).collect()
+}
+
 /// 反复切盒子，直到切够 `target` 个。
 fn median_cut(mut points: Vec<([u8; 4], u32)>, target: usize) -> Vec<Vec<([u8; 4], u32)>> {
     let mut buckets = vec![points.split_off(0)];

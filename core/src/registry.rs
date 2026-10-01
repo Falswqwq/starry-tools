@@ -13,10 +13,20 @@ use crate::nodes;
 
 pub type RunFn = fn(&mut NodeArgs<'_>) -> Result<ValueMap, NodeError>;
 
+/// 这个节点在给定参数下会不会「拦住」运行、等用户操作（紫色节点）。
+///
+/// 大多数节点恒为 `false`；「图像裁切」只有切到形状模式才会变成紫色。
+pub type InteractiveFn = fn(&Params) -> bool;
+
 pub struct NodeSpec {
     pub kind: NodeKind,
     /// 输出端口的现算函数。`None` 表示端口类型写死在 `kind.outputs` 里。
     pub resolve_outputs: Option<ResolveOutputsFn>,
+    /// 会不会拦住运行等用户操作。`None` 表示永远不会。
+    pub interactive: Option<InteractiveFn>,
+    /// 需要某个**得下载的模型**才能跑时，那个「模型」参数的 id。
+    /// 界面据此在模型缺失时把节点整个禁用、挂一个下载按钮。
+    pub model_param: Option<&'static str>,
     pub run: RunFn,
 }
 
@@ -25,6 +35,8 @@ impl NodeSpec {
         Self {
             kind,
             resolve_outputs: None,
+            interactive: None,
+            model_param: None,
             run,
         }
     }
@@ -33,8 +45,27 @@ impl NodeSpec {
         Self {
             kind,
             resolve_outputs: Some(resolve_outputs),
+            interactive: None,
+            model_param: None,
             run,
         }
+    }
+
+    /// 声明这个节点需要一个要下载的模型；`param` 是那个「模型」参数的 id。
+    pub fn needs_model(mut self, param: &'static str) -> Self {
+        self.model_param = Some(param);
+        self
+    }
+
+    /// 声明这个节点在某些参数下会拦住运行，等用户操作。
+    pub fn interactive(mut self, is_interactive: InteractiveFn) -> Self {
+        self.interactive = Some(is_interactive);
+        self
+    }
+
+    /// 现在这个参数下，它会不会拦住运行。
+    pub fn is_interactive(&self, params: &Params) -> bool {
+        self.interactive.is_some_and(|is| is(params))
     }
 
     /// 这个节点在给定参数下的输出端口。
@@ -78,6 +109,12 @@ impl Registry {
         &self.specs
     }
 
+    /// 某个节点实例在给定参数下会不会拦住运行（画布据此决定边线画不画成紫色）。
+    pub fn is_interactive(&self, kind_id: &str, params: &Params) -> bool {
+        self.get(kind_id)
+            .is_some_and(|spec| spec.is_interactive(params))
+    }
+
     /// 交给前端的工具清单。
     ///
     /// 端口发的是**声明里的样子**（静态的）—— 节点库卡片是个**模板**：动态输出的节点
@@ -86,9 +123,14 @@ impl Registry {
     pub fn kinds(&self) -> Vec<NodeKindInfo> {
         self.specs
             .iter()
-            .map(|spec| NodeKindInfo {
-                kind: spec.kind.clone(),
-                defaults: spec.kind.default_params(),
+            .map(|spec| {
+                let defaults = spec.kind.default_params();
+                NodeKindInfo {
+                    kind: spec.kind.clone(),
+                    interactive: spec.is_interactive(&defaults),
+                    model_param: spec.model_param.map(str::to_string),
+                    defaults,
+                }
             })
             .collect()
     }
@@ -103,7 +145,12 @@ fn builtin_specs() -> Vec<NodeSpec> {
         nodes::literal::bool_spec(),
         nodes::convert::spec(),
         nodes::compress::spec(),
+        nodes::border::spec(),
+        nodes::remove_color::spec(),
+        nodes::background_removal::spec(),
+        nodes::palette::spec(),
         nodes::crop::spec(),
+        nodes::transform::spec(),
         nodes::upscale::spec(),
         nodes::rename::spec(),
         nodes::save::spec(),

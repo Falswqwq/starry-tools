@@ -6,14 +6,11 @@
 use std::path::PathBuf;
 
 use starrytools_core::model::workflow::{NodeInstance, Position, Workflow, WorkflowSummary};
+use starrytools_core::paths;
 use starrytools_core::storage::Storage;
 
 use crate::catalog::Kind;
 use crate::graph::Graph;
-
-/// 应用标识。它决定了数据目录，**不要改** —— 改了等于换一个目录，
-/// 用户之前保存的工作流会看起来凭空丢了。
-const IDENTIFIER: &str = "com.falsw.starrytools";
 
 pub struct Workspace {
     storage: Storage,
@@ -136,11 +133,10 @@ impl Workspace {
     }
 }
 
-/// 数据根目录。单独抽出来是为了能测。
-fn data_root() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(IDENTIFIER)
+/// 数据根目录。**唯一的一处定义在 `starrytools_core::paths`** —— 工作流、产物、
+/// 模型、设置都放在同一个根下。这里只是给它起个短名字方便调用。
+pub fn data_root() -> PathBuf {
+    paths::data_root()
 }
 
 /// 一份新的空工作流：只有一个「读取」节点（所有工作流都从它开始）。
@@ -167,8 +163,8 @@ mod tests {
     /// 用户之前保存的工作流会看起来凭空丢了。
     #[test]
     fn the_data_directory_is_stable() {
-        assert!(data_root().ends_with(IDENTIFIER));
-        assert_eq!(IDENTIFIER, "com.falsw.starrytools");
+        assert!(data_root().ends_with(paths::IDENTIFIER));
+        assert_eq!(paths::IDENTIFIER, "com.falsw.starrytools");
     }
 
     /// 新建的工作流自带一个「读取」节点 —— 所有工作流都从它开始。

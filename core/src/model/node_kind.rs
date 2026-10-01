@@ -155,6 +155,13 @@ pub enum ParamSpec {
     /// 值是一个 JSON：空字符串 = 还没输入；字符串 = 文本；`{"file": "路径"}` = 一个文件。
     /// 具体长什么样、怎么交互由前端决定（见 `app` 里的 `draw_drop_zone`）。
     DropZone,
+    /// 颜色：一个**通用取色器**（前端画成一条色条，点开是取色区 + 色相条 + R/G/B + Hex）。
+    ///
+    /// 值是一个字符串 —— `#rrggbb` / `#rrggbbaa`；`transparent` 表示全透明（向后兼容）。
+    /// 以后任何节点想要个颜色，声明一个 `Color` 参数就行。
+    Color {
+        default: String,
+    },
 }
 
 fn is_false(value: &bool) -> bool {
@@ -175,6 +182,9 @@ impl ParamSpec {
             ParamSpec::Text { .. } => Some(PortType::Text),
             ParamSpec::Bool { .. } => Some(PortType::Bool),
             ParamSpec::File { .. } => Some(PortType::Text),
+            // 颜色可以接一段**色板文本**（hex，每行一个）过来 —— 接上就取第一种颜色。
+            ParamSpec::Color { .. } => Some(PortType::Text),
+            // 下拉框的合法值是一张固定的表，随便接一段文字进来只会静默出错。
             ParamSpec::Select { .. } => None,
             // 输入区是个「源头」，没有上游可接。
             ParamSpec::DropZone => None,
@@ -337,6 +347,7 @@ impl NodeKind {
                 ParamSpec::Select { default, .. } => serde_json::json!(default),
                 ParamSpec::Bool { default } => serde_json::json!(default),
                 ParamSpec::File { default, .. } => serde_json::json!(default),
+                ParamSpec::Color { default, .. } => serde_json::json!(default),
                 // 输入区默认空着。
                 ParamSpec::DropZone => serde_json::json!(""),
             };
@@ -352,5 +363,12 @@ impl NodeKind {
 pub struct NodeKindInfo {
     #[serde(flatten)]
     pub kind: NodeKind,
+    /// 用默认参数时会不会拦住运行（紫色节点）。节点库卡片据此标注。
+    pub interactive: bool,
+    /// 这个节点要一个**得下载的模型**才能跑时，给出那个「模型」参数的 id。
+    ///
+    /// 界面据此：模型不在本地就把整个节点禁用，并在卡片上挂一个下载按钮。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_param: Option<String>,
     pub defaults: Params,
 }

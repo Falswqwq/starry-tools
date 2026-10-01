@@ -38,6 +38,8 @@ enum Kind {
     Idle,
     Info,
     Error,
+    /// 紫色节点拦住了运行，在等用户操作。
+    Waiting,
 }
 
 impl Report {
@@ -193,6 +195,14 @@ impl Report {
     }
 
     fn status(&self, runner: &Runner, running: bool, report: Option<&RunReport>) -> Status {
+        if let Some(waiting) = runner.waiting() {
+            return Status {
+                text: format!("等待「{}」操作…", waiting.node_name),
+                dot: theme::PURPLE,
+                busy: true,
+                kind: Kind::Waiting,
+            };
+        }
         if running {
             return Status {
                 text: "正在运行…".to_string(),
@@ -247,10 +257,10 @@ impl Report {
         running: bool,
         enabled: bool,
     ) -> (Rect, egui::Response) {
-        let text_color = if status.kind == Kind::Error {
-            theme::DANGER
-        } else {
-            theme::INK_2
+        let text_color = match status.kind {
+            Kind::Error => theme::DANGER,
+            Kind::Waiting => theme::PURPLE,
+            _ => theme::INK_2,
         };
         let stat = report.map(|report| {
             let failed = report

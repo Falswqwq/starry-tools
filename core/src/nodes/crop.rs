@@ -1,10 +1,13 @@
 //! 「图像裁切」节点 —— 从图上取出一块。
 //!
-//! 三种方式：
+//! 四种方式：
 //!
 //! * **比例** 按目标长宽比取一块，尽量大；
 //! * **大小** 取固定像素尺寸，不够就贴着边取；
-//! * **内容** 把四周的透明留白裁掉，内缩到最近的有色像素。
+//! * **内容** 把四周的透明留白裁掉，内缩到最近的有色像素；
+//! * **形状** 停下来让用户在图上框一块（矩形或椭圆），严格按框裁。
+//!
+//! 前三种是纯函数；「形状」不行 —— 它必须等用户，所以是一个**紫色（阻塞）节点**。
 //!
 //! 输入输出都锁定在 `Image(Png)`，和「缩放图像」一样，得先转成 PNG 才能接。
 
@@ -14,8 +17,9 @@ use image::{DynamicImage, GenericImageView};
 
 use crate::error::NodeError;
 use crate::image_io::{has_transparency, EncodeOptions, ImageValue};
+use crate::interaction::{CropShapeRequest, InteractionKind, InteractionResponse, MaskShape};
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
-use crate::model::params;
+use crate::model::params::{self, Params};
 use crate::model::port_type::{ImageFormat, PortType};
 use crate::model::value::{NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
@@ -28,10 +32,20 @@ const PARAM_RATIO_HEIGHT: &str = "ratioHeight";
 const PARAM_WIDTH: &str = "width";
 const PARAM_HEIGHT: &str = "height";
 const PARAM_ANCHOR: &str = "anchor";
+const PARAM_SHAPE: &str = "shape";
 
 const MODE_RATIO: &str = "ratio";
 const MODE_SIZE: &str = "size";
 const MODE_CONTENT: &str = "content";
+const MODE_SHAPE: &str = "shape";
+
+/// 交互预览图的边长上限。
+const PREVIEW_MAX: u32 = 900;
+
+/// 这个节点在给定参数下会不会拦住运行 —— 只有「形状裁切」会。
+fn is_interactive(params: &Params) -> bool {
+    params::string(params, PARAM_MODE, MODE_RATIO) == MODE_SHAPE
+}
 
 pub fn spec() -> NodeSpec {
     NodeSpec::fixed(
@@ -39,7 +53,7 @@ pub fn spec() -> NodeSpec {
             id: KIND.into(),
             name: "图像裁切".into(),
             category: "图像".into(),
-            description: "从图上取出一块：按长宽比取、取固定尺寸，或者把四周的透明留白裁掉。"
+            description: "从图上取出一块：按长宽比取、取固定尺寸、裁掉四周留白，或手动框一块。"
                 .into(),
             is_source: false,
             inputs: vec![
@@ -61,9 +75,26 @@ pub fn spec() -> NodeSpec {
                             SelectOption::new(MODE_SIZE, "裁切到大小").hint("取固定的像素尺寸"),
                             SelectOption::new(MODE_CONTENT, "裁切到内容")
                                 .hint("裁掉四周的透明留白"),
+                            SelectOption::new(MODE_SHAPE, "形状裁切")
+                                .hint("停下来手动框一块（交互）"),
                         ],
                     },
                 ),
+                ParamDef::new(
+                    PARAM_SHAPE,
+                    "形状",
+                    ParamSpec::Select {
+                        default: "rect".into(),
+                        options: vec![
+                            SelectOption::new("rect", "矩形").hint("裁出一个矩形"),
+                            SelectOption::new("ellipse", "椭圆").hint("裁出椭圆（长宽相等即正圆）"),
+                        ],
+                    },
+                )
+                .described(
+                    "运行时会在下方弹出图片，拖动遮罩框定范围；按住 Shift 框出正方形 / 正圆。",
+                )
+                .visible_when(PARAM_MODE, &[MODE_SHAPE]),
                 ParamDef::new(
                     PARAM_RATIO_WIDTH,
                     "长宽比 · 宽",
@@ -142,6 +173,8 @@ pub fn spec() -> NodeSpec {
                 .visible_when(PARAM_MODE, &[MODE_RATIO, MODE_SIZE]),
             ],
             notes: vec![
+                "形状裁切会拦住运行，在下方弹出图片让你框一块 —— 紫色节点就是这种要你动手的节点。"
+                    .into(),
                 "裁切到比例会在图上取一块最大的、符合目标长宽比的区域；比例对不上时四边各裁掉一些。"
                     .into(),
                 "裁切到大小要的尺寸比原图还大时，会贴着边取到原图那么大，并给出提示。".into(),
@@ -154,6 +187,7 @@ pub fn spec() -> NodeSpec {
         },
         run,
     )
+    .interactive(is_interactive)
 }
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
@@ -164,7 +198,34 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let (image_width, image_height) = decoded.dimensions();
 
     let mode = params::string(args.params, PARAM_MODE, MODE_RATIO);
+    // 形状裁切要不要在裁完之后再套一层椭圆遮罩。
+    let mut mask: Option<MaskShape> = None;
     let (x, y, width, height) = match mode.as_str() {
+        MODE_SHAPE => {
+            let shape = match params::string(args.params, PARAM_SHAPE, "rect").as_str() {
+                "ellipse" | "circle" => MaskShape::Ellipse,
+                _ => MaskShape::Rect,
+            };
+            mask = Some(shape);
+            let preview = source.preview_data_url(PREVIEW_MAX)?;
+            let response = args.ask(InteractionKind::CropShape(CropShapeRequest {
+                width: image_width,
+                height: image_height,
+                preview,
+                shape,
+            }))?;
+            match response {
+                InteractionResponse::Crop {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => clamp_region(x, y, width, height, image_width, image_height),
+                InteractionResponse::Cancel => {
+                    return Err(NodeError::new("用户取消了形状裁切"));
+                }
+            }
+        }
         MODE_SIZE => {
             let wanted_width = params::integer(args.params, PARAM_WIDTH, 512).max(1) as u32;
             let wanted_height = params::integer(args.params, PARAM_HEIGHT, 512).max(1) as u32;
@@ -228,10 +289,13 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
         }
     };
 
-    let cropped = decoded.crop_imm(x, y, width, height);
+    let mut cropped = decoded.crop_imm(x, y, width, height).to_rgba8();
+    if matches!(mask, Some(MaskShape::Ellipse)) {
+        apply_ellipse_mask(&mut cropped);
+    }
     let value = ImageValue::from_image(
         ImageFormat::Png,
-        Arc::new(DynamicImage::ImageRgba8(cropped.to_rgba8())),
+        Arc::new(DynamicImage::ImageRgba8(cropped)),
         EncodeOptions::default(),
     )?
     .inherit_provenance(&source);
@@ -242,6 +306,44 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
         Value::Image(value).with_name_hint(name),
     );
     Ok(outputs)
+}
+
+/// 把界面给的裁切区域夹进图像范围：至少 1×1，且不越界。
+///
+/// 界面那边本来就夹过一次，这里再夹一次是**底线** —— 节点不该因为一个越界的
+/// 交互结果就 panic 或产出空白。
+fn clamp_region(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+) -> (u32, u32, u32, u32) {
+    let x = x.min(image_width.saturating_sub(1));
+    let y = y.min(image_height.saturating_sub(1));
+    let width = width.clamp(1, image_width - x);
+    let height = height.clamp(1, image_height - y);
+    (x, y, width, height)
+}
+
+/// 把椭圆外的像素挖成透明。椭圆内切于整块图，所以长宽相等时就是正圆。
+fn apply_ellipse_mask(image: &mut image::RgbaImage) {
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let cx = width as f64 / 2.0;
+    let cy = height as f64 / 2.0;
+    let rx = width as f64 / 2.0;
+    let ry = height as f64 / 2.0;
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let dx = (x as f64 + 0.5 - cx) / rx;
+        let dy = (y as f64 + 0.5 - cy) / ry;
+        if dx * dx + dy * dy > 1.0 {
+            pixel.0[3] = 0;
+        }
+    }
 }
 
 /// 把「剩下多少可以偏」映射成具体坐标。锚点用两个 0 / 0.5 / 1 的分数表示，

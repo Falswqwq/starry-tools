@@ -16,10 +16,12 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::image_io::ImageValue;
+use crate::interaction::Interaction;
 use crate::model::node_kind::{PortDef, PARAM_PORT_PREFIX};
 use crate::model::port_type::PortType;
 use crate::model::value::{NodeArgs, Value, ValueMap};
 use crate::model::workflow::{now_millis, Workflow};
+use crate::progress::Progress;
 use crate::registry::{registry, Registry};
 
 /// 节点缩略图的长边上限。
@@ -122,6 +124,10 @@ pub struct PortResult {
     pub preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// 输出是一段色板文本（hex 一行一个）时，把颜色拆好放着 ——
+    /// 界面据它画一排小色块。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub palette: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -399,10 +405,23 @@ pub fn resolve(workflow: &Workflow) -> ResolvedWorkflow {
 /// 执行工作流。
 ///
 /// `only_node` 给定时只跑「这个节点以及它所有的上游」，用来单步调试。
+///
+/// 没有界面可对话（测试、无头运行）时走这条路：紫色节点一律报错。
 pub fn run(
     workflow: &Workflow,
     only_node: Option<&str>,
     output_root: &Path,
+) -> Result<RunReport, AppError> {
+    run_with(workflow, only_node, output_root, None, None)
+}
+
+/// 执行工作流，带着一条与界面通话的通道 —— 紫色节点会在中途停下来问用户。
+pub fn run_with(
+    workflow: &Workflow,
+    only_node: Option<&str>,
+    output_root: &Path,
+    interaction: Option<&Interaction>,
+    progress: Option<&Progress>,
 ) -> Result<RunReport, AppError> {
     let started = Instant::now();
     let registry = registry();
@@ -451,6 +470,10 @@ pub fn run(
     for (position, node_id) in execution.iter().enumerate() {
         let node = workflow.node(node_id).expect("执行顺序里的节点一定存在");
         let spec = registry.get(&node.kind).expect("前面已经校验过节点类型");
+        // 先报「开始」，界面把光标移到这个节点上。
+        if let Some(progress) = progress {
+            progress.started(node_id);
+        }
 
         let mut warnings: Vec<String> = Vec::new();
         let mut inputs: ValueMap = ValueMap::new();
@@ -503,7 +526,7 @@ pub fn run(
 
         if let Some(upstream) = blocked_by {
             failed.insert(node_id.clone());
-            results.push(NodeRunResult {
+            let result = NodeRunResult {
                 node_id: node_id.clone(),
                 kind: node.kind.clone(),
                 name: spec.kind.name.clone(),
@@ -512,13 +535,17 @@ pub fn run(
                 warnings,
                 elapsed_ms: 0,
                 outputs: Vec::new(),
-            });
+            };
+            if let Some(progress) = progress {
+                progress.finished(result.clone());
+            }
+            results.push(result);
             continue;
         }
 
         if let Some(message) = type_error {
             failed.insert(node_id.clone());
-            results.push(NodeRunResult {
+            let result = NodeRunResult {
                 node_id: node_id.clone(),
                 kind: node.kind.clone(),
                 name: spec.kind.name.clone(),
@@ -527,7 +554,11 @@ pub fn run(
                 warnings,
                 elapsed_ms: 0,
                 outputs: Vec::new(),
-            });
+            };
+            if let Some(progress) = progress {
+                progress.finished(result.clone());
+            }
+            results.push(result);
             continue;
         }
 
@@ -535,9 +566,11 @@ pub fn run(
         let outcome = {
             let mut args = NodeArgs {
                 node_id,
+                node_name: &spec.kind.name,
                 params: &params,
                 inputs: &inputs,
                 warnings: &mut warnings,
+                interaction,
             };
             (spec.run)(&mut args)
         };
@@ -554,6 +587,11 @@ pub fn run(
                     };
                     let mut preview = None;
                     let mut path = None;
+                    // 色板就是一段 hex 文本 —— 拆出来给界面画小色块。
+                    let palette = match value.inner() {
+                        Value::Text(text) => crate::model::value::parse_palette(text),
+                        _ => None,
+                    };
 
                     if let Value::Image(image) = value.inner() {
                         if previews_left > 0 {
@@ -585,11 +623,12 @@ pub fn run(
                         summary: value.describe(),
                         preview,
                         path,
+                        palette,
                     });
                 }
 
                 values.insert(node_id.clone(), outputs);
-                results.push(NodeRunResult {
+                let result = NodeRunResult {
                     node_id: node_id.clone(),
                     kind: node.kind.clone(),
                     name: spec.kind.name.clone(),
@@ -598,11 +637,15 @@ pub fn run(
                     warnings,
                     elapsed_ms,
                     outputs: port_results,
-                });
+                };
+                if let Some(progress) = progress {
+                    progress.finished(result.clone());
+                }
+                results.push(result);
             }
             Err(error) => {
                 failed.insert(node_id.clone());
-                results.push(NodeRunResult {
+                let result = NodeRunResult {
                     node_id: node_id.clone(),
                     kind: node.kind.clone(),
                     name: spec.kind.name.clone(),
@@ -611,7 +654,11 @@ pub fn run(
                     warnings,
                     elapsed_ms,
                     outputs: Vec::new(),
-                });
+                };
+                if let Some(progress) = progress {
+                    progress.finished(result.clone());
+                }
+                results.push(result);
             }
         }
     }

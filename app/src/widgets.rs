@@ -286,3 +286,160 @@ pub fn button_ex(
 pub fn icon_rect(rect: Rect, box_size: f32) -> Rect {
     Rect::from_center_size(rect.center(), Vec2::splat(box_size))
 }
+
+/// 自己画的开关（轨道 + 滑动的圆点）。
+///
+/// `rect` 是**整行的可点区域**：轨道画在它的**右侧**、高度按 `rect.height()` 定 ——
+/// 所以节点里的参数开关和设置面板里的开关是同一份实现，缩放 / 大小一致。
+/// 返回这一下有没有把它翻过来。
+pub fn switch(ui: &mut Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool {
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.has_focus() || resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let changed = resp.clicked();
+    if changed {
+        *value = !*value;
+    }
+    let t = ui.ctx().animate_bool_with_time(id, *value, 0.16);
+
+    let height = rect.height() * 0.8;
+    let width = (height * 1.8).min(rect.width());
+    let track = Rect::from_min_size(
+        Pos2::new(rect.right() - width, rect.center().y - height * 0.5),
+        Vec2::new(width, height),
+    );
+    let radius = CornerRadius::same((height * 0.5) as u8);
+    let accent = if *value {
+        theme::ACCENT
+    } else {
+        theme::HAIRLINE_STRONG
+    };
+
+    let painter = ui.painter();
+    painter.rect_filled(
+        track,
+        radius,
+        if *value {
+            theme::ACCENT
+        } else {
+            theme::SURFACE_3
+        },
+    );
+    painter.rect_stroke(track, radius, Stroke::new(1.0, accent), StrokeKind::Inside);
+
+    let pad = height * 0.15;
+    let dot = height * 0.5 - pad;
+    let travel = (track.width() - 2.0 * (dot + pad)).max(0.0);
+    let x = track.left() + dot + pad + travel * t;
+    painter.circle_filled(Pos2::new(x, track.center().y), dot, theme::SURFACE);
+
+    changed
+}
+
+/// 自己画的滑杆：左边一根轨道、右边一个读数。
+///
+/// `rect` 是整行的可点区域（节点里会乘过缩放）。返回 `Some(新值)` 表示这一下改了它。
+/// 读数按**最大值**的那份文本预留宽度，所以拖动时轨道和数字都不左右跳。
+#[allow(clippy::too_many_arguments)]
+pub fn slider(
+    ui: &mut Ui,
+    id: egui::Id,
+    rect: Rect,
+    value: f32,
+    min: f32,
+    max: f32,
+    integer: bool,
+    unit: &str,
+) -> Option<f32> {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    if resp.has_focus() || resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let font = egui::FontId::monospace((rect.height() * 0.46).max(8.0));
+    let painter = ui.painter();
+    // 按最大值的文本量一遍宽 —— 轨道宽度定死，数字变长也不滑动。
+    let sample = format!("{}{}", slider_text(max, integer), unit);
+    let readout_w = painter
+        .layout_no_wrap(sample, font.clone(), theme::INK_2)
+        .size()
+        .x;
+
+    let gap = rect.height() * 0.4;
+    let bar_h = (rect.height() * 0.28).max(3.0);
+    let radius = bar_h * 0.5;
+    let handle_r = (rect.height() * 0.30).max(5.0);
+    let cy = rect.center().y;
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + handle_r, cy - bar_h * 0.5),
+        Pos2::new(
+            (rect.right() - readout_w - gap).max(rect.left() + handle_r * 2.0),
+            cy + bar_h * 0.5,
+        ),
+    );
+
+    let span = (max - min).max(f32::EPSILON);
+    let mut value_out = value.clamp(min, max);
+    if resp.dragged() || resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let t = ((p.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
+            let mut next = min + t * span;
+            if integer {
+                next = next.round();
+            }
+            value_out = next.clamp(min, max);
+        }
+    }
+
+    let value_t = ((value_out - min) / span).clamp(0.0, 1.0);
+    let handle_x = track.left() + track.width() * value_t;
+
+    // 轨道：未填充部分浅灰，已填充部分主题蓝。
+    let round = CornerRadius::same(radius as u8);
+    painter.rect_filled(track, round, theme::SURFACE_3);
+    if value_t > 0.0 {
+        let filled = Rect::from_min_max(track.min, Pos2::new(handle_x, track.max.y));
+        painter.rect_filled(filled, round, theme::ACCENT);
+    }
+
+    // 圆点：拖 / 悬停时描主题蓝，平静时只是白底加一圈发丝线。
+    let active = resp.dragged() || resp.hovered();
+    let border = if active {
+        theme::ACCENT
+    } else {
+        theme::HAIRLINE_STRONG
+    };
+    let knob = Rect::from_center_size(Pos2::new(handle_x, cy), Vec2::splat(handle_r * 2.0));
+    let knob_radius = CornerRadius::same(handle_r as u8);
+    painter.rect_filled(knob, knob_radius, theme::SURFACE);
+    painter.rect_stroke(
+        knob,
+        knob_radius,
+        Stroke::new(if active { 2.0 } else { 1.0 }, border),
+        StrokeKind::Inside,
+    );
+
+    let galley = painter.layout_no_wrap(
+        format!("{}{}", slider_text(value_out, integer), unit),
+        font,
+        theme::INK_2,
+    );
+    painter.galley(
+        Pos2::new(rect.right() - galley.size().x, cy - galley.size().y * 0.5),
+        galley,
+        theme::INK_2,
+    );
+
+    ((value_out - value).abs() > f32::EPSILON).then_some(value_out)
+}
+
+/// 滑杆读数：整数就去零取整，否则保留最多两位小数。
+fn slider_text(value: f32, integer: bool) -> String {
+    if integer || value.fract() == 0.0 {
+        format!("{}", value.round() as i64)
+    } else {
+        let text = format!("{value:.2}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}

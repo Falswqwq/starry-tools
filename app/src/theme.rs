@@ -40,10 +40,17 @@ pub const TYPE_TEXT: Color32 = Color32::from_rgb(0x33, 0x41, 0x55);
 pub const TYPE_NUMBER: Color32 = Color32::from_rgb(0x47, 0x55, 0x69);
 pub const TYPE_BOOL: Color32 = Color32::from_rgb(0x64, 0x74, 0x8b);
 
+/// 紫色：**阻塞节点**（要你动手的节点）的边框色。它不是状态色，是「这类节点长这样」。
+pub const PURPLE: Color32 = Color32::from_rgb(0x7c, 0x3a, 0xed);
+pub const PURPLE_SOFT: Color32 = Color32::from_rgb(0xf5, 0xf1, 0xff);
+pub const PURPLE_LINE: Color32 = Color32::from_rgb(0xdd, 0xd0, 0xfb);
+
 pub const DANGER: Color32 = Color32::from_rgb(0xdc, 0x26, 0x26);
 pub const DANGER_SOFT: Color32 = Color32::from_rgb(0xfe, 0xf3, 0xf2);
 pub const DANGER_LINE: Color32 = Color32::from_rgb(0xf3, 0xc6, 0xc2);
 pub const WARN: Color32 = Color32::from_rgb(0xb4, 0x53, 0x09);
+pub const WARN_SOFT: Color32 = Color32::from_rgb(0xff, 0xf7, 0xed);
+pub const WARN_LINE: Color32 = Color32::from_rgb(0xf3, 0xd3, 0xac);
 pub const OK: Color32 = Color32::from_rgb(0x15, 0x80, 0x3d);
 
 /// 默认连线。

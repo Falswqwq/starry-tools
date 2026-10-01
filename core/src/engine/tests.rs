@@ -351,7 +351,7 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 11, "内置工具的数量（改动时请一并更新这条）");
+    assert_eq!(kinds.len(), 16, "内置工具的数量（改动时请一并更新这条）");
 
     let convert = kinds
         .iter()
@@ -518,7 +518,30 @@ fn kind_metadata_is_a_stable_contract() {
         .iter()
         .map(|option| option["value"].as_str().unwrap())
         .collect();
-    assert_eq!(modes, vec!["ratio", "size", "content"]);
+    assert_eq!(modes, vec!["ratio", "size", "content", "shape"]);
+    // 「形状裁切」是一个紫色（阻塞）节点：切到 shape 时才拦住运行。
+    let crop_spec = registry().get("crop_image").unwrap();
+    let mut shape_params = defaults("crop_image");
+    shape_params.insert("mode".into(), serde_json::json!("shape"));
+    assert!(crop_spec.is_interactive(&shape_params));
+    assert!(!crop_spec.is_interactive(&defaults("crop_image")));
+    assert!(
+        crop["interactive"].is_boolean(),
+        "卡片要能知道默认是不是紫色"
+    );
+
+    let border = kinds
+        .iter()
+        .find(|kind| kind["id"] == "border_image")
+        .unwrap();
+    assert_eq!(border["name"], "边框/边距");
+    let color = border["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|param| param["id"] == "color")
+        .unwrap();
+    assert_eq!(color["control"], "color", "颜色参数用的是一块取色器");
 
     let save = kinds
         .iter()
@@ -1244,5 +1267,466 @@ fn a_linked_param_port_overrides_the_param() {
         (out.width(), out.height()),
         (8, 8),
         "应当按上游那个 400%（而不是本地的 100%）放大"
+    );
+}
+
+/// 把一个图像写进工作流、跑「边框/边距」、把产物读回来。
+fn border_result(name: &str, image: &RgbaImage, thickness: i64, color: &str) -> RgbaImage {
+    use crate::nodes::border as bd;
+
+    let dir = workspace(name);
+    let path = dir.join("source.png");
+    image.save(&path).unwrap();
+
+    let mut workflow = Workflow::new("描边");
+    workflow.nodes.push(input_node("in", &path));
+    let mut params = defaults(bd::KIND);
+    params.insert("thickness".into(), serde_json::json!(thickness));
+    params.insert("color".into(), serde_json::json!(color));
+    workflow.nodes.push(node("bd", bd::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "bd", "image"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let out_path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "bd")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    image::open(out_path).unwrap().to_rgba8()
+}
+
+#[test]
+fn progress_streams_node_by_node() {
+    use crate::progress::{Progress, ProgressEvent};
+
+    let dir = workspace("progress");
+    let png = image_fixture(&dir, "png", 4, 3);
+
+    let mut workflow = Workflow::new("进度");
+    workflow.nodes.push(input_node("in", &png));
+    workflow.nodes.push(node(
+        "up",
+        crate::nodes::upscale::KIND,
+        defaults(crate::nodes::upscale::KIND),
+    ));
+    workflow.edges.push(edge("e1", "in", "out", "up", "image"));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let progress = Progress::new(tx);
+    let report = run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+
+    let events: Vec<ProgressEvent> = rx.try_iter().collect();
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProgressEvent::Started { node_id } => Some(node_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let finished = events
+        .iter()
+        .filter(|event| matches!(event, ProgressEvent::Finished { .. }))
+        .count();
+    // 每个节点各一条 Started + 一条 Finished，且顺序就是拓扑序。
+    assert_eq!(started, vec!["in", "up"]);
+    assert_eq!(finished, 2);
+}
+
+/// 进度事件要把每个节点的**结果**也带过来 —— 界面靠它把缩略图跟着流程一张张贴上卡片，
+/// 而不是等整张图跑完。
+#[test]
+fn progress_carries_each_nodes_result_as_it_finishes() {
+    use crate::progress::{Progress, ProgressEvent};
+
+    let dir = workspace("progress-result");
+    let png = image_fixture(&dir, "png", 4, 3);
+
+    let mut workflow = Workflow::new("进度结果");
+    workflow.nodes.push(input_node("in", &png));
+    workflow.nodes.push(node(
+        "up",
+        crate::nodes::upscale::KIND,
+        defaults(crate::nodes::upscale::KIND),
+    ));
+    workflow.edges.push(edge("e1", "in", "out", "up", "image"));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let progress = Progress::new(tx);
+    run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
+
+    let finished: Vec<crate::engine::NodeRunResult> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            ProgressEvent::Finished { result } => Some(result),
+            _ => None,
+        })
+        .collect();
+
+    let up = finished
+        .iter()
+        .find(|result| result.node_id == "up")
+        .expect("应当收到「up」的结果");
+    assert_eq!(up.status, NodeStatus::Ok);
+    // 缩略图必须**在进度里就有** —— 这正是「边跑边展示」的关键。
+    assert!(
+        up.outputs.iter().any(|output| output.preview.is_some()),
+        "进度里的结果就该带着缩略图：{:?}",
+        up.outputs
+    );
+}
+
+#[test]
+fn color_analysis_outputs_a_palette_text() {
+    use crate::nodes::palette as pa;
+
+    let dir = workspace("palette-extract");
+    let png = image_fixture(&dir, "png", 16, 16);
+
+    let mut workflow = Workflow::new("抽色板");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(pa::KIND);
+    params.insert("mode".into(), serde_json::json!("extract"));
+    params.insert("colors".into(), serde_json::json!(4));
+    workflow.nodes.push(node("an", pa::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "an", "image"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let output = &report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "an")
+        .unwrap()
+        .outputs[0];
+
+    assert_eq!(output.ty, PortType::Text, "色板就是一段文本");
+    let palette = output.palette.clone().expect("引擎该把颜色拆出来");
+    assert!(!palette.is_empty() && palette.len() <= 4, "{:?}", palette);
+    assert!(palette.iter().all(|c| c.starts_with('#') && c.len() == 7));
+    assert!(output.summary.starts_with("色板"), "{}", output.summary);
+}
+
+#[test]
+fn color_analysis_over_an_any_image_input_takes_any_format() {
+    use crate::nodes::palette as pa;
+
+    // 输入声明的是 Image(Any)，所以 JPEG 不先转 PNG 也能直接接。
+    let dir = workspace("palette-any");
+    let jpg = image_fixture(&dir, "jpg", 12, 12);
+
+    let mut workflow = Workflow::new("直接分析 jpg");
+    workflow.nodes.push(input_node("in", &jpg));
+    workflow
+        .nodes
+        .push(node("an", pa::KIND, defaults(pa::KIND)));
+    workflow.edges.push(edge("e1", "in", "out", "an", "image"));
+
+    let resolved = resolve(&workflow);
+    assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
+    assert!(run(&workflow, None, &dir.join("out")).unwrap().ok);
+}
+
+#[test]
+fn a_palette_feeds_a_colour_parameter_by_its_first_colour() {
+    use crate::model::node_kind::param_port_id;
+    use crate::nodes::border as bd;
+    use crate::nodes::palette as pa;
+
+    let dir = workspace("palette-into-colour");
+    // 一张全红的图：统计出来的色板第一行就是红。
+    let path = dir.join("red.png");
+    RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]))
+        .save(&path)
+        .unwrap();
+
+    let mut workflow = Workflow::new("色板当颜色");
+    workflow.nodes.push(input_node("in", &path));
+    let mut analysis = defaults(pa::KIND);
+    analysis.insert("mode".into(), serde_json::json!("count"));
+    analysis.insert("threshold".into(), serde_json::json!(0));
+    workflow.nodes.push(node("an", pa::KIND, analysis));
+    workflow
+        .nodes
+        .push(node("bd", bd::KIND, defaults(bd::KIND)));
+    workflow.edges.push(edge("e1", "in", "out", "an", "image"));
+    workflow.edges.push(edge("e3", "in", "out", "bd", "image"));
+    // 色板接到「颜色」参数端口上，应取第一个颜色。
+    workflow
+        .edges
+        .push(edge("e2", "an", "palette", "bd", &param_port_id("color")));
+
+    let resolved = resolve(&workflow);
+    assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+
+    let out_path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "bd")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    let out = image::open(out_path).unwrap().to_rgba8();
+    assert_eq!(
+        out.get_pixel(0, 0).0,
+        [255, 0, 0, 255],
+        "边框用了色板第一个颜色"
+    );
+}
+
+#[test]
+fn remove_color_keyed_the_matching_pixels_transparent() {
+    use crate::nodes::remove_color as rc;
+
+    let dir = workspace("remove-color");
+    // 3×1：纯白、近白、红。
+    let path = dir.join("key.png");
+    let mut image = RgbaImage::from_pixel(3, 1, Rgba([255, 255, 255, 255]));
+    image.put_pixel(1, 0, Rgba([240, 250, 255, 255]));
+    image.put_pixel(2, 0, Rgba([255, 0, 0, 255]));
+    image.save(&path).unwrap();
+
+    let mut workflow = Workflow::new("去底色");
+    workflow.nodes.push(input_node("in", &path));
+    let mut params = defaults(rc::KIND);
+    params.insert("color".into(), serde_json::json!("#ffffff"));
+    params.insert("threshold".into(), serde_json::json!(16));
+    workflow.nodes.push(node("rc", rc::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "rc", "image"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let out_path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "rc")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    let out = image::open(out_path).unwrap().to_rgba8();
+
+    assert_eq!(out.get_pixel(0, 0).0[3], 0, "纯白被剔透");
+    assert_eq!(out.get_pixel(1, 0).0[3], 0, "在阈值内的近白也被剔透");
+    assert_eq!(
+        out.get_pixel(2, 0).0,
+        [255, 0, 0, 255],
+        "红不在范围内，原样留着"
+    );
+}
+
+#[test]
+fn border_grows_an_opaque_image_into_a_frame() {
+    // 整张不透明 → 相当于画框：四边各加 1 像素，边距是红色。
+    let image = RgbaImage::from_pixel(4, 4, Rgba([10, 20, 30, 255]));
+    let out = border_result("border-opaque", &image, 1, "#ff0000");
+    assert_eq!(out.dimensions(), (6, 6));
+    assert_eq!(out.get_pixel(0, 0).0, [255, 0, 0, 255], "新边距是边框色");
+    assert_eq!(out.get_pixel(5, 5).0, [255, 0, 0, 255]);
+    assert_eq!(out.get_pixel(1, 1).0, [10, 20, 30, 255], "原图一个像素不改");
+    assert_eq!(out.get_pixel(4, 4).0, [10, 20, 30, 255]);
+}
+
+#[test]
+fn border_outlines_transparent_content_in_place() {
+    // 7×7 全透明，中间 3×3 是白色 —— 四周留白够宽，尺寸不该变，描的是内容边界。
+    let mut image = RgbaImage::from_pixel(7, 7, Rgba([0, 0, 0, 0]));
+    for y in 2..5 {
+        for x in 2..5 {
+            image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+        }
+    }
+    let out = border_result("border-sprite", &image, 1, "#ff0000");
+    assert_eq!(out.dimensions(), (7, 7), "内容四周有留白，尺寸不变");
+    assert_eq!(out.get_pixel(3, 3).0, [255, 255, 255, 255], "内容保留");
+    assert_eq!(
+        out.get_pixel(1, 3).0,
+        [255, 0, 0, 255],
+        "紧贴内容的一圈被描上"
+    );
+    assert_eq!(out.get_pixel(0, 0).0, [0, 0, 0, 0], "远处仍透明");
+}
+
+#[test]
+fn border_outlines_the_inside_of_a_hole() {
+    // 甜甜圈：5×5 白色实心，正中间挖一个透明的洞 —— 洞里也该被描上。
+    let mut image = RgbaImage::from_pixel(5, 5, Rgba([255, 255, 255, 255]));
+    image.put_pixel(2, 2, Rgba([0, 0, 0, 0]));
+    let out = border_result("border-donut", &image, 1, "#00ff00");
+    // 内容贴着四边，所以画布向外扩了 1 像素（5 × 5 → 7 × 7）。
+    assert_eq!(out.dimensions(), (7, 7));
+    assert_eq!(out.get_pixel(3, 3).0, [0, 255, 0, 255], "洞被从内侧描上");
+    assert_eq!(out.get_pixel(1, 1).0, [255, 255, 255, 255], "实体保留");
+}
+
+#[test]
+fn border_with_a_transparent_colour_just_pads() {
+    let image = RgbaImage::from_pixel(3, 3, Rgba([9, 9, 9, 255]));
+    let out = border_result("border-padding", &image, 2, "transparent");
+    assert_eq!(out.dimensions(), (7, 7));
+    assert_eq!(
+        out.get_pixel(0, 0).0,
+        [0, 0, 0, 0],
+        "透明色就只是加了一圈透明边距"
+    );
+    assert_eq!(out.get_pixel(3, 3).0, [9, 9, 9, 255]);
+}
+
+#[test]
+fn transform_flips_then_rotates_a_png() {
+    use crate::nodes::transform as tf;
+
+    let dir = workspace("transform");
+    let png = image_fixture(&dir, "png", 3, 2);
+
+    let mut workflow = Workflow::new("变换");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(tf::KIND);
+    params.insert("flipHorizontal".into(), serde_json::json!(true));
+    params.insert("rotate".into(), serde_json::json!("90"));
+    workflow.nodes.push(node("tf", tf::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "tf")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    let out = image::open(path).unwrap().to_rgba8();
+
+    // 与「先左右翻转、再顺时针 90°」逐像素对照 —— 顺序不能反。
+    let source = image::open(&png).unwrap().to_rgba8();
+    let expected = image::imageops::rotate90(&image::imageops::flip_horizontal(&source));
+    assert_eq!((out.width(), out.height()), (2, 3), "90° 要长宽对调");
+    assert_eq!(out.dimensions(), expected.dimensions());
+    assert!(out.pixels().eq(expected.pixels()), "像素应当完全一致");
+}
+
+#[test]
+fn transform_with_default_params_is_a_no_op() {
+    use crate::nodes::transform as tf;
+
+    let dir = workspace("transform-noop");
+    let png = image_fixture(&dir, "png", 4, 3);
+
+    let mut workflow = Workflow::new("变换默认");
+    workflow.nodes.push(input_node("in", &png));
+    workflow
+        .nodes
+        .push(node("tf", tf::KIND, defaults(tf::KIND)));
+    workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
+
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let result = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "tf")
+        .unwrap();
+    assert!(
+        result.warnings.iter().any(|w| w.contains("原样通过")),
+        "什么都没选时会提示原样通过：{:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn shape_crop_asks_the_interface_and_honours_the_answer() {
+    use crate::interaction::{Interaction, InteractionKind, InteractionResponse};
+    use std::sync::mpsc;
+
+    let dir = workspace("shape-crop");
+    let png = image_fixture(&dir, "png", 8, 8);
+
+    let mut workflow = Workflow::new("形状裁切");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(crate::nodes::crop::KIND);
+    params.insert("mode".into(), serde_json::json!("shape"));
+    params.insert("shape".into(), serde_json::json!("ellipse"));
+    workflow
+        .nodes
+        .push(node("crop", crate::nodes::crop::KIND, params));
+    workflow
+        .edges
+        .push(edge("e1", "in", "out", "crop", "image"));
+
+    // 预先把答案塞进通道：运行到紫色节点时它会发一条请求、然后阻塞地收这条答案。
+    let (request_tx, request_rx) = mpsc::channel();
+    let (response_tx, response_rx) = mpsc::channel();
+    response_tx
+        .send(InteractionResponse::Crop {
+            x: 1,
+            y: 1,
+            width: 6,
+            height: 6,
+        })
+        .unwrap();
+    let interaction = Interaction::new(request_tx, response_rx);
+
+    let report = run_with(&workflow, None, &dir.join("out"), Some(&interaction), None).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+
+    // 请求确实发出来了，而且认得出是谁在等。
+    let request = request_rx.try_recv().expect("紫色节点应当发来一条请求");
+    assert_eq!(request.node_id, "crop");
+    assert_eq!(request.node_name, "图像裁切");
+    assert!(matches!(request.kind, InteractionKind::CropShape(_)));
+
+    // 尺寸严格按用户框的那一块（6 × 6），而不是参数里的默认比例。
+    let cropped = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "crop")
+        .unwrap();
+    let path = cropped.outputs[0].path.clone().unwrap();
+    let out = image::open(path).unwrap();
+    assert_eq!((out.width(), out.height()), (6, 6));
+}
+
+#[test]
+fn a_blocking_node_without_an_interface_fails_cleanly() {
+    let dir = workspace("shape-crop-no-ui");
+    let png = image_fixture(&dir, "png", 4, 4);
+
+    let mut workflow = Workflow::new("无界面的形状裁切");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(crate::nodes::crop::KIND);
+    params.insert("mode".into(), serde_json::json!("shape"));
+    workflow
+        .nodes
+        .push(node("crop", crate::nodes::crop::KIND, params));
+    workflow
+        .edges
+        .push(edge("e1", "in", "out", "crop", "image"));
+
+    // 无头运行：没有界面可问，应当明确报错而不是 panic。
+    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    assert!(!report.ok);
+    let cropped = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "crop")
+        .unwrap();
+    assert!(matches!(cropped.status, NodeStatus::Failed));
+    assert!(
+        cropped.error.as_deref().unwrap_or("").contains("界面"),
+        "{:?}",
+        cropped.error
     );
 }

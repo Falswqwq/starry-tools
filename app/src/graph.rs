@@ -4,6 +4,10 @@
 //! 这里同样不认识任何具体工具。
 //!
 //! 刀光完全是自己算的：连线的控制点本来就在手上，采样和判交都不依赖任何外部渲染。
+//!
+//! 背景点阵是一大票小圆，逐颗 `circle_filled` 会让 epaint 每帧重新三角化几千个
+//! 形状（平移时位置全变，缓存也帮不上忙）。所以改成：一张小圆贴图 + 一个 `Mesh`
+//! 把所有点拼起来，一次画出去 —— 圆的数量照样，形状数却只剩一个。
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -11,7 +15,7 @@ use eframe::egui::{
 };
 use egui::epaint::CubicBezierShape;
 use serde_json::Value;
-use starrytools_core::engine::{NodeStatus, RunReport};
+use starrytools_core::engine::{NodeRunResult, NodeStatus, RunReport};
 use starrytools_core::model::params::Params;
 use starrytools_core::model::workflow::{Edge, NodeInstance, Position, Workflow};
 use std::collections::{HashMap, HashSet};
@@ -19,7 +23,8 @@ use std::collections::{HashMap, HashSet};
 use crate::catalog::{Control, Kind, Param, Port};
 use crate::geometry::{self, Cubic};
 use crate::icons::{self, IconFn};
-use crate::run::Marks;
+use crate::models::Downloads;
+use crate::run::{LiveRun, Marks};
 use crate::theme;
 use crate::widgets;
 
@@ -36,6 +41,8 @@ const PARAM_CONTROL_H: f32 = 24.0;
 const DROP_H: f32 = 132.0;
 /// 「输入框」下面那行「清空」按钮（含它上面的缝）。
 const DROP_ACTION_H: f32 = 30.0;
+/// 模型还没下载时，卡片上那块「下载模型」面板的高度（流坐标）。
+const MODEL_PANEL_H: f32 = 114.0;
 const PARAM_NOTE_GAP: f32 = 4.0;
 /// 两个参数之间留的缝。
 const PARAM_GAP: f32 = 8.0;
@@ -56,8 +63,20 @@ const PORT_HIT: f32 = 13.0;
 /// 背景小点的间距。
 const DOT_GAP: f32 = 22.0;
 
+/// 画布要展示的运行状态：正式报告 / 实时进度 / 要不要画帧率读数。
+///
+/// 报告要等整张图跑完才回来；在那之前靠 `live` 把「正在跑的那个」和已经完成的画出来。
+pub struct RunView<'a> {
+    pub report: Option<&'a RunReport>,
+    pub live: Option<&'a LiveRun>,
+    pub show_fps: bool,
+}
+
 /// 卡片底部的预览条高度（流坐标）。跑完有缩略图时卡片才多出这么高。
 const PREVIEW_H: f32 = 84.0;
+
+/// 卡片底部的色板条高度（流坐标）。输出是色板时卡片才多出这么高。
+const PALETTE_H: f32 = 30.0;
 
 /// 预览的棋盘格边长（流坐标）。
 const CHECKER: f32 = 8.0;
@@ -99,6 +118,8 @@ pub struct Node {
     pub params: Params,
     /// 跑完之后有没有缩略图可看。有的活卡片底下多留一条预览区（**不落盘**，是视图状态）。
     pub preview: bool,
+    /// 跑出来是个色板（「色彩分析」）时，卡片底下摆一排小色块。**不落盘**。
+    pub palette: Option<Vec<[u8; 4]>>,
     /// 上一次运行的结果（状态 / 耗时 / 警告 / 错误 / 产物）。**不落盘**。
     pub run: Option<NodeRun>,
 }
@@ -203,10 +224,8 @@ pub struct Graph {
     menu: Option<(usize, Pos2)>,
     slash: Option<Slash>,
     severing: Vec<Severing>,
-    /// 节点缩略图（按节点 id）。报告一换就整批丢掉重建。
+    /// 节点缩略图（按节点 id）。开始新的一次运行 / 清空运行记录时整批丢掉重建。
     textures: HashMap<String, egui::TextureHandle>,
-    /// 当前纹理对应哪次运行（`RunReport::finished_at`）。
-    report_stamp: Option<i64>,
     /// 点了卡片上的「运行至此」：这个节点 id 要交给调用方去跑。
     pending_run: Option<String>,
     /// 刚落到画布上的节点（id → 落下的时刻），用来放入场动画。
@@ -227,6 +246,12 @@ pub struct Graph {
     drop_editing: HashSet<String>,
     /// 点过空白处：把上一次运行的高亮收起来（下一次运行再亮回来）。
     run_marks_hidden: bool,
+    /// 右下角帧率读数（指数平滑后的 fps）。
+    fps: f32,
+    /// 上一帧的时刻，用来算帧间隔。
+    last_frame: Option<f64>,
+    /// 需要模型的节点正在下的那些模型（按节点 id）。**不落盘**。
+    downloads: Downloads,
 }
 
 /// 一段折好行的文字：每行文本、每行高度、总高。都在流坐标下（未乘缩放）。
@@ -289,6 +314,7 @@ impl Graph {
                 outputs: Vec::new(),
                 params: kind.defaults.clone(),
                 preview: false,
+                palette: None,
                 run: None,
             };
             refresh_ports(&mut node);
@@ -332,7 +358,6 @@ impl Graph {
             slash: None,
             severing: Vec::new(),
             textures: HashMap::new(),
-            report_stamp: None,
             pending_run: None,
             entering: HashMap::new(),
             clipboard: None,
@@ -341,6 +366,9 @@ impl Graph {
             drop_textures: HashMap::new(),
             drop_editing: HashSet::new(),
             run_marks_hidden: false,
+            fps: 0.0,
+            last_frame: None,
+            downloads: Downloads::default(),
         }
     }
 
@@ -357,6 +385,7 @@ impl Graph {
             outputs: Vec::new(),
             params: kind.defaults.clone(),
             preview: false,
+            palette: None,
             run: None,
         };
         refresh_ports(&mut node);
@@ -426,6 +455,7 @@ impl Graph {
                 outputs: Vec::new(),
                 params: instance.params.clone(),
                 preview: false,
+                palette: None,
                 run: None,
             };
             refresh_ports(&mut node);
@@ -464,7 +494,6 @@ impl Graph {
             slash: None,
             severing: Vec::new(),
             textures: HashMap::new(),
-            report_stamp: None,
             pending_run: None,
             entering: HashMap::new(),
             clipboard: None,
@@ -473,6 +502,9 @@ impl Graph {
             drop_textures: HashMap::new(),
             drop_editing: HashSet::new(),
             run_marks_hidden: false,
+            fps: 0.0,
+            last_frame: None,
+            downloads: Downloads::default(),
         }
     }
 
@@ -602,13 +634,16 @@ impl Graph {
         rect: Rect,
         kinds: &[Kind],
         marks: &Marks,
-        report: Option<&RunReport>,
+        view: RunView<'_>,
     ) -> Option<String> {
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let now = ui.input(|input| input.time);
+        self.measure_fps(now);
+        // 收一收后台下载的进度 —— 下完了这项就消失，节点随之自动恢复。
+        self.downloads.poll();
 
         // 先把这次的缩略图准备好 —— 卡片高度、预览绘制都要用到。
-        self.sync_previews(ui.ctx(), report);
+        self.sync_previews(ui.ctx(), view.report, view.live);
         // 参数说明与运行提示先折好行、量好高 —— 卡片高度靠它，折行也靠它。
         self.sync_notes(ui, kinds);
 
@@ -637,19 +672,25 @@ impl Graph {
 
         // ---- 背景小点 ----
         // 只在点距够大（没缩太远）时才画，省得小到看不清还白花功夫。
+        // 全部拼进**一个 Mesh**：几千个 `circle_filled` 会让 epaint 每帧重新三角化
+        // 几千个形状，平移时位置又全变、缓存也命中不了 —— 用一个网格一次画出去，
+        // 图形一模一样，每帧的开销则从「几千个形状」降到「一个」+ 拼顶点的循环。
         let step = DOT_GAP * self.zoom;
         if step > 5.0 {
+            let texture = dot_texture(ui.ctx());
+            let mut mesh = egui::Mesh::with_texture(texture.id());
             let ox = self.pan.x.rem_euclid(step);
             let oy = self.pan.y.rem_euclid(step);
             let mut y = rect.top() - step + oy;
             while y < rect.bottom() + step {
                 let mut x = rect.left() - step + ox;
                 while x < rect.right() + step {
-                    painter.circle_filled(egui::pos2(x, y), 1.0, theme::CANVAS_DOT);
+                    push_dot(&mut mesh, egui::pos2(x, y), 1.0, theme::CANVAS_DOT);
                     x += step;
                 }
                 y += step;
             }
+            painter.add(egui::Shape::mesh(mesh));
         }
 
         // ---- 连线 ----
@@ -702,7 +743,6 @@ impl Graph {
                 style.spacing.button_padding = egui::vec2(5.0, 1.0) * self.zoom;
                 style.spacing.interact_size.y = 18.0 * self.zoom;
                 style.spacing.icon_width = 9.0 * self.zoom;
-                style.spacing.slider_width = 96.0 * self.zoom;
                 style.spacing.item_spacing = egui::vec2(4.0, 3.0) * self.zoom;
             }
             for (i, &factor) in enter.iter().enumerate() {
@@ -713,7 +753,7 @@ impl Graph {
                 self.draw_node(&faded, kinds, marks, i, pointer, now);
                 // 参数控件紧跟在这张卡后面注册 —— 这就是原版的 `nodrag`，
                 // 同时也让叠放顺序和卡片一致。
-                if self.draw_node_controls(ui, kinds, i) {
+                if self.draw_node_controls(ui, kinds, i, now) {
                     controls_changed = true;
                 }
             }
@@ -731,7 +771,71 @@ impl Graph {
         // ---- 左下角：缩放控件 ----
         self.zoom_controls(ui, rect, kinds);
 
+        // ---- 右下角：帧率读数 ----
+        if view.show_fps {
+            self.draw_fps(ui);
+        }
+
         self.pending_run.take()
+    }
+
+    /// 记一帧的时间，算出平滑后的 fps。
+    ///
+    /// 空闲一段时间后的第一帧间隔会很大（甚至几秒），那种不算 —— 否则一恢复
+    /// 交互，读数会被那一帧拖到个位数。
+    fn measure_fps(&mut self, now: f64) {
+        if let Some(last) = self.last_frame {
+            let delta = now - last;
+            if delta > 0.0 && delta <= 0.5 {
+                let instant = (1.0 / delta) as f32;
+                self.fps = if self.fps <= 0.0 {
+                    instant
+                } else {
+                    self.fps * 0.9 + instant * 0.1
+                };
+            }
+        }
+        self.last_frame = Some(now);
+    }
+
+    /// 右下角一个灰色的帧率读数，保留到整数位。
+    ///
+    /// 数字和 `fps` 都自己排版：数字在一个固定宽度里**右对齐**，紧跟着单位 ——
+    /// 位数变化（60 → 100）时数字从右边长出去，`fps` 一动不动，才不会左右抖。
+    fn draw_fps(&self, ui: &egui::Ui) {
+        if self.fps <= 0.0 {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("fps"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -8.0))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(&ctx, |ui| {
+                let font = FontId::monospace(11.0);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 15.0), Sense::hover());
+                let painter = ui.painter();
+                let unit = painter.layout_no_wrap("fps".to_string(), font.clone(), theme::INK_3);
+                let unit_x = rect.right() - unit.size().x;
+                painter.galley(
+                    egui::pos2(unit_x, rect.center().y - unit.size().y * 0.5),
+                    unit.clone(),
+                    theme::INK_3,
+                );
+                let number = painter.layout_no_wrap(
+                    format!("{}", self.fps.round() as i64),
+                    font,
+                    theme::INK_3,
+                );
+                painter.galley(
+                    egui::pos2(
+                        unit_x - 5.0 - number.size().x,
+                        rect.center().y - number.size().y * 0.5,
+                    ),
+                    number,
+                    theme::INK_3,
+                );
+            });
     }
 
     /// 左下角一竖条缩放控件（放大 / 缩小 / 适应画面）。
@@ -825,6 +929,7 @@ impl Graph {
             || !self.severing.is_empty()
             || self.connect.is_some()
             || !self.entering.is_empty()
+            || self.downloads.any()
     }
 
     /// 入场动画的进度（0→1，缓出）。不在 `entering` 里就是 1。
@@ -950,6 +1055,13 @@ impl Graph {
                         break;
                     }
                     if play.contains(p) {
+                        // 要模型但本地还没有：这个节点还不能跑 —— 点运行不生效。
+                        if kind_of(kinds, &self.nodes[i])
+                            .is_some_and(|kind| kind.model_missing(&self.nodes[i].params))
+                        {
+                            handled = true;
+                            break;
+                        }
                         self.pending_run = Some(self.nodes[i].id.clone());
                         self.selected = Some(i);
                         handled = true;
@@ -1523,6 +1635,8 @@ impl Graph {
         if index >= self.nodes.len() {
             return;
         }
+        // 节点没了，它留下的下载状态（正在下的任务 / 选中的源）也一并清掉。
+        self.downloads.forget(&self.nodes[index].id);
         self.nodes.remove(index);
         // 先按老下标滤掉断掉的线，再把剩下连线的下标往前挪一格。
         self.wires
@@ -1634,81 +1748,104 @@ impl Graph {
     ///
     /// 报告一换（`finished_at` 变了）就把旧纹理全丢掉重建 —— `TextureHandle`
     /// 一 drop，纹理由 egui 回收，不会越攒越多。
-    fn sync_previews(&mut self, ctx: &egui::Context, report: Option<&RunReport>) {
-        let stamp = report.map(|report| report.finished_at);
-        if self.report_stamp != stamp {
-            self.textures.clear();
-            for node in &mut self.nodes {
-                node.preview = false;
-                node.run = None;
+    fn sync_previews(
+        &mut self,
+        ctx: &egui::Context,
+        report: Option<&RunReport>,
+        live: Option<&LiveRun>,
+    ) {
+        // 运行过程中：每跑完一个节点就把它的结果贴上卡片（状态 / 缩略图 / 色板 / 产物）——
+        // 图片于是跟着流程一张张出现，而不是等到最后一并显示。
+        if let Some(live) = live {
+            for result in live.done.values() {
+                self.apply_result(ctx, result);
             }
-            // 新的一次运行（或清空）—— 又把高亮亮回来。
-            self.run_marks_hidden = false;
-            self.report_stamp = stamp;
         }
-
-        let Some(report) = report else {
-            return;
-        };
-
-        // 先把运行痕迹（状态 / 耗时 / 警告 / 错误 / 产物）贴到各节点上。
-        for result in &report.nodes {
-            let Some(node) = self.nodes.iter_mut().find(|node| node.id == result.node_id) else {
-                continue;
-            };
-            let file = result.outputs.iter().find_map(|output| output.path.clone());
-            node.run = Some(NodeRun {
-                status: result.status,
-                ms: result.elapsed_ms,
-                error: result.error.clone(),
-                warnings: result.warnings.clone(),
-                file,
-            });
-        }
-
-        // 再把缩略图传成纹理（每个节点只传一次）。
-        for result in &report.nodes {
-            if self.textures.contains_key(&result.node_id) {
-                continue;
-            }
-            // 「输入框」自己就把值摆出来了（图就在框里），不用再摆一条结果图。
-            let inline = self
-                .nodes
-                .iter()
-                .find(|node| node.id == result.node_id)
-                .is_some_and(|node| crate::catalog::has_drop_zone(&node.kind));
-            if inline {
-                continue;
-            }
-            // 一个节点只取第一张能预览的图 —— 卡上只放一条。
-            let Some(url) = result
-                .outputs
-                .iter()
-                .find_map(|output| output.preview.as_deref())
-            else {
-                continue;
-            };
-            let Some((width, height, rgba)) =
-                starrytools_core::image_io::decode_preview_data_url(url)
-            else {
-                continue;
-            };
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-            let texture = ctx.load_texture(
-                format!("preview:{}", result.node_id),
-                image,
-                egui::TextureOptions::NEAREST,
-            );
-            self.textures.insert(result.node_id.clone(), texture);
-            if let Some(node) = self.nodes.iter_mut().find(|node| node.id == result.node_id) {
-                node.preview = true;
+        // 报告到了：再整体对一遗（幂等 —— 缩略图只传一次，其余值一样）。
+        if let Some(report) = report {
+            for result in &report.nodes {
+                self.apply_result(ctx, result);
             }
         }
     }
 
+    /// 把一个节点的结果贴到它的卡片上：运行痕迹 + 色板 + 缩略图。
+    ///
+    /// **幂等**，所以运行中（实时结果）和跑完（正式报告）可以都调它一遍 ——
+    /// 缩略图只传一次（`textures` 里有了就跳过）。
+    fn apply_result(&mut self, ctx: &egui::Context, result: &NodeRunResult) {
+        let Some(index) = self.nodes.iter().position(|node| node.id == result.node_id) else {
+            return;
+        };
+
+        let file = result.outputs.iter().find_map(|output| output.path.clone());
+        // 输出是色板（hex 一行一个）的话，把颜色拆出来，卡片底下画一排小色块。
+        let palette = result
+            .outputs
+            .iter()
+            .find_map(|output| output.palette.as_ref())
+            .map(|colors| colors.iter().map(|color| color_rgba(color)).collect());
+        self.nodes[index].palette = palette;
+        self.nodes[index].run = Some(NodeRun {
+            status: result.status,
+            ms: result.elapsed_ms,
+            error: result.error.clone(),
+            warnings: result.warnings.clone(),
+            file,
+        });
+
+        // 缩略图一个节点只传一次；「输入框」自己就把值摆出来了，不用再摆一条。
+        if self.textures.contains_key(&result.node_id)
+            || crate::catalog::has_drop_zone(&self.nodes[index].kind)
+        {
+            return;
+        }
+        let Some(url) = result
+            .outputs
+            .iter()
+            .find_map(|output| output.preview.as_deref())
+        else {
+            return;
+        };
+        let Some((width, height, rgba)) = starrytools_core::image_io::decode_preview_data_url(url)
+        else {
+            return;
+        };
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+        let texture = ctx.load_texture(
+            format!("preview:{}", result.node_id),
+            image,
+            egui::TextureOptions::NEAREST,
+        );
+        self.textures.insert(result.node_id.clone(), texture);
+        self.nodes[index].preview = true;
+    }
+
+    /// 清掉上一次运行留在画布上的痕迹：缩略图 / 色板 / 状态 / 高亮。
+    ///
+    /// 开始新的一次运行、或用户清空运行记录时调。
+    pub fn reset_run_marks(&mut self) {
+        self.textures.clear();
+        for node in &mut self.nodes {
+            node.preview = false;
+            node.palette = None;
+            node.run = None;
+        }
+        // 高亮亮回来（点过空白处那下作废）。
+        self.run_marks_hidden = false;
+    }
+
     /// 卡片底部的预览条：先铺棋盘格（透出底下的透明像素），再把图像按比例放进去。
-    fn draw_preview(&self, painter: &egui::Painter, inner: Rect, texture: &egui::TextureHandle) {
+    ///
+    /// `bg` 是这块预览**周围**的背景色 —— 圆角外面要补回它，见 [`mask_corners`]。
+    fn draw_preview(
+        &self,
+        painter: &egui::Painter,
+        inner: Rect,
+        texture: &egui::TextureHandle,
+        bg: Color32,
+    ) {
         let cr = CornerRadius::same(theme::R_CTL);
         painter.rect_filled(inner, cr, theme::SURFACE_3);
 
@@ -1751,6 +1888,9 @@ impl Graph {
                 Color32::WHITE,
             );
         }
+
+        // 棋盘格和图片都是直角矩形，会盖到圆角外面 —— 不补的话四角会露出灰角。
+        mask_corners(painter, inner, theme::R_CTL as f32, bg);
 
         painter.rect_stroke(
             inner,
@@ -1851,17 +1991,40 @@ impl Graph {
         // 卡片里面的字一律剪到卡片内 —— 长警告 / 长错误、甚至文件名也不会溢出去。
         let body = painter.with_clip_rect(r);
 
+        // 边线颜色说几件事：跑失败了、跑成功了、还是平常；紫色则说明这是一个
+        // 「会拦住运行等你动手」的节点（运行到它时会额外搏动高亮）。
+        // **边线放到最后画** —— 里面的各段底色是铺满整宽的，先画会被它们盖住。
+        let interactive = crate::catalog::is_interactive(&node.kind, &node.params);
+        let waiting = marks.waiting.as_deref() == Some(node.id.as_str());
+        // 「正在跑的那个」—— 运行中牌子的蓝色边框。
+        let running = marks.running.as_deref() == Some(node.id.as_str());
+        // 要模型但本地还没有：整个节点禁用，卡片上挂一个下载面板（见 `draw_node_controls`）。
+        let model_missing =
+            kind_of(kinds, node).is_some_and(|kind| kind.model_missing(&node.params));
+
         // 白底（投影已经在上一遍里铺好了）。
         painter.rect_filled(r, cr, theme::SURFACE);
 
-        // 边线颜色说三件事：跑失败了、跑成功了、还是平常。
-        // **边线放到最后画** —— 里面的各段底色是铺满整宽的，先画会被它们盖住。
         let border = if marks.failed_nodes.contains(&node.id) {
             theme::DANGER
+        } else if running {
+            theme::ACCENT
+        } else if model_missing {
+            theme::WARN
+        } else if interactive {
+            theme::PURPLE
         } else if marks.ok_nodes.contains(&node.id) {
             theme::ACCENT
         } else {
             theme::HAIRLINE
+        };
+        // 正在等用户操作 / 正在跑：把边框加粗一档。
+        let border_width = if waiting {
+            3.0
+        } else if running || interactive || model_missing {
+            1.5
+        } else {
+            1.0
         };
 
         // ---- 头部 ----
@@ -1921,7 +2084,30 @@ impl Graph {
             r.right() - 8.0 * z
         };
 
-        if let Some(run) = &node.run {
+        if running {
+            // 跑到它了：右边一个转圈的箭头 + 「运行中」，一眼看出光标在哪儿。
+            let spinner = Rect::from_center_size(
+                egui::pos2(right_edge - 6.0 * z, cy),
+                egui::Vec2::splat(10.0 * z),
+            );
+            icons::loader(painter, spinner, theme::ACCENT, (now * 1.2) as f32 % 1.0);
+            painter.text(
+                egui::pos2(right_edge - 13.0 * z, cy),
+                Align2::RIGHT_CENTER,
+                "运行中",
+                FontId::monospace(9.5 * z),
+                theme::ACCENT,
+            );
+        } else if model_missing {
+            // 要模型但本地没有：右边一个「需模型」，提示这个节点还不能跑。
+            painter.text(
+                egui::pos2(right_edge, cy),
+                Align2::RIGHT_CENTER,
+                "需模型",
+                FontId::monospace(9.5 * z),
+                theme::WARN,
+            );
+        } else if let Some(run) = &node.run {
             let (text, color) = match run.status {
                 NodeStatus::Ok => ("完成", theme::OK),
                 NodeStatus::Failed => ("出错", theme::DANGER),
@@ -1962,8 +2148,11 @@ impl Graph {
 
         // ---- 参数区底色（浅灰，圆底） ----
         let (warn_h, error_h, actions_h) = run_extra(node, &self.notes);
-        // 参数区是不是最后一段 —— 是的话底角才收圆（且贴到卡片底部）。
-        let params_last = !params_following(node, &self.notes);
+        // 这一段是不是最后一段（模型面板 / 缩略图 / 提示……）—— 不是的话底角不收圆。
+        let panel_h = model_panel_height(kinds, node);
+        let params_last = !params_following(kinds, node, &self.notes);
+        let params_bottom =
+            r.top() + (node_body_top(node) + params_height_of(kinds, node, &self.notes)) * z;
         if let Some(kind) = kind_of(kinds, node) {
             let ph = params_height(kind, &node.params, &self.notes);
             if ph > 0.0 {
@@ -1987,14 +2176,40 @@ impl Graph {
             }
         }
 
+        // ---- 模型下载面板的底色（紧贴参数区，控件由 `draw_node_controls` 画） ----
+        if panel_h > 0.0 {
+            let rect = Rect::from_min_size(
+                egui::pos2(r.left(), params_bottom),
+                egui::vec2(r.width(), panel_h * z),
+            );
+            painter.rect_filled(
+                rect,
+                CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: theme::R_CARD,
+                    se: theme::R_CARD,
+                },
+                theme::WARN_SOFT,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), params_bottom),
+                    egui::pos2(rect.right(), params_bottom),
+                ],
+                Stroke::new(1.0, theme::WARN_LINE),
+            );
+        }
+
         // ---- 参数区以下的几段 ----
-        let body_pad = if params_following(node, &self.notes) {
+        let body_pad = if panel_h > 0.0 {
+            0.0
+        } else if params_following(kinds, node, &self.notes) {
             BODY_PAD
         } else {
             0.0
         };
-        let mut y = r.top()
-            + (node_body_top(node) + params_height_of(kinds, node, &self.notes) + body_pad) * z;
+        let mut y = params_bottom + (panel_h + body_pad) * z;
 
         if node.preview {
             if let Some(texture) = self.textures.get(&node.id) {
@@ -2006,9 +2221,29 @@ impl Graph {
                     egui::pos2(r.left() + 10.0 * z, y + 8.0 * z),
                     egui::pos2(r.right() - 10.0 * z, y + PREVIEW_H * z - 9.0 * z),
                 );
-                self.draw_preview(painter, inner, texture);
+                self.draw_preview(painter, inner, texture, theme::SURFACE);
             }
             y += PREVIEW_H * z;
+        }
+
+        // ---- 色板：一排小色块 ----
+        if let Some(palette) = &node.palette {
+            if !palette.is_empty() {
+                painter.line_segment(
+                    [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
+                    Stroke::new(1.0, theme::HAIRLINE),
+                );
+                draw_palette(
+                    painter,
+                    Rect::from_min_size(
+                        egui::pos2(r.left() + 10.0 * z, y + 8.0 * z),
+                        egui::vec2(r.width() - 20.0 * z, PALETTE_H * z - 16.0 * z),
+                    ),
+                    palette,
+                    z,
+                );
+            }
+            y += PALETTE_H * z;
         }
 
         // ---- 运行提示 ----
@@ -2129,7 +2364,7 @@ impl Graph {
         }
 
         // 卡片边线最后画 —— 否则会被参数区那层铺满整宽的灰底盖住（失败时尤其明显）。
-        painter.rect_stroke(r, cr, Stroke::new(1.0, border), StrokeKind::Inside);
+        painter.rect_stroke(r, cr, Stroke::new(border_width, border), StrokeKind::Inside);
         if self.selected == Some(i) {
             painter.rect_stroke(
                 r.expand(2.5),
@@ -2340,7 +2575,13 @@ impl Graph {
 
     /// 画一个节点的参数控件。**在它的卡片刚画完之后**调用 ——
     /// 这样叠放顺序才和卡片一致（下面那张卡的控件不会盖到上面那张卡上）。
-    fn draw_node_controls(&mut self, ui: &mut egui::Ui, kinds: &[Kind], i: usize) -> bool {
+    fn draw_node_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        kinds: &[Kind],
+        i: usize,
+        now: f64,
+    ) -> bool {
         let zoom = self.zoom;
         // 缩得太小时控件会挤成一团，索性只留标题和端口（LOD）。
         if zoom < PARAM_LOD_ZOOM {
@@ -2352,7 +2593,10 @@ impl Graph {
         let showing: Vec<usize> = (0..kind.params.len())
             .filter(|&k| kind.params[k].visible(&self.nodes[i].params))
             .collect();
-        if showing.is_empty() {
+        // 要模型但本地还没下载：整个节点禁用，参数全部灰下去 —— **只有那个「模型」
+        // 下拉框还留着**，因为用户正是靠它挑要下哪个模型。
+        let model_missing = kind.model_missing(&self.nodes[i].params);
+        if showing.is_empty() && !model_missing {
             return false;
         }
 
@@ -2374,6 +2618,9 @@ impl Graph {
             let linked = port
                 .as_ref()
                 .is_some_and(|port| self.port_linked(i, &port.id, true));
+            // 缺模型时：除「模型」参数外全部禁用。
+            let is_model_param = kind.model_param.as_deref() == Some(param.id.as_str());
+            let disabled = linked || (model_missing && !is_model_param);
 
             // 开关：标签和开关同一行。
             if matches!(param.control, Control::Bool) {
@@ -2399,7 +2646,7 @@ impl Graph {
                     egui::vec2(30.0 * zoom, row.height()),
                 );
                 if let Some(value) =
-                    control(ui, i, param, switch, &self.nodes[i].params, zoom, linked)
+                    control(ui, i, param, switch, &self.nodes[i].params, zoom, disabled)
                 {
                     self.nodes[i].params.insert(param.id.clone(), value);
                     refresh_ports(&mut self.nodes[i]);
@@ -2441,7 +2688,7 @@ impl Graph {
                 control_rect,
                 &self.nodes[i].params,
                 zoom,
-                linked,
+                disabled,
             ) {
                 self.nodes[i].params.insert(param.id.clone(), value);
                 refresh_ports(&mut self.nodes[i]);
@@ -2460,7 +2707,217 @@ impl Graph {
 
             y += PARAM_GAP * zoom;
         }
+
+        // ---- 模型下载面板（紧贴参数区：挑源 + 下载 / 进度 / 重试） ----
+        if model_missing {
+            let top = card.top()
+                + (node_body_top(&self.nodes[i])
+                    + params_height(&kind, &self.nodes[i].params, &self.notes))
+                    * zoom;
+            let rect = Rect::from_min_size(
+                egui::pos2(card.left(), top),
+                egui::vec2(card.width(), MODEL_PANEL_H * zoom),
+            );
+            self.draw_model_panel(ui, i, &kind, rect, zoom, now);
+        }
+
         changed
+    }
+
+    /// 画「模型还没下载」那块面板：模型名 + 大小 + 一句说明 + 源下拉 + 下载 / 进度 / 重试。
+    ///
+    /// 面板底色由 [`Self::draw_node`] 铺在参数区下面，这里只画内容。
+    fn draw_model_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        kind: &Kind,
+        rect: Rect,
+        zoom: f32,
+        now: f64,
+    ) {
+        let node_id = self.nodes[i].id.clone();
+        let Some(model) = kind.model(&self.nodes[i].params) else {
+            return;
+        };
+
+        let pad = 10.0 * zoom;
+        let left = rect.left() + pad;
+        let width = rect.width() - pad * 2.0;
+        let top = rect.top() + pad;
+        let note_y = top + 16.0 * zoom;
+        let select_y = top + 34.0 * zoom;
+        let select_h = 24.0 * zoom;
+        let action_h = 28.0 * zoom;
+
+        // 当前状态：正在下 / 失败 / 待下载。
+        let busy = self.downloads.busy(&node_id);
+        let failed = self
+            .downloads
+            .get(&node_id)
+            .and_then(|task| task.failed.clone());
+        let fraction = self
+            .downloads
+            .get(&node_id)
+            .and_then(crate::models::Download::fraction);
+        let source = self.downloads.source(&node_id);
+
+        // 标题：模型名 + 大小。
+        ui.painter().text(
+            egui::pos2(left, top),
+            Align2::LEFT_TOP,
+            format!("{}  {}", model.name, model.size),
+            FontId::monospace(11.0 * zoom),
+            theme::INK,
+        );
+        // 第二行：失败原因（红）优先，否则那句说明（灰）。剪在面板里，长了也不出框。
+        let (note, note_color) = match &failed {
+            Some(err) => (err.as_str(), theme::DANGER),
+            None => (model.note, theme::INK_3),
+        };
+        ui.painter().with_clip_rect(rect).text(
+            egui::pos2(left, note_y),
+            Align2::LEFT_TOP,
+            note,
+            FontId::monospace(9.5 * zoom),
+            note_color,
+        );
+
+        // 源下拉。正在下载时锁住 —— 别下半道再换源。
+        let options: Vec<crate::catalog::Choice> = model
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(k, source)| crate::catalog::Choice {
+                value: k.to_string(),
+                label: source.label.to_string(),
+                hint: None,
+            })
+            .collect();
+        if !options.is_empty() {
+            let select_rect =
+                Rect::from_min_size(egui::pos2(left, select_y), egui::vec2(width, select_h));
+            let current = serde_json::json!(source.to_string());
+            if let Some(value) = select_field(
+                ui,
+                ui.id().with(("model-source", i)),
+                select_rect,
+                Some(&current),
+                &options,
+                zoom,
+                busy,
+            ) {
+                if let Some(picked) = value.as_str().and_then(|text| text.parse::<usize>().ok()) {
+                    self.downloads.set_source(&node_id, picked);
+                }
+            }
+        }
+
+        // 底下一整行：待下载 → 主色按钮；正在下 → 进度条（点一下取消）；失败 → 重试。
+        let action = Rect::from_min_size(
+            egui::pos2(left, rect.bottom() - pad - action_h),
+            egui::vec2(width, action_h),
+        );
+        let resp = ui.interact(action, ui.id().with(("model-action", i)), Sense::click());
+        let hot = resp.hovered();
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let cr = CornerRadius::same(theme::R_CTL);
+        let painter = ui.painter();
+
+        if busy {
+            painter.rect_filled(action, cr, theme::SURFACE);
+            painter.rect_stroke(
+                action,
+                cr,
+                Stroke::new(1.0, theme::ACCENT_LINE),
+                StrokeKind::Inside,
+            );
+            match fraction {
+                Some(fraction) => {
+                    let mut fill = action;
+                    fill.set_right(action.left() + action.width() * fraction);
+                    painter.rect_filled(fill, cr, theme::ACCENT_SOFT);
+                }
+                None => {
+                    // 不知道总量：一段来回走的浅蓝，表示「在下但说不准还剩多少」。
+                    let width = action.width() * 0.35;
+                    let t = (now * 0.7).rem_euclid(1.0) as f32;
+                    let x0 = (action.left() - width + (action.width() + width) * t)
+                        .max(action.left() + 2.0);
+                    let x1 = (x0 + width).min(action.right() - 2.0);
+                    if x1 > x0 {
+                        painter.rect_filled(
+                            Rect::from_min_max(
+                                egui::pos2(x0, action.top() + 2.0),
+                                egui::pos2(x1, action.bottom() - 2.0),
+                            ),
+                            CornerRadius::same((theme::R_CTL as f32 * 0.7) as u8),
+                            theme::ACCENT_SOFT,
+                        );
+                    }
+                }
+            }
+            let label = if hot {
+                "取消下载".to_string()
+            } else {
+                match fraction {
+                    Some(fraction) => format!("下载中 {}%", (fraction * 100.0).round() as i64),
+                    None => "下载中…".to_string(),
+                }
+            };
+            painter.text(
+                action.center(),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::monospace(10.5 * zoom),
+                theme::ACCENT,
+            );
+            if resp.clicked() {
+                self.downloads.cancel(&node_id);
+            }
+        } else {
+            let fill = if hot {
+                theme::ACCENT_HOVER
+            } else {
+                theme::ACCENT
+            };
+            painter.rect_filled(action, cr, fill);
+            let label = if failed.is_some() {
+                "重试下载"
+            } else {
+                "下载模型"
+            };
+            let galley = painter.layout_no_wrap(
+                label.to_string(),
+                FontId::monospace(10.5 * zoom),
+                Color32::WHITE,
+            );
+            let icon_box = 12.0 * zoom;
+            let gap = 5.0 * zoom;
+            let content = icon_box + gap + galley.size().x;
+            let x = action.center().x - content * 0.5;
+            icons::download(
+                painter,
+                Rect::from_min_size(
+                    egui::pos2(x, action.center().y - icon_box * 0.5),
+                    egui::vec2(icon_box, icon_box),
+                ),
+                Color32::WHITE,
+            );
+            painter.galley(
+                egui::pos2(
+                    x + icon_box + gap,
+                    crate::widgets::ink_top(&galley, action.center().y),
+                ),
+                galley,
+                Color32::WHITE,
+            );
+            if resp.clicked() {
+                self.downloads.start(&node_id, model, source);
+            }
+        }
     }
 
     /// 文件拖入 / `Ctrl+V` 粘贴：统一收下来，交给一个「输入区」节点。返回有没有变。
@@ -2592,7 +3049,7 @@ impl Graph {
                 let mut painter = ui.painter_at(rect.expand(1.0));
                 painter.set_opacity(appear);
                 match &texture {
-                    Some(texture) => self.draw_preview(&painter, rect, texture),
+                    Some(texture) => self.draw_preview(&painter, rect, texture, theme::SURFACE_2),
                     None => {
                         painter.rect_filled(rect, cr, theme::SURFACE_2);
                         painter.rect_stroke(
@@ -2734,6 +3191,94 @@ impl Graph {
 }
 
 /// 两个颜色之间按 `t` 线性混合（0 = 全 `a`，1 = 全 `b`）。渐变用。
+/// 背景点阵用的小圆贴图：一张 `SIDE×SIDE` 的白色圆，带一点抗锯齿。
+///
+/// 按 `(图标, 尺寸)` 的思路缓存进 `ctx.data`，只建一次。
+fn dot_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    const SIDE: usize = 16;
+    let id = egui::Id::new("starrytools-canvas-dot");
+    if let Some(handle) = ctx.data_mut(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return handle;
+    }
+    let center = (SIDE as f32 - 1.0) / 2.0;
+    // 圆几乎顶满贴图，这样贴到屏幕上的实际半径才和原来 `circle_filled(1.0)` 接近。
+    let radius = SIDE as f32 / 2.0 - 0.5;
+    let mut pixels = Vec::with_capacity(SIDE * SIDE);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let coverage = (radius + 0.5 - distance).clamp(0.0, 1.0);
+            pixels.push(Color32::from_white_alpha((coverage * 255.0) as u8));
+        }
+    }
+    let handle = ctx.load_texture(
+        "canvas-dot",
+        egui::ColorImage::new([SIDE, SIDE], pixels),
+        egui::TextureOptions::LINEAR,
+    );
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    handle
+}
+
+/// 往网格里塞一颗小圆（用一个采样小圆贴图的四边形）。
+fn push_dot(mesh: &mut egui::Mesh, center: Pos2, radius: f32, color: Color32) {
+    let base = mesh.vertices.len() as u32;
+    let half = egui::vec2(radius, radius);
+    let (min, max) = (center - half, center + half);
+    let vertex = |pos: Pos2, uv: Pos2| egui::epaint::Vertex { pos, uv, color };
+    mesh.vertices.push(vertex(min, egui::pos2(0.0, 0.0)));
+    mesh.vertices
+        .push(vertex(egui::pos2(max.x, min.y), egui::pos2(1.0, 0.0)));
+    mesh.vertices.push(vertex(max, egui::pos2(1.0, 1.0)));
+    mesh.vertices
+        .push(vertex(egui::pos2(min.x, max.y), egui::pos2(0.0, 1.0)));
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// 一排小色块，展示一个色板。色块太多就只画能放下的那些。
+fn draw_palette(painter: &egui::Painter, band: Rect, palette: &[[u8; 4]], z: f32) {
+    if palette.is_empty() || band.width() <= 0.0 || band.height() <= 0.0 {
+        return;
+    }
+    let gap = 3.0 * z;
+    let min_w = 4.0 * z;
+    let max_w = 22.0 * z;
+    let radius = CornerRadius::same((2.0 * z).round().max(1.0) as u8);
+    let count = palette.len();
+
+    // 放得下就一个不落；放不下就按能放的数量截断，别挤成一团。
+    let width = (band.width() - gap * (count as f32 - 1.0)) / count as f32;
+    let (shown, width) = if width >= min_w {
+        (count, width.min(max_w))
+    } else {
+        let fits = (((band.width() + gap) / (min_w + gap)).floor() as usize).clamp(1, count);
+        (
+            fits,
+            (band.width() - gap * (fits as f32 - 1.0)) / fits as f32,
+        )
+    };
+
+    let mut x = band.left();
+    for color in palette.iter().take(shown) {
+        let cell = Rect::from_min_size(egui::pos2(x, band.top()), egui::vec2(width, band.height()));
+        painter.rect_filled(
+            cell,
+            radius,
+            Color32::from_rgb(color[0], color[1], color[2]),
+        );
+        painter.rect_stroke(
+            cell,
+            radius,
+            Stroke::new(1.0, theme::HAIRLINE),
+            StrokeKind::Inside,
+        );
+        x += width + gap;
+    }
+}
+
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
@@ -2817,24 +3362,55 @@ fn drop_content(params: &Params, param_id: &str) -> Drop {
 /// 一个节点的完整高度（流坐标）。
 fn height_of_node(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> f32 {
     let (warn, error, actions) = run_extra(node, notes);
+    let panel = model_panel_height(kinds, node);
+    // 模型面板紧贴参数区，中间不留 `BODY_PAD` 那条缝。
+    let gap = if panel > 0.0 {
+        0.0
+    } else if params_following(kinds, node, notes) {
+        BODY_PAD
+    } else {
+        0.0
+    };
     node_body_top(node)
         + params_height_of(kinds, node, notes)
-        + if params_following(node, notes) {
-            BODY_PAD
+        + panel
+        + gap
+        + if node.preview { PREVIEW_H } else { 0.0 }
+        + if node
+            .palette
+            .as_ref()
+            .is_some_and(|colors| !colors.is_empty())
+        {
+            PALETTE_H
         } else {
             0.0
         }
-        + if node.preview { PREVIEW_H } else { 0.0 }
         + warn
         + error
         + actions
 }
 
-/// 参数区后面还有没有别的段（缩略图 / 提示 / 错误 / 产物行）。
+/// 模型「下载面板」占多高（不缺模型时是 0）。面板的控件在 `draw_node_controls` 里画。
+fn model_panel_height(kinds: &[Kind], node: &Node) -> f32 {
+    match kind_of(kinds, node) {
+        Some(kind) if kind.model_missing(&node.params) => MODEL_PANEL_H,
+        _ => 0.0,
+    }
+}
+
+/// 参数区后面还有没有别的段（模型面板 / 缩略图 / 色板 / 提示 / 错误 / 产物行）。
 /// 没有的话，参数区的圆底就贴到卡片底部，和卡片自己的圆角对齐。
-fn params_following(node: &Node, notes: &HashMap<String, TextBlock>) -> bool {
+fn params_following(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> bool {
     let (warn, error, actions) = run_extra(node, notes);
-    node.preview || warn > 0.0 || error > 0.0 || actions > 0.0
+    model_panel_height(kinds, node) > 0.0
+        || node.preview
+        || node
+            .palette
+            .as_ref()
+            .is_some_and(|colors| !colors.is_empty())
+        || warn > 0.0
+        || error > 0.0
+        || actions > 0.0
 }
 
 /// 端口区下沿（相对卡片顶部，流坐标）—— 也就是参数区的上沿。
@@ -2879,10 +3455,17 @@ fn run_extra(node: &Node, notes: &HashMap<String, TextBlock>) -> (f32, f32, f32)
 
 /// 节点在**默认参数、还没跑过**时的高度（流坐标）—— 只用来算刚拖出来的节点落在哪。
 /// 必须和 [`height_of_node`] 对得上：那边只有「参数区后面还有内容」时才多加 `BODY_PAD`，
-/// 刚拖出来的节点没有运行痕迹，所以这里也不加。
+/// 刚拖出来的节点没有运行痕迹，所以这里也不加。模型面板要算进去，否则落点会偏高。
 fn height_of(kind: &Kind, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
     let rows = kind.inputs.len().max(kind.outputs.len()).max(1) as f32;
-    HEADER_H + rows * PORT_ROW_H + params_height(kind, params, notes)
+    HEADER_H
+        + rows * PORT_ROW_H
+        + params_height(kind, params, notes)
+        + if kind.model_missing(params) {
+            MODEL_PANEL_H
+        } else {
+            0.0
+        }
 }
 
 /// 参数区占多高。被 `visible_when` 藏掉的不占地方。
@@ -2978,6 +3561,7 @@ fn control_height(param: &Param, params: &Params) -> f32 {
             multiline_height(text)
         }
         Control::Bool => PARAM_BOOL_H,
+        Control::Color => color_height(),
         Control::DropZone => {
             // 有内容时下面多一行「清空」按钮。
             if matches!(drop_content(params, &param.id), Drop::Empty) {
@@ -3041,7 +3625,7 @@ fn control(
                 toggle_disabled(ui.painter(), rect, value);
                 return None;
             }
-            toggle(ui, id, rect, &mut value).then(|| serde_json::json!(value))
+            widgets::switch(ui, id, rect, &mut value).then(|| serde_json::json!(value))
         }
 
         Control::Number {
@@ -3066,11 +3650,11 @@ fn control(
         Control::Slider {
             min,
             max,
-            step,
             integer,
             unit,
+            ..
         } => {
-            let mut value = current.and_then(Value::as_f64).unwrap_or(*min);
+            let value = current.and_then(Value::as_f64).unwrap_or(*min);
             if disabled {
                 disabled_shell(ui.painter(), rect, theme::R_CTL);
                 muted_value(
@@ -3085,17 +3669,17 @@ fn control(
                 );
                 return None;
             }
-            let widget = egui::Slider::new(&mut value, *min..=*max)
-                .step_by(*step)
-                .suffix(unit.as_deref().unwrap_or(""));
-            if ui.put(rect, widget).changed() {
-                if *integer {
-                    value = value.round();
-                }
-                Some(serde_json::json!(value))
-            } else {
-                None
-            }
+            widgets::slider(
+                ui,
+                id,
+                rect,
+                value as f32,
+                *min as f32,
+                *max as f32,
+                *integer,
+                unit.as_deref().unwrap_or(""),
+            )
+            .map(|next| serde_json::json!(next as f64))
         }
 
         Control::Text {
@@ -3113,6 +3697,8 @@ fn control(
         ),
 
         Control::Select { options } => select_field(ui, id, rect, current, options, zoom, disabled),
+
+        Control::Color => color_field(ui, id, rect, current, zoom, disabled),
 
         Control::File { .. } => file_field(ui, id, rect, current, &param.control, zoom, disabled),
 
@@ -3406,6 +3992,593 @@ fn text_field(
     }
 }
 
+/// 颜色控件（收起时）那条色条的高度（流坐标）。
+const COLOR_BAR_H: f32 = PARAM_CONTROL_H;
+/// 弹出的取色器宽度与内部各段高度（屏幕像素，不跟缩放走 —— 取色要看得清）。
+const PICKER_W: f32 = 236.0;
+const PICKER_SV_H: f32 = 132.0;
+const PICKER_HUE_H: f32 = 16.0;
+
+/// 颜色控件占多高（流坐标）—— 收起时就是一条色条。
+fn color_height() -> f32 {
+    COLOR_BAR_H
+}
+
+/// 颜色控件：收起时是一条显示当前颜色的色条，点开是一个**通用取色器**
+/// —— 取色区（x = 饱和度，y = 亮度）、色相条、R/G/B、Hex、不透明度，双向同步。
+///
+/// 通用可复用：哪个节点声明一个 `Color` 参数就能用上它。
+fn color_field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    rect: Rect,
+    current: Option<&Value>,
+    zoom: f32,
+    disabled: bool,
+) -> Option<Value> {
+    let rgba = color_rgba(current.and_then(Value::as_str).unwrap_or("#000000"));
+    let radius = CornerRadius::same(theme::R_CTL);
+
+    let resp = ui.interact(rect, id.with("bar"), Sense::click());
+    if !disabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let fade = if disabled { 0.4 } else { 1.0 };
+    paint_color_chip(ui.painter(), rect, rgba, radius, fade);
+    // 色条上把 hex 写出来，不点开也一眼看得到是什么颜色。
+    ui.painter().text(
+        egui::pos2(rect.right() - 8.0 * zoom, rect.center().y),
+        Align2::RIGHT_CENTER,
+        color_string(rgba),
+        FontId::monospace(10.0 * zoom),
+        readable_ink(rgba).gamma_multiply(fade),
+    );
+
+    if disabled {
+        return None;
+    }
+
+    let ctx = ui.ctx().clone();
+    let open_id = id.with("open");
+    let mut open = temp_bool(&ctx, open_id).unwrap_or(false);
+    if resp.clicked() {
+        open = !open;
+    }
+
+    let changed = if open {
+        color_picker(ui, id, rect, rgba)
+    } else {
+        None
+    };
+
+    // 点别处就收起来。点在色条上不算「别处」—— 那是在切换开合。
+    if open && ctx.input(|input| input.pointer.any_click()) {
+        if let Some(point) = ctx.input(|input| input.pointer.interact_pos()) {
+            let inside_bar = rect.contains(point);
+            let inside_popup =
+                temp_rect(&ctx, id.with("popup-rect")).is_some_and(|r| r.contains(point));
+            if !inside_bar && !inside_popup {
+                open = false;
+            }
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(open_id, open));
+
+    changed
+}
+
+/// 弹出的取色器。返回 `Some(值)` 表示这一帧把颜色改了。
+fn color_picker(ui: &mut egui::Ui, id: egui::Id, bar: Rect, rgba: [u8; 4]) -> Option<Value> {
+    let ctx = ui.ctx().clone();
+    let hue_id = id.with("hue");
+    let (h, s, _) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+    // 灰色的颜色里 h 无从得知，用上一次记住的色相，取色区才不会蹦到红。
+    let mut hue = if s > 0.0 {
+        h
+    } else {
+        temp_f32(&ctx, hue_id).unwrap_or(h)
+    };
+
+    let original = rgba;
+    let mut rgba = rgba;
+    let mut dirty = false;
+
+    let area = egui::Area::new(id.with("popup"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(egui::pos2(bar.left(), bar.bottom() + 6.0))
+        .show(&ctx, |ui| {
+            widgets::panel_frame().show(ui, |ui| {
+                ui.set_width(PICKER_W);
+                egui::Frame::default()
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        let inner_w = PICKER_W - 20.0;
+                        let (_, sat, val) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+
+                        // ---- 取色区：x = 饱和度，y = 亮度 ----
+                        let (sv, sv_resp) = ui.allocate_exact_size(
+                            egui::vec2(inner_w, PICKER_SV_H),
+                            Sense::click_and_drag(),
+                        );
+                        draw_sv_square(ui.painter(), sv, hue);
+                        if let Some(point) = dragged_point(&sv_resp) {
+                            let new_sat = ((point.x - sv.left()) / sv.width()).clamp(0.0, 1.0);
+                            let new_val =
+                                1.0 - ((point.y - sv.top()) / sv.height()).clamp(0.0, 1.0);
+                            let (r, g, b) = hsv_to_rgb(hue, new_sat, new_val);
+                            rgba = [r, g, b, rgba[3]];
+                            dirty = true;
+                        }
+                        let cursor = egui::pos2(
+                            sv.left() + sat * sv.width(),
+                            sv.top() + (1.0 - val) * sv.height(),
+                        );
+                        ui.painter()
+                            .circle_stroke(cursor, 5.0, Stroke::new(2.0, Color32::WHITE));
+                        ui.painter().circle_stroke(
+                            cursor,
+                            6.5,
+                            Stroke::new(1.0, Color32::from_black_alpha(140)),
+                        );
+
+                        ui.add_space(8.0);
+
+                        // ---- 色相条 ----
+                        let (hue_rect, hue_resp) = ui.allocate_exact_size(
+                            egui::vec2(inner_w, PICKER_HUE_H),
+                            Sense::click_and_drag(),
+                        );
+                        draw_hue_bar(ui.painter(), hue_rect);
+                        if let Some(point) = dragged_point(&hue_resp) {
+                            hue = ((point.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0)
+                                * 360.0;
+                            let (_, sat, val) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+                            let (r, g, b) = hsv_to_rgb(hue, sat, val);
+                            rgba = [r, g, b, rgba[3]];
+                            dirty = true;
+                        }
+                        let marker_x = hue_rect.left() + (hue / 360.0) * hue_rect.width();
+                        ui.painter().rect_stroke(
+                            Rect::from_center_size(
+                                egui::pos2(marker_x, hue_rect.center().y),
+                                egui::vec2(5.0, hue_rect.height() + 4.0),
+                            ),
+                            CornerRadius::same(3),
+                            Stroke::new(2.0, Color32::WHITE),
+                            StrokeKind::Outside,
+                        );
+
+                        ui.add_space(10.0);
+
+                        // ---- Hex + 不透明度 ----
+                        picker_row(ui, 22.0, |ui, row| {
+                            picker_label(ui, row, 0.0, "Hex");
+                            let hex_rect = Rect::from_min_size(
+                                egui::pos2(row.left() + 30.0, row.top()),
+                                egui::vec2(84.0, row.height()),
+                            );
+                            if let Some(text) =
+                                hex_field(ui, id.with("hex"), hex_rect, &color_string(rgba))
+                            {
+                                rgba = color_rgba(&text);
+                                dirty = true;
+                            }
+                            let alpha_rect = Rect::from_min_size(
+                                egui::pos2(hex_rect.right() + 8.0, row.top()),
+                                egui::vec2(
+                                    (row.right() - hex_rect.right() - 8.0).max(40.0),
+                                    row.height(),
+                                ),
+                            );
+                            if let Some(next) = widgets::slider(
+                                ui,
+                                id.with("alpha"),
+                                alpha_rect,
+                                rgba[3] as f32,
+                                0.0,
+                                255.0,
+                                true,
+                                "",
+                            ) {
+                                rgba[3] = next.round().clamp(0.0, 255.0) as u8;
+                                dirty = true;
+                            }
+                        });
+
+                        ui.add_space(6.0);
+
+                        // ---- R / G / B ----
+                        picker_row(ui, 22.0, |ui, row| {
+                            for (index, label) in ["R", "G", "B"].into_iter().enumerate() {
+                                let x = row.left() + index as f32 * 72.0;
+                                picker_label(ui, row, index as f32 * 72.0, label);
+                                let field = Rect::from_min_size(
+                                    egui::pos2(x + 14.0, row.top()),
+                                    egui::vec2(42.0, row.height()),
+                                );
+                                if let Some(value) = number_field(
+                                    ui,
+                                    id.with(label),
+                                    field,
+                                    rgba[index] as f64,
+                                    0.0,
+                                    255.0,
+                                    true,
+                                    None,
+                                    1.0,
+                                    false,
+                                ) {
+                                    if let Some(byte) = value.as_u64() {
+                                        rgba[index] = byte as u8;
+                                        dirty = true;
+                                    }
+                                }
+                            }
+                        });
+                    });
+            });
+        });
+    ctx.data_mut(|data| data.insert_temp(id.with("popup-rect"), area.response.rect));
+
+    // 记住色相供下次使用（全灰的颜色里 h 丢了）。
+    let (h, s, _) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+    let remembered = if s > 0.0 { h } else { hue };
+    ctx.data_mut(|data| data.insert_temp(hue_id, remembered));
+
+    if dirty && color_string(rgba) != color_string(original) {
+        Some(serde_json::json!(color_string(rgba)))
+    } else {
+        None
+    }
+}
+
+/// 取色器里的一行：把内容包进一个**定死 rect** 的子 scope。
+///
+/// 里面的输入框用的是 `ui.put`，它会顺手推进父级光标；若直接摊在父级的
+/// `horizontal` 里排，每个输入框的宽度会被算两次 —— 一行很快挤爆，字母和框就叠上了。
+/// 包一层定死 rect 的 scope 后，父级只按这一行的尺寸推进一次，里面怎么放都不影响外面。
+fn picker_row(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui, Rect)) {
+    let width = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    ui.scope_builder(egui::UiBuilder::new().max_rect(row), |ui| {
+        // 占下整行的位置，让父级按这一行的尺寸推进（而不是按内容拼出来的那块）。
+        let _ = ui.allocate_rect(row, Sense::hover());
+        add(ui, row);
+    });
+}
+
+/// 取色器一行的左侧小标签（在行内坐标里，`offset` 是相对行左边的偏移）。
+fn picker_label(ui: &egui::Ui, row: Rect, offset: f32, text: &str) {
+    ui.painter().text(
+        egui::pos2(row.left() + offset, row.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::monospace(10.0),
+        theme::INK_3,
+    );
+}
+
+/// 取色 / 拖动时指针落在控件上的那一点。
+fn dragged_point(resp: &egui::Response) -> Option<Pos2> {
+    (resp.dragged() || resp.clicked())
+        .then(|| resp.interact_pointer_pos())
+        .flatten()
+}
+
+/// 取色区：白色→色相 的横向渐变，叠上 透明→黑 的纵向渐变。
+/// x 是饱和度、y 是亮度，所以左上角是白、右上角是纯色、底部是黑。
+fn draw_sv_square(painter: &egui::Painter, rect: Rect, hue: f32) {
+    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
+    let hue_color = Color32::from_rgb(r, g, b);
+    let clear = Color32::from_rgba_unmultiplied(0, 0, 0, 0);
+    let black = Color32::from_rgb(0, 0, 0);
+
+    let mut horizontal = egui::Mesh::default();
+    push_quad(
+        &mut horizontal,
+        rect,
+        [Color32::WHITE, hue_color, hue_color, Color32::WHITE],
+    );
+    painter.add(egui::Shape::mesh(horizontal));
+
+    let mut vertical = egui::Mesh::default();
+    push_quad(&mut vertical, rect, [clear, clear, black, black]);
+    painter.add(egui::Shape::mesh(vertical));
+
+    // 取色区 / 色相条不加圆角：渐变是方角的网格，裁不出圆角，索性就方着来。
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(1.0, theme::HAIRLINE),
+        StrokeKind::Inside,
+    );
+}
+
+/// 色相条：红→黄→绿→青→蓝→品红→红的一条渐变。
+fn draw_hue_bar(painter: &egui::Painter, rect: Rect) {
+    const STOPS: [(f32, [u8; 3]); 7] = [
+        (0.0, [255, 0, 0]),
+        (1.0 / 6.0, [255, 255, 0]),
+        (2.0 / 6.0, [0, 255, 0]),
+        (3.0 / 6.0, [0, 255, 255]),
+        (4.0 / 6.0, [0, 0, 255]),
+        (5.0 / 6.0, [255, 0, 255]),
+        (1.0, [255, 0, 0]),
+    ];
+    let mut mesh = egui::Mesh::default();
+    for (t, [r, g, b]) in STOPS {
+        let x = rect.left() + t * rect.width();
+        let color = Color32::from_rgb(r, g, b);
+        mesh.vertices
+            .push(solid_vertex(egui::pos2(x, rect.top()), color));
+        mesh.vertices
+            .push(solid_vertex(egui::pos2(x, rect.bottom()), color));
+    }
+    for pair in (0..STOPS.len() - 1).map(|i| (i as u32 * 2, i as u32 * 2 + 1)) {
+        let (a, b) = pair;
+        mesh.indices
+            .extend_from_slice(&[a, b, a + 3, a, a + 3, a + 2]);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(1.0, theme::HAIRLINE),
+        StrokeKind::Inside,
+    );
+}
+
+/// 一个用顶点颜色着色的四边形（不采样贴图，所以 uv 指向字体的白点）。
+/// 顶点顺序：左上、右上、右下、左下。
+fn push_quad(mesh: &mut egui::Mesh, rect: Rect, colors: [Color32; 4]) {
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for (point, color) in corners.into_iter().zip(colors) {
+        mesh.vertices.push(solid_vertex(point, color));
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+}
+
+fn solid_vertex(pos: Pos2, color: Color32) -> egui::epaint::Vertex {
+    egui::epaint::Vertex {
+        pos,
+        uv: egui::epaint::WHITE_UV,
+        color,
+    }
+}
+
+/// 把 `rect` 的四个圆角补成 `bg`：直角矩形（棋盘格、图片）会盖到圆角外面，
+/// 四角于是露出灰角。这里在四个角各补一小块「方角减四分之一圆」的月亮形，
+/// 把溢出圆角的那部分盖回背景色。用一小片顶点色网格拼出来（`radius` 是圆角半径）。
+fn mask_corners(painter: &egui::Painter, rect: Rect, radius: f32, bg: Color32) {
+    let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    if r <= 0.5 {
+        return;
+    }
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    // 每个角：方角顶点 + 圆心 + 圆弧的起 / 止角（屏幕 y 向下）。
+    let corners = [
+        (
+            rect.left_top(),
+            egui::pos2(rect.left() + r, rect.top() + r),
+            PI,
+            PI + FRAC_PI_2,
+        ),
+        (
+            rect.right_top(),
+            egui::pos2(rect.right() - r, rect.top() + r),
+            PI + FRAC_PI_2,
+            TAU,
+        ),
+        (
+            rect.right_bottom(),
+            egui::pos2(rect.right() - r, rect.bottom() - r),
+            0.0,
+            FRAC_PI_2,
+        ),
+        (
+            rect.left_bottom(),
+            egui::pos2(rect.left() + r, rect.bottom() - r),
+            FRAC_PI_2,
+            PI,
+        ),
+    ];
+
+    let steps = ((r * 2.0) as usize).clamp(4, 16);
+    let mut mesh = egui::Mesh::default();
+    for (corner, center, start, end) in corners {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.push(solid_vertex(corner, bg));
+        for step in 0..=steps {
+            let angle = start + (end - start) * (step as f32 / steps as f32);
+            let point = egui::pos2(center.x + r * angle.cos(), center.y + r * angle.sin());
+            mesh.vertices.push(solid_vertex(point, bg));
+        }
+        // 从方角顶点扇形铺到这段圆弧上。
+        for step in 0..steps {
+            mesh.indices
+                .extend_from_slice(&[base, base + 1 + step as u32, base + 2 + step as u32]);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// 色条：一块浅灰圆角底，再盖上颜色。半透明的颜色透出底，看起来就是「没铺满」。
+///
+/// 不用棋盘格：棋盘格是一堆方角小方块，盖不住圆角 —— 四角会从圆弧外面冒出来。
+/// 浅灰底 + 整块圆角颜色就完全落在圆角里，而且不管衬在什么背景上都对。
+fn paint_color_chip(
+    painter: &egui::Painter,
+    rect: Rect,
+    rgba: [u8; 4],
+    radius: CornerRadius,
+    fade: f32,
+) {
+    painter.rect_filled(rect, radius, theme::SURFACE_3.gamma_multiply(fade));
+    painter.rect_filled(
+        rect,
+        radius,
+        Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]).gamma_multiply(fade),
+    );
+    // 完全透明时画一道斜杠，一眼能看出「这里没颜色」。
+    if rgba[3] == 0 {
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 6.0, rect.bottom() - 6.0),
+                egui::pos2(rect.right() - 6.0, rect.top() + 6.0),
+            ],
+            Stroke::new(1.5, theme::ACCENT_LINE.gamma_multiply(fade)),
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme::HAIRLINE.gamma_multiply(fade)),
+        StrokeKind::Inside,
+    );
+}
+
+/// 色块上的字用黑还是白：按亮度挑，保证读得清。
+fn readable_ink(rgba: [u8; 4]) -> Color32 {
+    let luma = 0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32;
+    // 半透明时底下透出的是浅灰底，亮色或透明都用深色字。
+    if rgba[3] < 128 || luma > 150.0 {
+        theme::INK
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// 一个小的十六进制输入框（类似 `number_field`，但它收的是文本）。
+fn hex_field(ui: &mut egui::Ui, id: egui::Id, rect: Rect, current: &str) -> Option<String> {
+    input_shell(ui.painter(), rect, theme::R_CTL);
+    let editing = ui.ctx().memory(|memory| memory.focused()) == Some(id);
+    let mut draft = if editing {
+        ui.data_mut(|data| data.get_temp::<String>(id))
+            .unwrap_or_else(|| current.to_string())
+    } else {
+        current.to_string()
+    };
+    let inner = rect.shrink2(egui::vec2(7.0, 3.0));
+    let resp = ui.put(
+        inner,
+        egui::TextEdit::singleline(&mut draft)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .font(FontId::monospace(11.0))
+            .desired_width(inner.width()),
+    );
+    if ui.ctx().memory(|memory| memory.focused()) == Some(id) {
+        ui.data_mut(|data| data.insert_temp(id, draft.clone()));
+    }
+    input_shell_state(
+        ui.painter(),
+        rect,
+        theme::R_CTL,
+        resp.hovered(),
+        resp.has_focus(),
+    );
+    resp.changed().then_some(draft)
+}
+
+fn temp_bool(ctx: &egui::Context, id: egui::Id) -> Option<bool> {
+    ctx.data_mut(|data| data.get_temp::<bool>(id))
+}
+
+fn temp_f32(ctx: &egui::Context, id: egui::Id) -> Option<f32> {
+    ctx.data_mut(|data| data.get_temp::<f32>(id))
+}
+
+fn temp_rect(ctx: &egui::Context, id: egui::Id) -> Option<Rect> {
+    ctx.data_mut(|data| data.get_temp::<Rect>(id))
+}
+
+/// RGB → HSV。h 是 0–360，s / v 是 0–1。
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+    let sat = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
+    (hue, sat, max)
+}
+
+/// HSV → RGB。
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h = h.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (
+        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+/// 把颜色字符串解成 RGBA。`transparent` → 全透明；坏值 → 黑。
+///
+/// 值可能是一整段**色板文本**（hex 一行一个）—— 那种情况下取第一行：
+/// 需要一种颜色、却拿到一板多色的，就用第一个。
+fn color_rgba(value: &str) -> [u8; 4] {
+    let value = value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if value.eq_ignore_ascii_case("transparent") {
+        return [0, 0, 0, 0];
+    }
+    let hex = value.trim_start_matches('#');
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return [0, 0, 0, 255];
+    }
+    let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap_or(0);
+    match hex.len() {
+        6 => [byte(0), byte(2), byte(4), 255],
+        8 => [byte(0), byte(2), byte(4), byte(6)],
+        _ => [0, 0, 0, 255],
+    }
+}
+
+/// RGBA → 颜色字符串：不透明用 6 位，有透明度用 8 位。
+fn color_string(rgba: [u8; 4]) -> String {
+    if rgba[3] == 255 {
+        format!("#{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2])
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            rgba[0], rgba[1], rgba[2], rgba[3]
+        )
+    }
+}
+
 /// 下拉框：带边框的按钮 + 一个弹出的列表（对勾 + 短说明）。
 fn select_field(
     ui: &mut egui::Ui,
@@ -3561,56 +4734,6 @@ fn menu_item(
         );
     }
     resp.clicked()
-}
-
-/// 自己画的开关。
-///
-/// egui 只有 `checkbox`，而这个设计里开关是有滑动动画的（原版为它专门改过一次），
-/// 所以轨道和圆点都自己画。
-fn toggle(ui: &mut egui::Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool {
-    let resp = ui.interact(rect, id, Sense::click());
-    let changed = resp.clicked();
-    if changed {
-        *value = !*value;
-    }
-    let t = ui.ctx().animate_bool_with_time(id, *value, 0.16);
-
-    // 轨道高矮跟着行高（`rect` 已经乘过缩放）走，不再夹到固定像素 ——
-    // 否则缩放时开关不跟着变大变小。
-    // 右缘对齐到 `rect` 的右缘 —— 与同一列的下拉框 / 输入框居右对齐。
-    let height = rect.height() * 0.8;
-    let width = (height * 1.8).min(rect.width());
-    let track = Rect::from_min_size(
-        egui::pos2(rect.right() - width, rect.center().y - height * 0.5),
-        egui::vec2(width, height),
-    );
-    let radius = CornerRadius::same((height * 0.5) as u8);
-    let accent = if *value {
-        theme::ACCENT
-    } else {
-        theme::HAIRLINE_STRONG
-    };
-
-    let painter = ui.painter();
-    painter.rect_filled(
-        track,
-        radius,
-        if *value {
-            theme::ACCENT
-        } else {
-            theme::SURFACE_3
-        },
-    );
-    painter.rect_stroke(track, radius, Stroke::new(1.0, accent), StrokeKind::Inside);
-
-    // 圆点和边距也跟着高度走，不然缩放时圆点比例会跑掉。
-    let pad = height * 0.15;
-    let dot = height * 0.5 - pad;
-    let travel = (track.width() - 2.0 * (dot + pad)).max(0.0);
-    let x = track.left() + dot + pad + travel * t;
-    painter.circle_filled(egui::pos2(x, track.center().y), dot, theme::SURFACE);
-
-    changed
 }
 
 /// 禁用态的开关：同一个轨道和圆点，只是灰下去、不响应。
@@ -3838,6 +4961,7 @@ mod tests {
             outputs: Vec::new(),
             params: convert.defaults.clone(),
             preview: false,
+            palette: None,
             run: None,
         };
         refresh_ports(&mut node);
@@ -3922,6 +5046,7 @@ mod tests {
                 outputs: Vec::new(),
                 params: kind.defaults.clone(),
                 preview: false,
+                palette: None,
                 run: None,
             };
             refresh_ports(&mut node);
@@ -3941,7 +5066,6 @@ mod tests {
             slash: None,
             severing: Vec::new(),
             textures: HashMap::new(),
-            report_stamp: None,
             pending_run: None,
             entering: HashMap::new(),
             clipboard: None,
@@ -3950,6 +5074,9 @@ mod tests {
             drop_textures: HashMap::new(),
             drop_editing: HashSet::new(),
             run_marks_hidden: false,
+            fps: 0.0,
+            last_frame: None,
+            downloads: Downloads::default(),
         }
     }
 
@@ -4210,6 +5337,8 @@ mod tests {
             "rename",
             "save_output",
             "literal_text",
+            // 本地没模型时卡片会多出一块下载面板 —— 落点也得把它算进去。
+            "background_removal",
         ] {
             let graph = canvas(&[id]);
             let kind = kinds.iter().find(|kind| kind.id == id).unwrap();
@@ -4239,5 +5368,34 @@ mod tests {
         graph.link(out(0, 0), input(1, to));
         assert_eq!(graph.wires.len(), 1);
         assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[to].id);
+    }
+
+    /// 取色器的两个颜色空间互为逆运算 —— 不然拖一下取色区颜色就偏了。
+    #[test]
+    fn hsv_round_trips_through_its_inverse() {
+        for rgba in [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [18, 52, 86, 255],
+            [200, 200, 200, 255],
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+        ] {
+            let (h, s, v) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
+            let (r, g, b) = hsv_to_rgb(h, s, v);
+            assert_eq!([r, g, b], [rgba[0], rgba[1], rgba[2]], "{rgba:?}");
+        }
+    }
+
+    /// 颜色字符串和 RGBA 互为逆运算；坏值不 panic。
+    #[test]
+    fn color_strings_round_trip() {
+        for value in ["#000000", "#ffffff", "#123456", "#12345678"] {
+            assert_eq!(color_string(color_rgba(value)), value);
+        }
+        assert_eq!(color_rgba("transparent"), [0, 0, 0, 0]);
+        assert_eq!(color_string(color_rgba("transparent")), "#00000000");
+        assert_eq!(color_rgba("不是颜色"), [0, 0, 0, 255]);
     }
 }

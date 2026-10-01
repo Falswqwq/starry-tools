@@ -486,6 +486,10 @@ icon!(
     /// 适应视图（画布控件）。
     fit_view, "maximize.svg"
 );
+icon!(
+    /// 设置：齿轮。
+    settings, "settings.svg"
+);
 
 /// 运行中：转圈的弧。`phase` 是 0..1 的相位。
 pub fn loader(painter: &egui::Painter, rect: Rect, color: Color32, phase: f32) {
@@ -534,6 +538,7 @@ mod tests {
             "zoom-in.svg",
             "zoom-out.svg",
             "maximize.svg",
+            "settings.svg",
         ];
         for file in files {
             let els = parse(&svg_of(file));

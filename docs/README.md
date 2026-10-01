@@ -31,7 +31,12 @@
 | --- | --- | --- |
 | [图像格式转换](nodes/convert.md) | `convert_image` | 在 PNG / JPEG / WebP / GIF / BMP / TIFF 之间转 |
 | [图像压缩](nodes/compress.md) | `compress_image` | 无损：反复试组合留最小的；有损：转 JPEG 或量化成调色板 |
-| [图像裁切](nodes/crop.md) | `crop_image` | 按比例、按尺寸，或者把四周的透明留白裁掉 |
+| [图像裁切](nodes/crop.md) | `crop_image` | 按比例、按尺寸、裁掉四周留白，或手动框一块（形状裁切是紫色交互节点） |
+| [边框/边距](nodes/border.md) | `border_image` | 沿非透明像素边界描边（透明的洞也描）；整张不透明时就加边距 |
+| [色彩分析](nodes/palette.md) | `color_analysis` | 抽色板：按主色归类，或数每种颜色多少像素（输出是一段 hex 文本） |
+| [颜色剔除](nodes/remove_color.md) | `remove_color` | 把跟目标色相近的像素抠成透明 |
+| [背景移除](nodes/background_removal.md) | `background_removal` | 用 AI 模型认出主体、抠掉背景（模型要先下载） |
+| [图像变换](nodes/transform.md) | `transform_image` | 翻转（左右 / 上下）与旋转（90° / 180° / 270°） |
 | [缩放图像](nodes/upscale.md) | `upscale` | 缩放到原来的百分之 n，像素画配「邻近」插值 |
 
 ### 通用

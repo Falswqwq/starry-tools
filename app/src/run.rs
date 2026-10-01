@@ -1,11 +1,15 @@
 //! 静态检查与运行，以及这两件事在画布上留下的痕迹。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
-use starrytools_core::engine::{self, NodeStatus, ResolvedWorkflow, RunReport, Severity};
+use starrytools_core::engine::{
+    self, NodeRunResult, NodeStatus, ResolvedWorkflow, RunReport, Severity,
+};
+use starrytools_core::interaction::{Interaction, InteractionRequest, InteractionResponse};
 use starrytools_core::model::workflow::Workflow;
+use starrytools_core::progress::{Progress, ProgressEvent};
 
 /// 画布上要额外画出来的东西：哪些连线有问题、哪些节点跑过、各花了多久。
 #[derive(Default)]
@@ -16,7 +20,11 @@ pub struct Marks {
     pub failed_nodes: HashSet<String>,
     pub ok_nodes: HashSet<String>,
     /// 跑过的节点用了多少毫秒（卡片右上角那句「完成 12ms」）。
-    pub node_ms: std::collections::HashMap<String, u64>,
+    pub node_ms: HashMap<String, u64>,
+    /// 正在等用户操作的那个紫色节点（画布把它高亮）。
+    pub waiting: Option<String>,
+    /// **正在跑**的那个节点（跑完就挪到下一个）—— 实时高亮用。
+    pub running: Option<String>,
 }
 
 impl Marks {
@@ -98,15 +106,42 @@ impl Check {
     }
 }
 
+/// 一次运行**进行中**的实时进度：跑到哪儿了、哪些已经跑完。
+///
+/// 报告要等整张图跑完才回来；在那之前，界面靠它把「当前节点」和**每个节点的结果**
+/// （状态 / 耗时 / 缩略图 / 色板 / 产物）画出来 —— 卡片一张张亮起来。
+#[derive(Default)]
+pub struct LiveRun {
+    /// 当前正在跑的节点 id。
+    pub running: Option<String>,
+    /// 已经跑完的节点 → 它的结果。
+    pub done: HashMap<String, NodeRunResult>,
+}
+
 /// 跑一次工作流。
 ///
 /// `run` 是 CPU 活（无损 PNG 优化会挨个试颜色类型 / 位深 / filter / zopfli），
 /// 放在界面线程上会把窗口卡死，所以丢到后台线程，每帧来收一次结果。
+///
+/// 紫色节点会从这个后台线程发一条请求过来，并阻塞等着；界面每帧 `poll` 一下
+/// 把它捞出来显示，用户动完手再 `respond` 把答案送回去。
 #[derive(Default)]
 pub struct Runner {
     job: Option<Job>,
     report: Option<RunReport>,
     error: Option<String>,
+    /// 紫色节点发过来的请求通道（界面这端收）。
+    requests: Option<Receiver<InteractionRequest>>,
+    /// 把用户的答案送回后台线程。
+    responses: Option<Sender<InteractionResponse>>,
+    /// 当前等着用户回答的那条请求。
+    pending: Option<InteractionRequest>,
+    /// 引擎推过来的进度（界面这端收）。
+    progress: Option<Receiver<ProgressEvent>>,
+    /// 已经收到的进度：跑到哪儿了、哪些跑完了。`None` = 没在跑。
+    live: Option<LiveRun>,
+    /// 用户把运行记录清空了：画布该把上一次运行的痕迹也抹掉。
+    reset_requested: bool,
 }
 
 struct Job {
@@ -122,10 +157,46 @@ impl Runner {
         self.report.as_ref()
     }
 
+    /// 正在等用户操作的那条请求（没有就是 `None`）。
+    pub fn waiting(&self) -> Option<&InteractionRequest> {
+        self.pending.as_ref()
+    }
+
+    /// 运行进行中的实时进度（没在跑就是 `None`）。
+    pub fn live(&self) -> Option<&LiveRun> {
+        self.live.as_ref()
+    }
+
+    /// 用户做完了，把答案送回后台线程。
+    pub fn respond(&mut self, response: InteractionResponse) {
+        if let Some(sender) = &self.responses {
+            let _ = sender.send(response);
+        }
+        self.pending = None;
+    }
+
     /// 清掉上一次的运行结果（运行记录上的「清空」）。
     pub fn clear(&mut self) {
         self.report = None;
         self.error = None;
+        self.reset_requested = true;
+    }
+
+    /// 外壳读一下「该重置画布痕迹了」—— 读到就清零。
+    pub fn take_reset(&mut self) -> bool {
+        std::mem::take(&mut self.reset_requested)
+    }
+
+    /// 一次运行彻底结束（或开始新的一次）：把通道收干净。
+    ///
+    /// 进度也一并收掉 —— 接下来该由正式的报告（`report`）说话。
+    fn finish(&mut self) {
+        self.job = None;
+        self.requests = None;
+        self.responses = None;
+        self.pending = None;
+        self.progress = None;
+        self.live = None;
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -138,8 +209,21 @@ impl Runner {
             return;
         }
         let (tx, rx) = mpsc::channel();
+        // 交互的两条线路：请求（后台→界面）、答复（界面→后台）。
+        let (request_tx, request_rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
+        let interaction = Interaction::new(request_tx, response_rx);
+        // 进度：后台→界面，单方向。
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let progress = Progress::new(progress_tx);
         std::thread::spawn(move || {
-            let result = engine::run(&workflow, only_node.as_deref(), &output_root);
+            let result = engine::run_with(
+                &workflow,
+                only_node.as_deref(),
+                &output_root,
+                Some(&interaction),
+                Some(&progress),
+            );
             // 收端已经走掉了就算了，不需要特别处理。
             let _ = tx.send(result);
         });
@@ -147,27 +231,66 @@ impl Runner {
         self.report = None;
         self.error = None;
         self.job = Some(Job { rx });
+        self.requests = Some(request_rx);
+        self.responses = Some(response_tx);
+        self.pending = None;
+        self.progress = Some(progress_rx);
+        self.live = Some(LiveRun::default());
     }
 
-    /// 来收一次结果，不阻塞。
+    /// 来收一次结果，不阻塞 —— 顺便看看紫色节点有没有发请求过来。
     pub fn poll(&mut self) {
+        // 先把待办请求捞出来（正常运行一次只会有一条 —— 顺序执行）。
+        let mut incoming: Option<InteractionRequest> = None;
+        if let Some(requests) = &self.requests {
+            while let Ok(request) = requests.try_recv() {
+                incoming = Some(request);
+            }
+        }
+        if incoming.is_some() {
+            self.pending = incoming;
+        }
+
+        // 收一收进度：光标从上一个节点挪到下一个，跑完的记下来。
+        let mut events: Vec<ProgressEvent> = Vec::new();
+        if let Some(progress) = &self.progress {
+            while let Ok(event) = progress.try_recv() {
+                events.push(event);
+            }
+        }
+        if !events.is_empty() {
+            if let Some(live) = &mut self.live {
+                for event in events {
+                    match event {
+                        ProgressEvent::Started { node_id } => live.running = Some(node_id),
+                        ProgressEvent::Finished { result } => {
+                            if live.running.as_deref() == Some(result.node_id.as_str()) {
+                                live.running = None;
+                            }
+                            live.done.insert(result.node_id.clone(), result);
+                        }
+                    }
+                }
+            }
+        }
+
         let Some(job) = &self.job else {
             return;
         };
         match job.rx.try_recv() {
             Ok(Ok(report)) => {
                 self.report = Some(report);
-                self.job = None;
+                self.finish();
             }
             Ok(Err(err)) => {
                 self.error = Some(err.to_string());
-                self.job = None;
+                self.finish();
             }
             Err(TryRecvError::Empty) => {}
             // 线程没了却没送结果 —— 只可能是它 panic 了。
             Err(TryRecvError::Disconnected) => {
                 self.error = Some("运行线程异常退出".to_string());
-                self.job = None;
+                self.finish();
             }
         }
     }

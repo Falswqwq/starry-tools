@@ -4,11 +4,16 @@ version = "0.1.0"
 description = "StarryTools 的核心：类型系统、节点定义、执行引擎、PNG 优化"
 authors = ["falsw"]
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.91"
 publish = false
 
 [lib]
 name = "starrytools_core"
+
+[features]
+default = ["onnx"]
+# ONNX 推理（背景移除）。`tract` 是纯 Rust 的，不需要额外装原生库。
+onnx = ["dep:tract-onnx"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +28,16 @@ png = "0.18"
 flate2 = "1"
 crc32fast = "1"
 zopfli = "0.8"
+# 数据目录（工作流、模型都放在它底下）。
+dirs = "7"
+# 下载 ONNX 模型（背景移除用）。
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+] }
+# 纯 Rust 的 ONNX 运行时 —— 背景移除要跑 u2net 模型。不需要这个功能的话，
+# 可以用 `--no-default-features` 把它整个去掉（节点会给出提示而不是报错）。
+tract-onnx = { version = "0.23", optional = true }
 image = { version = "0.25", default-features = false, features = [
     "png",
     "jpeg",

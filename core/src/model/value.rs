@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::error::NodeError;
 use crate::image_io::ImageValue;
+use crate::interaction::{Interaction, InteractionKind, InteractionResponse};
 use crate::model::port_type::{ImageFormat, PortType};
 
 /// 下游写盘时该用的文件名 —— 「重命名」节点留下的提示。
@@ -95,6 +96,10 @@ impl Value {
         match self {
             Value::Named(named) => format!("{} · {}", named.name.stem, named.inner.describe()),
             Value::Text(text) => {
+                // 色板（hex 一行一个）单独说，不然一长串颜色会被截成没意义的文字。
+                if let Some(palette) = parse_palette(text) {
+                    return format!("色板 · {} 色", palette.len());
+                }
                 let flattened = text.replace(['\n', '\r'], " ");
                 // 长文本把中段省掉，两头都留着 —— 路径这类东西，尾巴比开头有用。
                 const HEAD: usize = 26;
@@ -193,6 +198,39 @@ impl Value {
     }
 }
 
+/// 把一段文本当成**色板**解析：每行一个颜色，`#rrggbb` 或 `#rrggbbaa`。
+///
+/// 只要有一行不是颜色或者一行都没有，就返回 `None`（那就只是一段普通文本）。
+/// 返回的是规范化后的颜色串（小写、带 `#`）。
+pub fn parse_palette(text: &str) -> Option<Vec<String>> {
+    let mut colors = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let hex = line.strip_prefix('#')?;
+        if !matches!(hex.len(), 6 | 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        colors.push(format!("#{}", hex.to_ascii_lowercase()));
+    }
+    if colors.is_empty() {
+        None
+    } else {
+        Some(colors)
+    }
+}
+
+/// 色板 → 文本：一行一个颜色。
+pub fn palette_text(colors: &[[u8; 3]]) -> String {
+    colors
+        .iter()
+        .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn human_size(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
@@ -214,12 +252,25 @@ pub type ValueMap = BTreeMap<String, Value>;
 /// 节点执行时能拿到的东西。
 pub struct NodeArgs<'a> {
     pub node_id: &'a str,
+    /// 节点类型名（「图像裁切」这种）。阻塞节点弹窗时要用它报出是谁在等。
+    pub node_name: &'a str,
     pub params: &'a crate::model::params::Params,
     pub inputs: &'a ValueMap,
     pub warnings: &'a mut Vec<String>,
+    /// 与界面通话的通道。没有界面时（脱离 GUI 直接调 `run`）是 `None`。
+    pub interaction: Option<&'a Interaction>,
 }
 
 impl NodeArgs<'_> {
+    /// 停下来问界面一次，阻塞到用户给出答案。
+    ///
+    /// 只有紫色节点会用到；没有界面时直接报错，而不是静默地瞎猜一个结果。
+    pub fn ask(&self, kind: InteractionKind) -> Result<InteractionResponse, NodeError> {
+        let Some(interaction) = self.interaction else {
+            return Err(NodeError::new("这个节点需要用户操作，但当前没有可用的界面"));
+        };
+        interaction.ask(self.node_id, self.node_name, kind)
+    }
     pub fn input(&self, port: &str) -> Result<&Value, NodeError> {
         self.inputs
             .get(port)

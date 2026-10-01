@@ -486,6 +486,40 @@ impl Library {
         let badges_y = top + crate::widgets::ink_center(&name);
         self.draw_badges(&painter, kind, x, badges_y, content_alpha);
 
+        // 紫色节点（要你动手的）在卡片右上角挂一个小标记。
+        if kind.interactive {
+            let tag = painter.layout_no_wrap(
+                "交互".to_string(),
+                FontId::monospace(8.5),
+                theme::PURPLE.gamma_multiply(content_alpha),
+            );
+            let w = tag.size().x + 10.0;
+            let h = tag.size().y + 3.0;
+            let r = Rect::from_min_size(
+                egui::pos2(rect.right() - 10.0 - w, badges_y - h / 2.0),
+                egui::vec2(w, h),
+            );
+            painter.rect_filled(
+                r,
+                CornerRadius::same(3),
+                theme::PURPLE_SOFT.gamma_multiply(content_alpha),
+            );
+            painter.rect_stroke(
+                r,
+                CornerRadius::same(3),
+                Stroke::new(1.0, theme::PURPLE_LINE.gamma_multiply(content_alpha)),
+                StrokeKind::Inside,
+            );
+            painter.galley(
+                egui::pos2(
+                    r.center().x - tag.size().x / 2.0,
+                    crate::widgets::ink_top(&tag, r.center().y),
+                ),
+                tag,
+                theme::PURPLE.gamma_multiply(content_alpha),
+            );
+        }
+
         // 一句话简介（最多两行）
         let desc_y = top + name.size().y + 3.0;
         let desc = painter.layout(

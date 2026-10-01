@@ -8,8 +8,11 @@ mod geometry;
 mod graph;
 mod icons;
 mod library;
+mod models;
+mod prompt;
 mod report;
 mod run;
+mod settings;
 mod svgpath;
 mod theme;
 mod widgets;
@@ -22,6 +25,12 @@ use catalog::Kind;
 use graph::Graph;
 use library::Library;
 use workspace::Workspace;
+
+/// 动画期间的重绘上限（帧/秒）。空闲时不重绘，所以这只是「动起来时」的上限。
+///
+/// 整帧的硬上限在 `settings::Settings::max_fps` 里（设置面板可调）—— 它按最小间隔
+/// 在帧开头节流，连鼠标事件带来的帧也算在内。
+const ANIM_FPS: f32 = 60.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -66,6 +75,12 @@ struct App {
     runner: run::Runner,
     /// 底部状态药丸与运行记录。
     report: report::Report,
+    /// 紫色节点停下时的那个交互浮层。
+    prompt: prompt::Prompt,
+    /// 应用级设置（帧率上限、是否显示 fps）。
+    settings: settings::Settings,
+    /// 上一帧开始的时刻，用来做帧率节流。
+    last_frame: Option<std::time::Instant>,
 }
 
 impl App {
@@ -86,7 +101,25 @@ impl App {
             check: run::Check::default(),
             runner: run::Runner::default(),
             report: report::Report::default(),
+            prompt: prompt::Prompt::default(),
+            settings: settings::Settings::load(),
+            last_frame: None,
         }
+    }
+
+    /// 帧率节流：距离上一帧不足 `1 / max_fps` 就睡一会儿。
+    ///
+    /// 这么做的代价是给输入带来最多约一帧的延迟，换的是帧率不再被鼠标事件拉满。
+    fn limit_frame_rate(&mut self) {
+        let target = std::time::Duration::from_secs_f32(1.0 / self.settings.clamped_fps());
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_frame {
+            let elapsed = now.duration_since(last);
+            if elapsed < target {
+                std::thread::sleep(target - elapsed);
+            }
+        }
+        self.last_frame = Some(std::time::Instant::now());
     }
 
     /// 新建 / 打开之后把画布换成工作区当前那一份。
@@ -121,6 +154,9 @@ impl App {
 
     /// 开跑。`only` 是「运行至此」的那个节点，`None` 就是跑整张图。
     fn start_run(&mut self, only: Option<String>) {
+        // 新的一次运行：先把上一次留下的缩略图 / 色板 / 状态清掉，
+        // 接下来缩略图会随着每个节点跑完一张张出现。
+        self.graph.reset_run_marks();
         let workflow = self.graph.to_workflow(self.workspace.workflow());
         let output_root = self.workspace.output_root.clone();
         self.runner.start(workflow, only, output_root);
@@ -129,6 +165,7 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.limit_frame_rate();
         let ctx = ui.ctx().clone();
 
         let rect = ui.max_rect();
@@ -159,11 +196,31 @@ impl eframe::App for App {
         if self.graph.run_marks_hidden() {
             marks.dismiss_ok_highlight();
         }
+        // 正在等用户操作的紫色节点，画布要把它高亮。
+        marks.waiting = self.runner.waiting().map(|request| request.node_id.clone());
+        // 运行进行中的实时进度：跑到哪儿、哪些已经跑完（带各自的结果）。
+        if let Some(live) = self.runner.live() {
+            marks.running = live.running.clone();
+            for (id, result) in &live.done {
+                match result.status {
+                    starrytools_core::engine::NodeStatus::Ok => {
+                        marks.ok_nodes.insert(id.clone());
+                    }
+                    starrytools_core::engine::NodeStatus::Failed => {
+                        marks.failed_nodes.insert(id.clone());
+                    }
+                    starrytools_core::engine::NodeStatus::Skipped => {}
+                }
+                marks.node_ms.entry(id.clone()).or_insert(result.elapsed_ms);
+            }
+        }
 
-        if let Some(node_id) = self
-            .graph
-            .ui(ui, rect, &self.kinds, &marks, self.runner.report())
-        {
+        let view = graph::RunView {
+            report: self.runner.report(),
+            live: self.runner.live(),
+            show_fps: self.settings.show_fps,
+        };
+        if let Some(node_id) = self.graph.ui(ui, rect, &self.kinds, &marks, view) {
             self.start_run(Some(node_id));
         }
         // Ctrl+S：画布把请求挂出来，这里执行落盘。
@@ -180,6 +237,7 @@ impl eframe::App for App {
             &ctx,
             &mut self.workspace,
             &mut self.library,
+            &mut self.settings,
             dirty,
             running,
             errors,
@@ -197,17 +255,27 @@ impl eframe::App for App {
                 .add_node_at(drop.screen_pos, &self.kinds[drop.kind], now);
         }
 
+        // ---- 紫色节点的交互浮层 ----
+        self.prompt.ui(&ctx, &mut self.runner);
+
         // ---- 底部：状态药丸 + 运行记录 ----
         self.runner.poll();
         let pick = self.report.ui(&ctx, &mut self.runner, runnable, errors);
         if let Some(report::Action::Select(id)) = pick {
             self.select(&id);
         }
+        // 运行记录被清空了：画布上的运行痕迹也一并抹掉。
+        if self.runner.take_reset() {
+            self.graph.reset_run_marks();
+        }
 
         // ---- 需要时继续重绘 ----
         // （动画本身会自己请求重绘；这里只补上「时间在走」的那种：运行中、刀光未散。）
+        //
+        // 用 `request_repaint_after` 而不是 `request_repaint`：空闲时根本不会重绘，
+        // 而动画期间也只钉在 ANIM_FPS 这一档，不至于在高刷屏上把 CPU 拉满。
         if running || self.graph.is_animating() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / ANIM_FPS));
         }
     }
 }

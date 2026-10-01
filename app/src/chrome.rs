@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Str
 
 use crate::icons;
 use crate::library::Library;
+use crate::settings::{Settings, FPS_MAX, FPS_MIN};
 use crate::theme;
 use crate::widgets::{self, Size, Variant};
 use crate::workspace::Workspace;
@@ -26,6 +27,10 @@ pub struct Chrome {
     describing: bool,
     /// 「加载」面板开着吗。
     browsing: bool,
+    /// 「设置」面板开着吗。
+    settings_open: bool,
+    /// 设置改过了、还没落盘（等鼠标松开再写，免得拖动时每帧都写文件）。
+    settings_dirty: bool,
     /// 正在确认删除哪一个存档。
     confirming: Option<String>,
 }
@@ -41,6 +46,7 @@ impl Chrome {
         ctx: &egui::Context,
         workspace: &mut Workspace,
         library: &mut Library,
+        settings: &mut Settings,
         dirty: bool,
         running: bool,
         errors: usize,
@@ -51,7 +57,7 @@ impl Chrome {
         let mut action = None;
 
         // ---- 左上角 ----
-        let (_name_rect, desc_rect) = egui::Area::new(egui::Id::new("chrome-left"))
+        let (_name_rect, desc_rect, gear_rect) = egui::Area::new(egui::Id::new("chrome-left"))
             .fixed_pos(egui::pos2(MARGIN, MARGIN))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -91,6 +97,7 @@ impl Chrome {
                         // 几个浮层互斥：开一个就关掉别个。
                         self.describing = false;
                         self.browsing = false;
+                        self.settings_open = false;
                     }
 
                     let name = name_field(ui, workspace.name_mut());
@@ -107,9 +114,26 @@ impl Chrome {
                     if desc.clicked() {
                         self.describing = !self.describing;
                         self.browsing = false;
+                        self.settings_open = false;
                         library.open = false;
                     }
-                    (name_rect, desc.rect)
+
+                    // 设置：齿轮。排在「说明」后面。
+                    let gear = widgets::button(
+                        ui,
+                        "",
+                        Some(&icons::settings),
+                        Variant::Solid,
+                        Size::Icon,
+                        true,
+                    );
+                    if gear.clicked() {
+                        self.settings_open = !self.settings_open;
+                        self.describing = false;
+                        self.browsing = false;
+                        library.open = false;
+                    }
+                    (name_rect, desc.rect, gear.rect)
                 })
                 .inner
             })
@@ -149,6 +173,7 @@ impl Chrome {
                     if load.clicked() {
                         self.browsing = !self.browsing;
                         self.describing = false;
+                        self.settings_open = false;
                         library.open = false;
                         self.confirming = None;
                     }
@@ -264,6 +289,97 @@ impl Chrome {
             if close {
                 self.describing = false;
             }
+        }
+
+        // ---- 设置面板 ----
+        let mut settings_changed = false;
+        let settings_anim =
+            ctx.animate_bool_with_time(egui::Id::new("settings-anim"), self.settings_open, 0.13);
+        if settings_anim > 0.01 {
+            let pos = egui::pos2(gear_rect.left(), gear_rect.bottom() + PANEL_GAP);
+            let mut close = false;
+            panel(ctx, "app-settings", pos, 320.0, settings_anim, |ui| {
+                header(ui, "设置", "外观与性能", |ui| {
+                    if widgets::button(ui, "", Some(&icons::x), Variant::Ghost, Size::IconSm, true)
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+                let inner = egui::Frame::default()
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 12,
+                        top: 10,
+                        bottom: 12,
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("帧率上限")
+                                    .color(theme::INK_2)
+                                    .size(11.0),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let (row, _) = ui.allocate_exact_size(
+                                        egui::vec2(200.0, 24.0),
+                                        Sense::hover(),
+                                    );
+                                    if let Some(next) = widgets::slider(
+                                        ui,
+                                        egui::Id::new("settings-fps"),
+                                        row,
+                                        settings.max_fps,
+                                        FPS_MIN,
+                                        FPS_MAX,
+                                        true,
+                                        " fps",
+                                    ) {
+                                        settings.max_fps = next;
+                                        settings_changed = true;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(3.0);
+                        ui.label(
+                            egui::RichText::new("拖动画布、动画都按这个上限节流；调低更省电。")
+                                .color(theme::INK_3)
+                                .size(9.5),
+                        );
+
+                        ui.add_space(12.0);
+
+                        let (row, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 24.0),
+                            Sense::hover(),
+                        );
+                        ui.painter().text(
+                            egui::pos2(row.left(), row.center().y),
+                            Align2::LEFT_CENTER,
+                            "显示 fps 计数器",
+                            FontId::monospace(11.0),
+                            theme::INK_2,
+                        );
+                        let mut show = settings.show_fps;
+                        if widgets::switch(ui, egui::Id::new("settings-show-fps"), row, &mut show) {
+                            settings.show_fps = show;
+                            settings_changed = true;
+                        }
+                    });
+                ui.allocate_rect(inner.response.rect, Sense::hover());
+            });
+            if close {
+                self.settings_open = false;
+            }
+        }
+        // 设置改过就记一笔；等鼠标松开再落盘 —— 拖滑杆时每帧写文件既没必要也磕手。
+        self.settings_dirty |= settings_changed;
+        if self.settings_dirty && !ctx.input(|input| input.pointer.any_down()) {
+            settings.save();
+            self.settings_dirty = false;
         }
 
         // ---- 加载面板 ----

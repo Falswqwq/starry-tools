@@ -53,6 +53,7 @@ cargo clippy --all-targets               # 静态检查
 | --- | --- |
 | 工作流（一个一份 JSON） | `<应用数据目录>/com.falsw.starrytools/workflows/` |
 | 运行产物 | `<应用数据目录>/com.falsw.starrytools/outputs/<工作流名>/` |
+| 下载的 ONNX 模型 | `<应用数据目录>/com.falsw.starrytools/models/` |
 
 应用数据目录在 Linux 上是 `~/.local/share/`，macOS 上是 `~/Library/Application Support/`，
 Windows 上是 `%APPDATA%\`。细节见[开发](docs/development.md#数据放在哪)。
