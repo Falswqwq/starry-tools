@@ -59,21 +59,3 @@
 ```
 
 就能自动把画面里出现最多的那个颜色抠掉，不用手填 hex。
-
-## 实现
-
-`core/src/nodes/remove_color.rs`，`NodeSpec::fixed`。解码 → 按模式剔除 → 编回 PNG，并把
-来源文件名接着带下去。
-
-- 全图：`remove_whole` —— 遍历 RGBA、逐分量比差值。
-- 背景：`remove_background` —— 先从边框种子起做 4 连通洪水填充（可穿过透明像素），
-  得到 `background` 掩码；把掩码内不透明的像素 alpha 置 0；再做一遍边缘羽化。
-
-颜色字符串的解析复用 `core/src/palette.rs` 的 `parse_color`（`#rrggbb` / `#rrggbbaa` /
-`transparent`，若是色板文本则取第一行）。
-
-测试：`a_near_colour_is_removed_only_within_the_threshold`（阈值边界）、
-`whole_mode_removes_every_matching_pixel`、`background_mode_keeps_colours_not_connected_to_the_outside`
-（甜甜圈：外圈剔、包住的白心留）、`background_mode_softens_the_transition_ring`、
-`background_mode_walks_through_already_transparent_pixels`；引擎侧还有
-`remove_color_keyed_the_matching_pixels_transparent`。

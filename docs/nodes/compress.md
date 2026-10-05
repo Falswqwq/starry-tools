@@ -63,17 +63,3 @@
 - JPEG 存不下透明，转过去时透明会被压到白底上并给出提示。
 - 「PNG 调色板」用中位切分量化（含 alpha 一起切）。颜色本来就不多于上限时，
   量化这一步一个像素都不会动。
-
-## 实现
-
-`core/src/nodes/compress.rs` 是外壳，干活的在两个模块：
-
-- `core/src/png_opt/` —— 无损优化管线，见[无损 PNG 优化](../png-optimization.md)；
-- `core/src/png_quant.rs` —— 中位切分量化。量化完那张图会**再交给** `png_opt`
-  去编码，因为颜色一少，索引色编码自己就会被选中。
-
-结果（原大小 → 新大小、节省比例、选中的方案）会写进节点的提示里，在底部运行记录里看得到。
-
-测试：`engine::tests::compress_lossless_keeps_every_pixel`、
-`compress_output_type_follows_the_mode`、`lossless_mode_picks_an_indexed_encoding_for_pixel_art`、
-`lossy_palette_mode_quantizes_to_an_indexed_png`；`png_opt` 与 `png_quant` 各自还有一整组。

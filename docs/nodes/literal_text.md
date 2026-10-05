@@ -31,18 +31,3 @@
 - 空文本也是合法值，不会因此报错。
 - 没有输入，所以它不吃上游的任何东西；可以接进任意多个下游的参数端口
   （一个输出端口能拉出多条线，和输入端口不一样）。
-
-## 实现
-
-`core/src/nodes/literal.rs`。
-
-三个字面量节点（文本 / 数字 / 布尔）共用 `literal()` 生成一份 `NodeKind`，只有控件
-种类和输出类型不同；`is_source: true` 是它们的标识。`run` 里只把参数包成
-`Value::text` 输出。
-
-`inputs_for()` 对 `is_source` 的节点直接返回声明里的输入（这里是空），因此字面量节点
-**不会**再有参数端口 —— 它自己就是喂参数的那一端。
-
-测试：`engine::tests::source_nodes_have_no_param_ports`（三个字面量的共性）、
-`graph::tests::literal_nodes_are_sources_without_param_ports`（app 侧名字与徽标）、
-`graph::tests::a_literal_links_into_a_param_port`（能接进参数端口）。

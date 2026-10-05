@@ -77,7 +77,7 @@ impl Settings {
 
 /// 设置文件的位置 —— 和数据目录同一个根，但单独一个文件。
 fn settings_path() -> PathBuf {
-    crate::workspace::data_root().join("settings.json")
+    crate::state::workspace::data_root().join("settings.json")
 }
 
 #[cfg(test)]
@@ -132,6 +132,6 @@ mod tests {
     fn settings_live_outside_the_workflow_directory() {
         let path = settings_path();
         assert_eq!(path.file_name().unwrap(), "settings.json");
-        assert!(!path.starts_with(crate::workspace::data_root().join("workflows")));
+        assert!(!path.starts_with(crate::state::workspace::data_root().join("workflows")));
     }
 }

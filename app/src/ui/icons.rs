@@ -14,7 +14,7 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect};
 
-use crate::svgpath;
+use crate::ui::svgpath;
 
 /// lucide 的视口边长。
 const VIEW: f32 = 24.0;
@@ -385,7 +385,7 @@ macro_rules! icon {
                 painter,
                 rect,
                 stringify!($name),
-                include_str!(concat!("../assets/icons/", $file)),
+                include_str!(concat!("../../assets/icons/", $file)),
                 color,
                 0.0,
             );
@@ -398,7 +398,7 @@ macro_rules! icon {
                 painter,
                 rect,
                 stringify!($name),
-                include_str!(concat!("../assets/icons/", $file)),
+                include_str!(concat!("../../assets/icons/", $file)),
                 color,
                 angle,
             );
@@ -497,7 +497,7 @@ pub fn loader(painter: &egui::Painter, rect: Rect, color: Color32, phase: f32) {
         painter,
         rect,
         "loader",
-        include_str!("../assets/icons/loader-circle.svg"),
+        include_str!("../../assets/icons/loader-circle.svg"),
         color,
         phase * std::f32::consts::TAU,
     );

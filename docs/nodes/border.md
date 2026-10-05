@@ -39,19 +39,3 @@
   内容本来就在画布里头的话尺寸不变 —— 游戏素材的一帧不会被无辜地改大小。
 - 颜色挑**透明**时就只加边距、不画颜色；粗细为 0 或整张图透明时原样通过并提示。
 - 只涂**完全透明**（alpha == 0）的像素，不去覆盖边缘的半透明像素。
-
-## 实现
-
-`core/src/nodes/border.rs`，`NodeSpec::fixed`。
-
-流程：解码成 RGBA → 求内容外接矩形、算出四边需要补多少 → 把内容整块搬进新画布
-→ 在新画布上做一次 **chamfer 距离变换**（两遍扫描，权重 1 / √2，O(像素数)），得到
-每个像素到最近内容的近似距离 → 把距离 ≤ `粗细 + 0.5` 的透明像素涂成边框色。
-
-用距离变换而不是逐像素扫一个 `(2t+1)²` 的窗口，粗细再大也是 O(像素数)。
-
-测试：`border_grows_an_opaque_image_into_a_frame`（不透明图加画框）、
-`border_outlines_transparent_content_in_place`（有留白的 sprite 尺寸不变、描内容边界）、
-`border_outlines_the_inside_of_a_hole`（甜甜圈的内侧也被描上）、
-`border_with_a_transparent_colour_just_pads`（透明色 = 纯加边距）、
-`colors_parse`（颜色字符串解析与坏值回落）。

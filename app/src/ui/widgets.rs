@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 use egui::epaint::RectShape;
 
-use crate::theme;
+use crate::ui::theme;
 
 /// 一个图标绘制闭包：往 `rect` 里用 `color` 画。
 /// 用 `&dyn` 是为了能传拼接了相位的 loader（普通图标传函数引用就行）。

@@ -15,7 +15,7 @@ use crate::image_io::{EncodeOptions, ImageValue};
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params;
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, NodeArgs, Value, ValueMap};
 use crate::palette::parse_color;
 use crate::registry::NodeSpec;
 
@@ -110,13 +110,15 @@ pub fn spec() -> NodeSpec {
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     // 克隆只是复制一个 Arc；后面 warn 之后还要用它带出处。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
 
     let target = parse_color(&params::string(args.params, PARAM_COLOR, "#ffffff"));
     if target[3] == 0 {
         args.warn("目标色是透明的，没有东西可剔除，原样通过");
-        return Ok(pass_through(source, name));
+        return Ok(one_output(
+            "image",
+            Value::Image(source).with_name_hint(name),
+        ));
     }
     let threshold = params::integer(args.params, PARAM_THRESHOLD, 16).clamp(0, 255) as u8;
 
@@ -148,12 +150,10 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     )?
     .inherit_provenance(&source);
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
+    Ok(one_output(
+        "image",
         Value::Image(value).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }
 
 /// 全图剔除：只要颜色像就剔，不管在哪儿。返回剔掉（原本不透明）的像素数。
@@ -266,15 +266,6 @@ fn channel_distance(pixel: [u8; 4], target: [u8; 4]) -> u8 {
 
 fn matches_target(pixel: [u8; 4], target: [u8; 4], threshold: u8) -> bool {
     channel_distance(pixel, target) <= threshold
-}
-
-fn pass_through(source: ImageValue, name: Option<crate::model::value::OutputName>) -> ValueMap {
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
-        Value::Image(source).with_name_hint(name),
-    );
-    outputs
 }
 
 #[cfg(test)]

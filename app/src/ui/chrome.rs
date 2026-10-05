@@ -5,12 +5,12 @@
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind};
 
-use crate::icons;
-use crate::library::Library;
-use crate::settings::{Settings, FPS_MAX, FPS_MIN};
-use crate::theme;
-use crate::widgets::{self, Size, Variant};
-use crate::workspace::Workspace;
+use crate::ui::icons;
+use crate::ui::library::Library;
+use crate::state::settings::{Settings, FPS_MAX, FPS_MIN};
+use crate::ui::theme;
+use crate::ui::widgets::{self, Size, Variant};
+use crate::state::workspace::Workspace;
 
 pub enum Action {
     Save,

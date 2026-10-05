@@ -20,7 +20,7 @@ use crate::image_io::{flatten_onto_white, has_transparency, EncodeOptions, Image
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params::{self, Params};
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{human_size, NodeArgs, Value, ValueMap};
+use crate::model::value::{human_size, one_output, NodeArgs, Value, ValueMap};
 use crate::png_opt;
 use crate::png_quant;
 use crate::registry::NodeSpec;
@@ -206,8 +206,7 @@ fn output_format(params: &Params) -> ImageFormat {
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     // 先把输入拿在手里（克隆只是复制一个 Arc），后面 warn 之后还要用它。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
     let decoded = source.decode()?;
 
     let value = if is_lossy(args.params) {
@@ -216,12 +215,10 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
         lossless(args, &source, &decoded)?
     };
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
+    Ok(one_output(
+        "image",
         Value::Image(value).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }
 
 /// 无损：整条 PNG 优化管线跑一遍。

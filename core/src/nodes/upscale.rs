@@ -14,7 +14,7 @@ use crate::image_io::{EncodeOptions, ImageValue};
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params;
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
 
 pub const KIND: &str = "upscale";
@@ -95,8 +95,7 @@ fn filter_of(value: &str) -> FilterType {
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     // 克隆只是复制一个 Arc；后面 warn 之后还要用它带出处。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
     let image = source.decode()?;
 
     let percent = params::number(args.params, "percent", 200.0).clamp(1.0, 1600.0);
@@ -127,10 +126,8 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     )?
     .inherit_provenance(&source);
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
+    Ok(one_output(
+        "image",
         Value::Image(value).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }

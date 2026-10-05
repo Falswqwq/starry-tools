@@ -76,30 +76,3 @@
 ## 卡片上的展示
 
 跑完之后节点卡片底下会摆一排**小色块**（色板）。色块太多时只画放得下的那些，不挤成一团。
-
-## 实现
-
-`core/src/nodes/palette.rs`（节点）+ `core/src/palette.rs`（算法）。
-
-- **提取**：`palette::extract(&image, n, algorithm)`：
-  - `MedianCut` 直接转发 `png_quant::representative_colors`；
-  - `KMeans` / `KMedoids` 先把颜色转 **OKLab**，再用**加权 k-means++**（第一个中心取像素
-    最多的颜色，之后按「越远 × 越多越容易被选中」抽样）初始化，然后 Lloyd 迭代；
-  - K-Medoids 的每簇代表取簇内「到其他点的加权距离和」最小的真实颜色；
-  - 抽样用固定种子的 SplitMix64，所以结果确定、可复现；
-  - `SAMPLE_CAP = 4096`：颜色更多时先按 4 位/分量分桶压到上限再聚类。
-- **统计**：`counted_colors(&rgba, threshold)` —— 一个 `HashMap<(u32, u32, u32), (sum, count)>`
-  按桶累计，最后取均值并按 count 降序。
-- 输出用 `model::value::palette_text` 拼成文本；引擎在打包运行报告时用
-  `parse_palette` 认出它、把颜色拆到 `PortResult.palette` 里，界面据此画色块。
-
-全透明的像素不算颜色；半透明的像素按 RGB 归类，色板里不带 alpha。
-
-测试：`palette` 模块里有 `oklab_round_trips_through_its_inverse`、
-`every_algorithm_finds_distinct_theme_colours`、`a_small_but_very_different_colour_still_gets_a_slot`
-（对比度高的少数色也该占一席）、`kmedoids_only_returns_colours_from_the_image`、
-`algorithms_are_deterministic`、`transparent_pixels_do_not_count`；
-节点里有 `count_merges_near_colors_and_sorts_by_how_often_they_appear`、
-`fully_transparent_pixels_are_ignored`；引擎侧还有
-`color_analysis_outputs_a_palette_text`、`color_analysis_over_an_any_image_input_takes_any_format`、
-`a_palette_feeds_a_colour_parameter_by_its_first_colour`。

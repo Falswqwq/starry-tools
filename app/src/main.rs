@@ -2,29 +2,24 @@
 //!
 //! 屏幕上除了画布只有浮动控件 —— 没有左右边栏，一切都浮在画布上。
 
+mod canvas;
 mod catalog;
-mod chrome;
-mod geometry;
-mod graph;
-mod icons;
-mod library;
-mod models;
-mod prompt;
-mod report;
-mod run;
-mod settings;
-mod svgpath;
-mod theme;
-mod widgets;
-mod workspace;
+mod state;
+mod ui;
 
 use eframe::egui;
 use egui::CornerRadius;
 
-use catalog::Kind;
-use graph::Graph;
-use library::Library;
-use workspace::Workspace;
+use crate::canvas::graph::{self, Graph};
+use crate::catalog::Kind;
+use crate::state::run;
+use crate::state::settings;
+use crate::state::workspace::Workspace;
+use crate::ui::chrome;
+use crate::ui::library::Library;
+use crate::ui::prompt;
+use crate::ui::report;
+use crate::ui::theme;
 
 /// 动画期间的重绘上限（帧/秒）。空闲时不重绘，所以这只是「动起来时」的上限。
 ///
@@ -79,6 +74,8 @@ struct App {
     prompt: prompt::Prompt,
     /// 应用级设置（帧率上限、是否显示 fps）。
     settings: settings::Settings,
+    /// 顶部弹出的一条提示（保存 / 加载失败之类）以及它出现的时刻。
+    toast: Option<(String, f64)>,
     /// 上一帧开始的时刻，用来做帧率节流。
     last_frame: Option<std::time::Instant>,
 }
@@ -103,6 +100,7 @@ impl App {
             report: report::Report::default(),
             prompt: prompt::Prompt::default(),
             settings: settings::Settings::load(),
+            toast: None,
             last_frame: None,
         }
     }
@@ -269,13 +267,62 @@ impl eframe::App for App {
             self.graph.reset_run_marks();
         }
 
+        // ---- 顶栏提示：保存 / 加载 / 删除失败时弹一条 ----
+        let now = ctx.input(|input| input.time);
+        if let Some(notice) = self.workspace.take_notice() {
+            self.toast = Some((notice, now));
+        }
+        let toast_alive = self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, shown_at)| now - shown_at < TOAST_SECS);
+        if let Some((message, shown_at)) = &self.toast {
+            if toast_alive {
+                draw_toast(&ctx, message, ((now - shown_at) / TOAST_SECS) as f32);
+            }
+        }
+        if !toast_alive {
+            self.toast = None;
+        }
+
+        // ---- 鼠标光标：画布最后一言 ----
+        // 放在所有面板（顶栏 / 节点库 / 状态药丸……）之后 —— 它们各自的悬停光标
+        // 会在画布之后设，只有这里最后设，拉刀光的十字才不会被盖掉。
+        if let Some(icon) = self.graph.cursor_icon() {
+            ctx.set_cursor_icon(icon);
+        }
+
         // ---- 需要时继续重绘 ----
         // （动画本身会自己请求重绘；这里只补上「时间在走」的那种：运行中、刀光未散。）
         //
         // 用 `request_repaint_after` 而不是 `request_repaint`：空闲时根本不会重绘，
         // 而动画期间也只钉在 ANIM_FPS 这一档，不至于在高刷屏上把 CPU 拉满。
-        if running || self.graph.is_animating() {
+        if running || self.graph.is_animating() || toast_alive {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / ANIM_FPS));
         }
     }
+}
+
+/// 顶部提示停留的秒数。
+const TOAST_SECS: f64 = 4.0;
+
+/// 顶部中间弹出的一条提示（保存 / 加载失败之类）。最后半秒淡出。
+fn draw_toast(ctx: &egui::Context, message: &str, progress: f32) {
+    let fade = ((1.0 - progress) / 0.15).min(1.0);
+    egui::Area::new(egui::Id::new("toast"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(theme::DANGER_SOFT)
+                .stroke(egui::Stroke::new(1.0, theme::DANGER_LINE))
+                .corner_radius(egui::CornerRadius::same(theme::R_CARD))
+                .shadow(theme::shadow_pop())
+                .inner_margin(egui::Margin::symmetric(14, 9))
+                .show(ui, |ui| {
+                    ui.set_opacity(fade);
+                    ui.label(egui::RichText::new(message).color(theme::DANGER).size(11.5));
+                });
+        });
 }

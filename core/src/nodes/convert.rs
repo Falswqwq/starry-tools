@@ -15,7 +15,7 @@ use crate::image_io::{flatten_onto_white, EncodeOptions, ImageValue, PngCompress
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params::{self, Params};
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
 
 /// 节点 id。改过一次（原本叫 `convert_to_png`），老存档靠 `registry` 里的别名表兜住。
@@ -144,8 +144,7 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let target = target_format(args.params);
 
     // 先把输入拿在手里（克隆只是复制一个 Arc），后面 warn 之后还要用它带出处。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
     let source_format = source.format();
     let decoded = source.decode()?;
 
@@ -171,10 +170,8 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 
     let value = ImageValue::from_image(target, converted, options)?.inherit_provenance(&source);
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
+    Ok(one_output(
+        "image",
         Value::Image(value).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }

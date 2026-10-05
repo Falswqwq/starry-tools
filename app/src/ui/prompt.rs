@@ -12,9 +12,9 @@ use eframe::egui::{
 
 use starrytools_core::interaction::{InteractionKind, InteractionResponse, MaskShape};
 
-use crate::run::Runner;
-use crate::theme;
-use crate::widgets::{self, Size, Variant};
+use crate::state::run::Runner;
+use crate::ui::theme;
+use crate::ui::widgets::{self, Size, Variant};
 
 const PANEL_W: f32 = 720.0;
 const PAD: f32 = 20.0;

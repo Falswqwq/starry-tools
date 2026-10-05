@@ -21,7 +21,7 @@ use crate::interaction::{CropShapeRequest, InteractionKind, InteractionResponse,
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params::{self, Params};
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
 
 pub const KIND: &str = "crop_image";
@@ -192,8 +192,7 @@ pub fn spec() -> NodeSpec {
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     // 克隆只是复制一个 Arc；后面 warn 之后还要用它带出处。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
     let decoded = source.decode()?;
     let (image_width, image_height) = decoded.dimensions();
 
@@ -300,12 +299,10 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     )?
     .inherit_provenance(&source);
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "image".to_string(),
+    Ok(one_output(
+        "image",
         Value::Image(value).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }
 
 /// 把界面给的裁切区域夹进图像范围：至少 1×1，且不越界。

@@ -18,7 +18,7 @@ use crate::error::NodeError;
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params;
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{palette_text, NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, palette_text, NodeArgs, Value, ValueMap};
 use crate::palette::{self, Algorithm};
 use crate::registry::NodeSpec;
 
@@ -131,8 +131,7 @@ pub fn spec() -> NodeSpec {
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     // 克隆只是复制一个 Arc；输出之后还要用它把名字接下去。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    let (source, name) = args.image_in("image")?;
     let decoded = source.decode()?;
     let rgba = decoded.to_rgba8();
 
@@ -155,12 +154,10 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
         args.warn("整张图都是透明的，没有颜色可分析");
     }
 
-    let mut outputs = ValueMap::new();
-    outputs.insert(
-        "palette".to_string(),
+    Ok(one_output(
+        "palette",
         Value::text(palette_text(&colors)).with_name_hint(name),
-    );
-    Ok(outputs)
+    ))
 }
 
 /// 数量统计：按分量分桶把相近色并成一种，再按像素数从多到少排。

@@ -29,7 +29,8 @@ pub fn text_spec() -> NodeSpec {
             "一段文本。接到别的节点的参数端口上，就能把那个参数改从这里取。",
             ParamSpec::Text {
                 default: String::new(),
-                multiline: false,
+                // 多行：文本可以有多行，框也会跟着内容长。
+                multiline: true,
                 placeholder: Some("写点什么…".into()),
             },
             PortType::Text,

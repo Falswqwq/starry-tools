@@ -81,8 +81,7 @@ impl NodeSpec {
 /// 缺的参数由默认值补上，所以老工作流还能照常打开和运行。
 const LEGACY_KIND_IDS: &[(&str, &str)] = &[
     ("convert_to_png", nodes::convert::KIND),
-    // 「输入」拆成了「读取」和「输入框」两个节点。老的「输入」按文件读，
-    // 归到「读取」上最接近。
+    // 老的「输入」是个按文件读的起点节点，现在归到「读取」上。
     ("input", nodes::read::KIND),
 ];
 
@@ -139,7 +138,6 @@ impl Registry {
 fn builtin_specs() -> Vec<NodeSpec> {
     vec![
         nodes::read::spec(),
-        nodes::input_box::spec(),
         nodes::literal::text_spec(),
         nodes::literal::number_spec(),
         nodes::literal::bool_spec(),

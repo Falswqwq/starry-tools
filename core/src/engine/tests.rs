@@ -351,7 +351,7 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 16, "内置工具的数量（改动时请一并更新这条）");
+    assert_eq!(kinds.len(), 15, "内置工具的数量（改动时请一并更新这条）");
 
     let convert = kinds
         .iter()
@@ -435,12 +435,6 @@ fn kind_metadata_is_a_stable_contract() {
         .iter()
         .any(|ext| ext == "png"));
     assert_eq!(file_param["visibleWhen"]["anyOf"][0], "image");
-
-    // 「输入框」是那块大的拖放 / 打字输入区。
-    let input_box = kinds.iter().find(|kind| kind["id"] == "input_box").unwrap();
-    assert_eq!(input_box["name"], "输入框");
-    assert_eq!(input_box["isSource"], true);
-    assert_eq!(input_box["params"][0]["control"], "dropZone");
 
     let upscale = kinds.iter().find(|kind| kind["id"] == "upscale").unwrap();
     assert_eq!(upscale["name"], "缩放图像");
@@ -1066,59 +1060,16 @@ fn read_reads_a_text_file_as_text() {
 }
 
 #[test]
-fn input_box_runs_its_typed_text_and_infers_the_type() {
-    let dir = workspace("input-box-text");
-    let mut workflow = Workflow::new("输入框文本");
-    let mut params = defaults(crate::nodes::input_box::KIND);
-    params.insert("value".into(), serde_json::json!("hello"));
-    workflow
-        .nodes
-        .push(node("box", crate::nodes::input_box::KIND, params));
-
-    let resolved = resolve(&workflow);
-    assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
-    assert_eq!(resolved.nodes[0].outputs[0].ty, PortType::Text);
-
-    let report = run(&workflow, None, &dir).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    assert_eq!(report.nodes[0].outputs[0].ty, PortType::Text);
-}
-
-#[test]
-fn input_box_with_an_image_file_infers_the_format() {
-    let dir = workspace("input-box-file");
-    let png = image_fixture(&dir, "png", 4, 3);
-
-    let mut workflow = Workflow::new("输入框装图");
-    let mut params = defaults(crate::nodes::input_box::KIND);
-    params.insert(
-        "value".into(),
-        serde_json::json!({ "file": png.to_string_lossy() }),
-    );
-    workflow
-        .nodes
-        .push(node("box", crate::nodes::input_box::KIND, params));
-
-    let resolved = resolve(&workflow);
-    assert_eq!(
-        resolved.nodes[0].outputs[0].ty,
-        PortType::Image(ImageFormat::Png)
-    );
-    let report = run(&workflow, None, &dir).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-}
-
-#[test]
 fn rename_passes_a_non_image_value_through_untouched() {
     // 重命名是通用节点：文本、数字都能接，类型和内容都不变。
     let dir = workspace("rename-text");
 
     let mut workflow = Workflow::new("重命名文本");
-    let mut box_params = defaults(crate::nodes::input_box::KIND);
-    box_params.insert("value".into(), serde_json::json!("hello"));
+    let mut text_params = defaults(crate::nodes::literal::KIND_TEXT);
+    text_params.insert("value".into(), serde_json::json!("hello"));
     workflow
         .nodes
-        .push(node("in", crate::nodes::input_box::KIND, box_params));
+        .push(node("in", crate::nodes::literal::KIND_TEXT, text_params));
 
     let mut rename_params = defaults(crate::nodes::rename::KIND);
     rename_params.insert("name".into(), serde_json::json!("note"));

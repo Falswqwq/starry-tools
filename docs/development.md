@@ -55,7 +55,7 @@ use crate::image_io::{EncodeOptions, ImageValue};
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef};
 use crate::model::params;
 use crate::model::port_type::{ImageFormat, PortType};
-use crate::model::value::{NodeArgs, Value, ValueMap};
+use crate::model::value::{one_output, NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
 
 pub const KIND: &str = "invert";
@@ -88,9 +88,8 @@ pub fn spec() -> NodeSpec {
 }
 
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
-    // 克隆一个图像值只是复制一个 Arc，很便宜；这样后面才好拿 args 记提示。
-    let source = args.image("image")?.clone();
-    let name = args.input_name("image");
+    // `image_in` 取出图像和它带着的名字（克隆只复制一个 Arc）。
+    let (source, name) = args.image_in("image")?;
     let drawn = source.decode()?;
     let amount = params::number(args.params, "strength", 100.0) / 100.0;
 
@@ -109,9 +108,7 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     )?
     .inherit_provenance(&source);
 
-    let mut outputs = ValueMap::new();
-    outputs.insert("image".to_string(), Value::Image(value).with_name_hint(name));
-    Ok(outputs)
+    Ok(one_output("image", Value::Image(value).with_name_hint(name)))
 }
 ```
 
@@ -122,12 +119,13 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 
 几点约定：
 
-- **改了像素的节点要带出处。** `inherit_provenance` 把来源文件名接下去
-  （下游「保存到目录」要用），`with_name_hint(args.input_name(..))` 把「重命名」挂的名字接下去。
+- **改了像素的节点要带出处。** 先 `args.image_in("image")` 拿到 `(图像, 名字)`，处理完用
+  `inherit_provenance` 接住来源文件名（下游「保存到目录」要用），再用 `with_name_hint(name)`
+  把名字挂回去；最后 `one_output("image", ..)` 收尾。
 - **参数可以条件显示。** `visible_when("mode", &["lossy"])` 是「或」，
   后面还可以 `.and_visible_when("lossyFormat", &["palette"])` 加一条「而且」。
 - **输出端口类型依赖参数**时用 `NodeSpec::dynamic(kind, resolve_outputs, run)`
-  （「读取」「输入框」「图像格式转换」「图像压缩」就是这么做的），别在 `fixed` 里写死。
+  （「读取」「图像格式转换」「图像压缩」就是这么做的），别在 `fixed` 里写死。
 - **停下来问用户的节点**用 `NodeSpec::fixed(..).interactive(fn)` 声明，`fn(params) -> bool`
   说清哪些参数下它会拦住运行（画布画成紫色）。运行里用 `args.ask(InteractionKind::..)`
   发请求、阻塞等答复；没有界面时会返回 `NodeError` 而不是 panic。见
@@ -154,7 +152,7 @@ core/               纯逻辑，不依赖任何 GUI 框架
   src/model/        port_type / node_kind / value / params / workflow
                     （node_kind 里放着「参数 → 可选输入端口」的推导规则）
   src/nodes/        内置工具，一个文件一个（literal.rs = 文本/数字/布尔字面量）
-                    read.rs = 读文件；input_box.rs = 拖放 / 打字的输入区（控件种类 DropZone）
+                    read.rs = 读文件
   src/engine/       静态检查 + 执行引擎（含测试）
   src/png_opt/      无损 PNG 优化：颜色类型 / 位深 / 调色板 / 逐行 filter / zopfli / 元数据
   src/png_quant.rs  调色板量化（有损）
@@ -164,18 +162,29 @@ core/               纯逻辑，不依赖任何 GUI 框架
 app/                egui 界面
   assets/           窗口图标（PNG / ICO）、桌面入口
   assets/icons/     vendored 的 lucide 原始 SVG（运行时解析，不手抄路径）
-  src/catalog.rs    读 core 的注册表 —— 界面认识节点的唯一途径
-  src/graph.rs      画布 + 刀光 + 端口连线 + 右键菜单 + 卡片缩略图 + 参数控件 + 缩放控件
-  src/geometry.rs   刀光的几何（贝塞尔采样 / 判交 / 切分），有测试
-  src/icons.rs      图标：把 assets/icons/ 里的 lucide SVG 光栅化成贴图
-  src/widgets.rs    自绘按钮与浮层外壳（实心 / 幽灵 / 主色 / 危险）
-  src/library.rs    节点库浮层：分类 / 卡片 / 展开动画 / 拖出
-  src/workspace.rs  工作流的存取：数据目录 / 当前是哪一份 / 未保存标记
-  src/chrome.rs     左上角（节点库 / 名字 / 说明）与右上角（问题 / 加载 / 保存 / 运行）
-  src/run.rs        静态检查的缓存 + 后台跑工作流
-  src/report.rs     底部状态药丸与向上弹出的运行记录
-  src/theme.rs      设计令牌 + 中文字体回退
   src/main.rs       外壳：画布 + 浮动控件
+  src/catalog.rs    读 core 的注册表 —— 界面认识节点的唯一途径
+  src/canvas/       画布
+    graph.rs        交互 + 绘制 + 刀光 + 端口连线 + 动画
+    node.rs         数据模型：节点 / 连线 / 端口引用 + 小工具（id / 端口重算）
+    layout.rs       尺寸与纵向排版：卡片多高、参数控件落在哪（绘制 / 命中 / 端口定位共用）
+    view.rs         视口：平移 / 缩放 / 坐标换算
+    geometry.rs     刀光的几何（贝塞尔采样 / 判交 / 切分），有测试
+  src/ui/           外观
+    theme.rs        设计令牌 + 中文字体回退
+    widgets.rs      自绘按钮与浮层外壳（实心 / 幽灵 / 主色 / 危险）
+    controls.rs     参数控件与颜色系统（数字 / 文本 / 下拉 / 开关 / 文件 / 取色器）
+    icons.rs        图标：把 lucide SVG 光栅化成贴图
+    svgpath.rs      SVG 路径解析
+    chrome.rs       左上（节点库 / 名字 / 说明）与右上（问题 / 加载 / 保存 / 运行）
+    library.rs      节点库浮层：分类 / 卡片 / 展开动画 / 拖出
+    prompt.rs       紫色（阻塞）节点的交互浮层
+    report.rs       底部状态药丸与向上弹出的运行记录
+  src/state/        应用状态与服务
+    workspace.rs    工作流的存取：数据目录 / 当前是哪一份 / 未保存标记
+    settings.rs     帧率上限 / 是否显示 fps
+    run.rs          静态检查的缓存 + 后台跑工作流
+    models.rs       要下载的模型（背景移除）的下载状态
 ```
 
 界面不依赖任何外部运行库：窗口走 `eframe`/`wgpu`，文件对话框用 `rfd`，
@@ -205,7 +214,7 @@ app/                egui 界面
 （一头输出一头输入、类型对得上、一个输入端口只接一条，未接上时线会呼吸发光）；
 **右键点节点**开菜单，可以删除或复制；**右键按住滑动划一刀**，扫到的连线会变红搏动，
 松手就切断并各自弹回去。也可以用 `Delete` 删节点、`Ctrl+C/V` 复制粘贴、`Ctrl+S` 保存。
-刀光的几何在 `app/src/geometry.rs`，是不碰界面的纯函数，有测试盯着。
+刀光的几何在 `app/src/canvas/geometry.rs`，是不碰界面的纯函数，有测试盯着。
 
 ## 性能
 

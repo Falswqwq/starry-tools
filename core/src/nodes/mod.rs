@@ -5,7 +5,6 @@ pub mod border;
 pub mod compress;
 pub mod convert;
 pub mod crop;
-pub mod input_box;
 pub mod literal;
 pub mod palette;
 pub mod read;

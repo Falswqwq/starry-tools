@@ -150,11 +150,6 @@ pub enum ParamSpec {
         #[serde(default, skip_serializing_if = "is_false")]
         directory: bool,
     },
-    /// 一大块输入区：把文件拖进来、`Ctrl+V` 粘贴，或者点一下直接打字。
-    ///
-    /// 值是一个 JSON：空字符串 = 还没输入；字符串 = 文本；`{"file": "路径"}` = 一个文件。
-    /// 具体长什么样、怎么交互由前端决定（见 `app` 里的 `draw_drop_zone`）。
-    DropZone,
     /// 颜色：一个**通用取色器**（前端画成一条色条，点开是取色区 + 色相条 + R/G/B + Hex）。
     ///
     /// 值是一个字符串 —— `#rrggbb` / `#rrggbbaa`；`transparent` 表示全透明（向后兼容）。
@@ -186,8 +181,6 @@ impl ParamSpec {
             ParamSpec::Color { .. } => Some(PortType::Text),
             // 下拉框的合法值是一张固定的表，随便接一段文字进来只会静默出错。
             ParamSpec::Select { .. } => None,
-            // 输入区是个「源头」，没有上游可接。
-            ParamSpec::DropZone => None,
         }
     }
 }
@@ -348,8 +341,6 @@ impl NodeKind {
                 ParamSpec::Bool { default } => serde_json::json!(default),
                 ParamSpec::File { default, .. } => serde_json::json!(default),
                 ParamSpec::Color { default, .. } => serde_json::json!(default),
-                // 输入区默认空着。
-                ParamSpec::DropZone => serde_json::json!(""),
             };
             params.insert(def.id.clone(), value);
         }

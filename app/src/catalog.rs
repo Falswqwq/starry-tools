@@ -21,7 +21,7 @@ pub struct Port {
     /// 短标签，卡片上的 `IMG → PNG` 用它。
     pub badge: String,
     /// 真实类型。**连线合不合法就靠它**（`PortType::accepts`）；
-    /// 徽标的颜色也只看它（见 [`crate::theme::badge_color`]）。
+    /// 徽标的颜色也只看它（见 [`crate::ui::theme::badge_color`]）。
     pub ty: PortType,
     pub required: bool,
     /// 这是某个**参数**的可选输入时，记下参数的 id。
@@ -55,8 +55,6 @@ pub enum Control {
     Number {
         min: f64,
         max: f64,
-        #[allow(dead_code)]
-        step: f64,
         integer: bool,
         unit: Option<String>,
     },
@@ -64,8 +62,6 @@ pub enum Control {
     Slider {
         min: f64,
         max: f64,
-        #[allow(dead_code)]
-        step: f64,
         integer: bool,
         unit: Option<String>,
     },
@@ -84,8 +80,6 @@ pub enum Control {
         extensions: Vec<String>,
         directory: bool,
     },
-    /// 一大块输入区（拖文件 / 粘贴 / 点一下打字）。
-    DropZone,
 }
 
 /// 参数在什么条件下才显示。
@@ -175,7 +169,6 @@ impl Param {
             ),
             Control::Color => "颜色".to_string(),
             Control::Bool => "开关".to_string(),
-            Control::DropZone => "拖入文件 / 粘贴 / 打字".to_string(),
             Control::File {
                 directory,
                 extensions,
@@ -200,6 +193,8 @@ pub struct Kind {
     pub name: String,
     pub category: String,
     pub description: String,
+    /// 这是不是流程的起点（没有输入端口、工作流从它开始）。
+    pub is_source: bool,
     /// 展开卡片时列在「注意事项」里的那几句话。
     pub notes: Vec<String>,
     pub inputs: Vec<Port>,
@@ -246,6 +241,7 @@ pub fn all() -> Vec<Kind> {
                 name: kind.name.clone(),
                 category: kind.category.clone(),
                 description: kind.description.clone(),
+                is_source: kind.is_source,
                 notes: kind.notes.clone(),
                 inputs: ports(&kind.inputs),
                 outputs: ports(&kind.outputs),
@@ -284,17 +280,6 @@ pub fn is_interactive(kind_id: &str, params: &Params) -> bool {
     registry().is_interactive(kind_id, params)
 }
 
-/// 这个节点有没有「输入区」（`DropZone`）控件。有的话它自己就把值摆出来了 ——
-/// 跑完之后不用再在卡片底下摆一条结果图。
-pub fn has_drop_zone(kind_id: &str) -> bool {
-    registry().get(kind_id).is_some_and(|spec| {
-        spec.kind
-            .params
-            .iter()
-            .any(|param| matches!(param.spec, ParamSpec::DropZone))
-    })
-}
-
 /// 分类列表：按出现顺序排，前面加一个「全部」。不写死分类名 ——
 /// core 里新加一个分类，这里自动就有了。
 pub fn categories(kinds: &[Kind]) -> Vec<String> {
@@ -325,28 +310,24 @@ fn param(def: &ParamDef) -> Param {
         ParamSpec::Number {
             min,
             max,
-            step,
             integer,
             unit,
             ..
         } => Control::Number {
             min: *min,
             max: *max,
-            step: *step,
             integer: *integer,
             unit: unit.clone(),
         },
         ParamSpec::Slider {
             min,
             max,
-            step,
             integer,
             unit,
             ..
         } => Control::Slider {
             min: *min,
             max: *max,
-            step: *step,
             integer: *integer,
             unit: unit.clone(),
         },
@@ -363,7 +344,6 @@ fn param(def: &ParamDef) -> Param {
         },
         ParamSpec::Color { .. } => Control::Color,
         ParamSpec::Bool { .. } => Control::Bool,
-        ParamSpec::DropZone => Control::DropZone,
         ParamSpec::File {
             dialog_title,
             extensions,

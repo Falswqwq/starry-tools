@@ -3,7 +3,7 @@
 //! 卡片上的每一个字都来自 [`crate::catalog`]（也就是 core 的注册表）——
 //! 这里没有任何写死的节点名或分类。
 //!
-//! 触发按钮不在这里：它由左上角的 [`crate::chrome`] 画，只翻转这里的 `open`。
+//! 触发按钮不在这里：它由左上角的 [`crate::ui::chrome`] 画，只翻转这里的 `open`。
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
@@ -11,9 +11,9 @@ use eframe::egui::{
 use egui::epaint::RectShape;
 
 use crate::catalog::{self, Kind};
-use crate::icons;
-use crate::theme;
-use crate::widgets;
+use crate::ui::icons;
+use crate::ui::theme;
+use crate::ui::widgets;
 
 /// 折叠时的高度；展开后的高度按内容行数算。
 const CARD_H: f32 = 66.0;
@@ -483,7 +483,7 @@ impl Library {
         x += name.size().x + 6.0;
 
         // 类型徽标 + 箭头（与节点名按**墨迹**中线对齐，汉字名和拉丁徽标才不显得错位）
-        let badges_y = top + crate::widgets::ink_center(&name);
+        let badges_y = top + crate::ui::widgets::ink_center(&name);
         self.draw_badges(&painter, kind, x, badges_y, content_alpha);
 
         // 紫色节点（要你动手的）在卡片右上角挂一个小标记。
@@ -513,7 +513,7 @@ impl Library {
             painter.galley(
                 egui::pos2(
                     r.center().x - tag.size().x / 2.0,
-                    crate::widgets::ink_top(&tag, r.center().y),
+                    crate::ui::widgets::ink_top(&tag, r.center().y),
                 ),
                 tag,
                 theme::PURPLE.gamma_multiply(content_alpha),
@@ -614,7 +614,7 @@ impl Library {
             painter.galley(
                 egui::pos2(
                     r.center().x - g.size().x / 2.0,
-                    crate::widgets::ink_top(&g, r.center().y),
+                    crate::ui::widgets::ink_top(&g, r.center().y),
                 ),
                 g,
                 color,
@@ -703,7 +703,7 @@ impl Library {
                     StrokeKind::Inside,
                 );
                 // 徽标按墨迹在胶囊里居中，右侧文字也按墨迹对齐到胶囊中线。
-                let chip_baseline = crate::widgets::ink_top(&g, r.center().y);
+                let chip_baseline = crate::ui::widgets::ink_top(&g, r.center().y);
                 painter.galley(
                     egui::pos2(r.center().x - g.size().x / 2.0, chip_baseline),
                     g,
@@ -725,7 +725,7 @@ impl Library {
                     (card.right() - 11.0 - flag_w - x).max(16.0),
                 );
                 painter.galley(
-                    egui::pos2(x, crate::widgets::label_top(&galley, r.center().y, y + 3.0)),
+                    egui::pos2(x, crate::ui::widgets::label_top(&galley, r.center().y, y + 3.0)),
                     galley,
                     theme::INK_2.gamma_multiply(alpha),
                 );
@@ -802,7 +802,7 @@ impl Library {
                                 ui.painter().galley(
                                     egui::pos2(
                                         r.center().x - g.size().x / 2.0,
-                                        crate::widgets::ink_top(&g, r.center().y),
+                                        crate::ui::widgets::ink_top(&g, r.center().y),
                                     ),
                                     g,
                                     *color,

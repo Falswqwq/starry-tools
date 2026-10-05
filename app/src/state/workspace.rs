@@ -10,7 +10,7 @@ use starrytools_core::paths;
 use starrytools_core::storage::Storage;
 
 use crate::catalog::Kind;
-use crate::graph::Graph;
+use crate::canvas::graph::Graph;
 
 pub struct Workspace {
     storage: Storage,
@@ -56,6 +56,12 @@ impl Workspace {
 
     pub fn id(&self) -> &str {
         &self.current.id
+    }
+
+    /// 取走一条待显示的错误提示（保存 / 加载 / 删除失败时留下的）。
+    /// 拿出来就清掉 —— 界面拿它弹一个提示。
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     pub fn name_mut(&mut self) -> &mut String {
@@ -139,10 +145,10 @@ pub fn data_root() -> PathBuf {
     paths::data_root()
 }
 
-/// 一份新的空工作流：只有一个「读取」节点（所有工作流都从它开始）。
+/// 一份新的空工作流：只有一个「起点」节点（所有工作流都从它开始）。
 fn fresh(kinds: &[Kind]) -> Workflow {
     let mut workflow = Workflow::new("未命名工作流");
-    if let Some(read) = kinds.iter().find(|kind| kind.id == "read") {
+    if let Some(read) = kinds.iter().find(|kind| kind.is_source) {
         workflow.nodes.push(NodeInstance {
             id: uuid::Uuid::new_v4().to_string(),
             kind: read.id.clone(),

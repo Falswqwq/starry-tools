@@ -249,6 +249,13 @@ pub fn human_size(bytes: usize) -> String {
 /// 一个节点所有输出端口的结果，按端口 id 索引。
 pub type ValueMap = BTreeMap<String, Value>;
 
+/// 只有一个输出端口时，省掉手写 `ValueMap::new()` + `insert` 的样板。
+pub fn one_output(port: &str, value: Value) -> ValueMap {
+    let mut outputs = ValueMap::new();
+    outputs.insert(port.to_string(), value);
+    outputs
+}
+
 /// 节点执行时能拿到的东西。
 pub struct NodeArgs<'a> {
     pub node_id: &'a str,
@@ -279,6 +286,15 @@ impl NodeArgs<'_> {
 
     pub fn image(&self, port: &str) -> Result<&ImageValue, NodeError> {
         self.input(port)?.as_image()
+    }
+
+    /// 取图像输入，连同它带着的名字。
+    ///
+    /// 图像节点几乎都这么开头：把输入克隆出来（只是复制一个 `Arc`），
+    /// 记住它的名字，处理完再把名字挂回输出。
+    pub fn image_in(&self, port: &str) -> Result<(ImageValue, Option<OutputName>), NodeError> {
+        let value = self.input(port)?;
+        Ok((value.as_image()?.clone(), value.name_hint().cloned()))
     }
 
     /// 输入端口上跟着的名字。转换类节点重新构造值之后，用它把名字接着传下去。

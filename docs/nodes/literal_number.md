@@ -29,11 +29,3 @@
 - 输出永远是 `Number`。目标参数有自己的范围（比如缩放比例限 1–1600），越界由目标
   节点在运行期把关，数字节点本身不裁剪。
 - 没有输入；一个输出端口可以拉出多条线，同时喂给多个参数。
-
-## 实现
-
-`core/src/nodes/literal.rs`。和其它两个字面量节点共用 `literal()` 生成；`run` 把参数
-包成 `Value::Number` 输出。
-
-测试：`engine::tests::a_linked_param_port_overrides_the_param`（数字节点 400 覆盖
-「缩放图像」本地的 100，跑到 8×8）、`engine::tests::source_nodes_have_no_param_ports`。

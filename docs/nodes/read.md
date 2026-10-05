@@ -6,8 +6,6 @@
 **文本文件**按 UTF-8 文本读进来。一个工作流可以放多个读取节点，让几条支线各走各的。
 新建工作流时已经带一个。
 
-> 想直接打字、或者把文件拖进来，用 [输入框](input_box.md)。这儿是「我知道文件在哪」。
-
 ## 端口
 
 | 方向 | 端口 | 类型 |
@@ -41,18 +39,3 @@ TGA / PNM）；文本文件框过滤常见的文本扩展名。选完图像之�
   [数字](literal_number.md)字面量节点。
 - **工作流里只记路径，不会把文件内容一起存下来。** 文件挪走之后要重新选一次。
 - 没选文件就跑会直接失败：`还没有选择图像文件` / `还没有选择文本文件`。
-
-## 实现
-
-`core/src/nodes/read.rs`。
-
-自动推断由 `NodeSpec::dynamic(kind, output_ports, run)` 的 `output_ports(params)` 完成：
-文本模式 → `Text`；图像模式按 `image_io::guess_format_from_path`（只读文件头 512 字节）
-拿真实格式，认不出来就退回 `Any`。
-
-节点库卡片画的是**声明里的样子**（静态的），所以上面显示 `ANY`；拖出来的实例选好文件后
-立刻变成 `Image(Png)` 之类。`core/src/registry.rs` 的 `kinds()` 就是这么把「声明里的端口」
-发给前端的。
-
-测试：`engine::tests::input_port_type_follows_the_selected_file`、
-`engine::tests::read_reads_a_text_file_as_text`、`engine::tests::a_configuringless_input_is_any`。

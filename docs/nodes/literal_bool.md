@@ -28,10 +28,3 @@
 
 - 输出永远是 `Bool`，接不进数字 / 文本端口。
 - 没有输入；一个输出端口可以拉出多条线，同时喂给多个开关参数。
-
-## 实现
-
-`core/src/nodes/literal.rs`。和其它两个字面量节点共用 `literal()` 生成；`run` 把参数
-包成 `Value::Bool` 输出。
-
-测试：`engine::tests::source_nodes_have_no_param_ports`。

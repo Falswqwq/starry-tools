@@ -4,7 +4,7 @@
 运行时的信号流光也用它。字体只自带一款 JetBrains Mono（拉丁与数字，等宽，数字能对齐），
 中文走系统回退（Noto Sans CJK）。
 
-所有 token 都在 `app/src/theme.rs` 一处 —— 换配色只改那里，不用翻每个组件。
+所有 token 都在 `app/src/ui/theme.rs` 一处 —— 换配色只改那里，不用翻每个组件。
 
 ## 同一套表面
 
@@ -36,8 +36,8 @@
 
 ## 组件层
 
-按钮、下拉、开关、输入框这些外壳都是**自己画的**（`app/src/widgets.rs` 与
-`app/src/graph.rs`），不套 egui 默认控件的外观：
+按钮、下拉、开关、输入框这些外壳都是**自己画的**（`app/src/ui/widgets.rs` 与
+`app/src/ui/controls.rs`），不套 egui 默认控件的外观：
 
 - 原因是节点那层（纸片卡片、端口、连线）本来就不该由控件库决定，外壳跟着同一套 token
   画出来，风格才统一。

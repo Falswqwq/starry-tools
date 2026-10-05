@@ -40,16 +40,3 @@
   已有的文件一个都不动。
 - 不重新编码：写出的字节和上游产出的完全一致。
 - 写失败（权限、磁盘满）会让这个节点报错，上游会照常显示为已完成。
-
-## 实现
-
-`core/src/nodes/save.rs`，`NodeSpec::fixed`。
-
-名字的候选来自 `value.name_hint()`（重命名节点挂的）与 `image.origin()`（读取节点留下的
-原始路径），两者都是跟着值流动的元信息。去重靠 `unique_name()`，从 2 开始试到
-`(10_000)`，实在排不下就退回时间戳。
-
-注意这里的 `args.image("image")` 会**透过名字包装**取到真正的图像（见
-[重命名](rename.md)），而 `args.input("image")` 拿到的才是带名字的那个值。
-
-测试：`save_to_directory_writes_and_respects_overwrite`（写出去、重名改名、不动原文件）。

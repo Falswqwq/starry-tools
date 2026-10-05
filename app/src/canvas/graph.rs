@@ -11,50 +11,58 @@
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Vec2,
+    StrokeKind,
 };
 use egui::epaint::CubicBezierShape;
-use serde_json::Value;
 use starrytools_core::engine::{NodeRunResult, NodeStatus, RunReport};
-use starrytools_core::model::params::Params;
 use starrytools_core::model::workflow::{Edge, NodeInstance, Position, Workflow};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::catalog::{Control, Kind, Param, Port};
-use crate::geometry::{self, Cubic};
-use crate::icons::{self, IconFn};
-use crate::models::Downloads;
-use crate::run::{LiveRun, Marks};
-use crate::theme;
-use crate::widgets;
+use crate::canvas::geometry::{self, Cubic};
+use crate::canvas::layout::*;
+use crate::canvas::node::*;
+use crate::canvas::view::Viewport;
+use crate::catalog::{Control, Kind, Port};
+use crate::state::models::Downloads;
+use crate::state::run::{LiveRun, Marks};
+use crate::ui::controls::*;
+use crate::ui::icons::{self, IconFn};
+use crate::ui::theme;
+use crate::ui::widgets;
 
 /// 节点的显示尺寸（流坐标，不含缩放）。
-const NODE_W: f32 = 216.0;
-const HEADER_H: f32 = 30.0;
-const PORT_ROW_H: f32 = 20.0;
-const BODY_PAD: f32 = 8.0;
+pub(crate) const NODE_W: f32 = 216.0;
+pub(crate) const HEADER_H: f32 = 30.0;
+pub(crate) const PORT_ROW_H: f32 = 20.0;
+pub(crate) const BODY_PAD: f32 = 8.0;
 /// 参数块：标签一行、控件一行（上下排列，和原设计一致）。
-const PARAM_LABEL_H: f32 = 15.0;
-const PARAM_LABEL_GAP: f32 = 4.0;
-const PARAM_CONTROL_H: f32 = 24.0;
-/// 「输入框」那块大输入区的高度。
-const DROP_H: f32 = 132.0;
-/// 「输入框」下面那行「清空」按钮（含它上面的缝）。
-const DROP_ACTION_H: f32 = 30.0;
-/// 模型还没下载时，卡片上那块「下载模型」面板的高度（流坐标）。
-const MODEL_PANEL_H: f32 = 114.0;
-const PARAM_NOTE_GAP: f32 = 4.0;
+pub(crate) const PARAM_LABEL_H: f32 = 15.0;
+pub(crate) const PARAM_LABEL_GAP: f32 = 4.0;
+/// 模型还没下载时，卡片上那块「下载模型」面板。各段高度**一处定义**，
+/// 面板总高由它们相加得出 —— 改其中任何一段，卡片高度和里面控件的位置都自动跟上。
+const MODEL_PAD: f32 = 10.0;
+const MODEL_TITLE_H: f32 = 16.0;
+const MODEL_NOTE_H: f32 = 18.0;
+const MODEL_SELECT_H: f32 = 24.0;
+const MODEL_ACTION_GAP: f32 = 8.0;
+const MODEL_ACTION_H: f32 = 28.0;
+pub(crate) const MODEL_PANEL_H: f32 = MODEL_PAD * 2.0
+    + MODEL_TITLE_H
+    + MODEL_NOTE_H
+    + MODEL_SELECT_H
+    + MODEL_ACTION_GAP
+    + MODEL_ACTION_H;
+pub(crate) const PARAM_NOTE_GAP: f32 = 4.0;
 /// 两个参数之间留的缝。
-const PARAM_GAP: f32 = 8.0;
+pub(crate) const PARAM_GAP: f32 = 8.0;
 /// 开关是「标签 + 开关」一行放。
-const PARAM_BOOL_H: f32 = 20.0;
-/// 多行文本框的最小高度，以及每行估高。
-const PARAM_TEXT_ROW_H: f32 = 52.0;
-const PARAM_TEXT_LINE: f32 = 16.0;
+pub(crate) const PARAM_BOOL_H: f32 = 20.0;
+/// 多行文本框每行的估高。
+pub(crate) const PARAM_TEXT_LINE: f32 = 16.0;
 /// 端口和参数之间留的那条缝。
-const PARAMS_GAP: f32 = 9.0;
+pub(crate) const PARAMS_GAP: f32 = 9.0;
 /// 参数区底部留的那点白，免得最后一个控件贴着圆角。
-const PARAMS_BOTTOM: f32 = 8.0;
+pub(crate) const PARAMS_BOTTOM: f32 = 8.0;
 /// 缩得比这个还小就不画控件了 —— 控件挤不下，只留标题和端口。
 const PARAM_LOD_ZOOM: f32 = 0.5;
 /// 端口的点击判定半径（**屏幕**像素）。比画出来的圆大不少 —— 小圆点不好点，
@@ -73,26 +81,21 @@ pub struct RunView<'a> {
 }
 
 /// 卡片底部的预览条高度（流坐标）。跑完有缩略图时卡片才多出这么高。
-const PREVIEW_H: f32 = 84.0;
+pub(crate) const PREVIEW_H: f32 = 84.0;
 
 /// 卡片底部的色板条高度（流坐标）。输出是色板时卡片才多出这么高。
-const PALETTE_H: f32 = 30.0;
+pub(crate) const PALETTE_H: f32 = 30.0;
 
 /// 预览的棋盘格边长（流坐标）。
 const CHECKER: f32 = 8.0;
 
 /// 运行痕迹各段的高度（流坐标）。
-const RUN_ACTIONS_H: f32 = 30.0;
+pub(crate) const RUN_ACTIONS_H: f32 = 30.0;
 /// 运行「提示」那一块：上下留白、图标的大小、图标与文字之间的缝、两条提示之间的缝。
-const NOTICE_PAD: f32 = 8.0;
-const NOTICE_ICON: f32 = 12.0;
-const NOTICE_GAP: f32 = 6.0;
-const NOTICE_STACK: f32 = 5.0;
-
-/// 提示文字能用的宽度（流坐标）—— 减掉图标那一截。
-fn notice_text_width() -> f32 {
-    NODE_W - 20.0 - NOTICE_ICON - NOTICE_GAP
-}
+pub(crate) const NOTICE_PAD: f32 = 8.0;
+pub(crate) const NOTICE_ICON: f32 = 12.0;
+pub(crate) const NOTICE_GAP: f32 = 6.0;
+pub(crate) const NOTICE_STACK: f32 = 5.0;
 
 /// 节点落到画布上时那段入场动画的时长。
 const ENTER_SECS: f64 = 0.34;
@@ -104,116 +107,9 @@ const OVERTAKE_SECS: f64 = 0.28;
 /// 收刀时刀尖再往前送多远（屏幕像素）。
 const OVERTAKE_REACH: f32 = 160.0;
 
-#[derive(Clone)]
-pub struct Node {
-    /// 节点实例 id，落盘时用它（存档里的 `source` / `target` 认的就是它）。
-    pub id: String,
-    pub pos: Pos2,
-    /// 节点类型 id。参数声明按这个 id 到注册表里查。
-    pub kind: String,
-    pub title: String,
-    pub inputs: Vec<Port>,
-    pub outputs: Vec<Port>,
-    /// 这个节点实例自己的参数值。
-    pub params: Params,
-    /// 跑完之后有没有缩略图可看。有的活卡片底下多留一条预览区（**不落盘**，是视图状态）。
-    pub preview: bool,
-    /// 跑出来是个色板（「色彩分析」）时，卡片底下摆一排小色块。**不落盘**。
-    pub palette: Option<Vec<[u8; 4]>>,
-    /// 上一次运行的结果（状态 / 耗时 / 警告 / 错误 / 产物）。**不落盘**。
-    pub run: Option<NodeRun>,
-}
-
-/// 一个节点上一次运行时留下的痕迹，画在卡片上。
-#[derive(Clone)]
-pub struct NodeRun {
-    pub status: NodeStatus,
-    pub ms: u64,
-    pub error: Option<String>,
-    pub warnings: Vec<String>,
-    /// 写下去的产物路径（有的话卡片底部会出现一行操作）。
-    pub file: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct Wire {
-    pub from: usize,
-    /// 起点端口 id（**不是下标**）。端口会随参数增减，下标靠不住。
-    pub from_port: String,
-    pub to: usize,
-    pub to_port: String,
-}
-
-/// 卡片右上角工具按钮的边长（屏幕像素，随缩放走）。
-const TOOL_SIZE: f32 = 20.0;
-
-/// 一个端口的位置引用。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PortRef {
-    pub node: usize,
-    pub port: usize,
-    /// 是输入端口吗？否则是输出端口。
-    pub input: bool,
-}
-
-/// 正在拉的那根线。
-struct Connect {
-    from: PortRef,
-    /// 当前指针位置（屏幕坐标）。
-    to: Pos2,
-    /// 落点候选 —— 只在悬停到一个**合法**端口上时才有值。
-    target: Option<PortRef>,
-}
-
-impl Wire {
-    /// 连线的稳定 id。落盘和静态检查的结果都认它 —— 两边必须是同一个拼法。
-    pub fn id(&self, nodes: &[Node]) -> String {
-        format!(
-            "{}:{}->{}:{}",
-            nodes[self.from].id, self.from_port, nodes[self.to].id, self.to_port
-        )
-    }
-}
-
-/// 一道刀光。
-struct Slash {
-    /// 屏幕坐标。刀口要始终锐利，所以不跟画布缩放位移。
-    from: Pos2,
-    to: Pos2,
-    /// 这一刀会切到的连线（`wires` 的下标），拖动过程中实时更新。
-    doomed: Vec<usize>,
-    /// 收刀跟出的开始时刻。`None` 表示还按着。
-    release: Option<f64>,
-}
-
-/// 正在断裂的连线。
-///
-/// 切下去的那一刻就把这条线从 `wires` 里摘掉，动画自己带着曲线走 ——
-/// 这样就不会出现「动画还在放、下标已经挪位」的问题。
-struct Severing {
-    curve: Cubic,
-    /// 断口在曲线上的参数。
-    t: f32,
-    started: f64,
-}
-
-/// 节点右键菜单里选中的动作。
-#[derive(Clone, Copy)]
-enum MenuAction {
-    Delete(usize),
-    Duplicate(usize),
-}
-
-pub struct Graph {
-    pub nodes: Vec<Node>,
-    pub wires: Vec<Wire>,
-    pub pan: Vec2,
-    pub zoom: f32,
-    /// 画布内容的版本号。改一下就加一，用来判断有没有未保存的改动。
-    /// 平移 / 缩放不算 —— 那是视图状态，不落盘。
-    pub revision: u64,
-    /// 当前选中的节点（`运行至此` 认它）。
-    pub selected: Option<usize>,
+/// 交互瞬态：这一帧正被抓住的东西、正在拉的线、右键菜单、刀光。
+#[derive(Default)]
+struct Interaction {
     /// 这一帧被抓住的节点。`None` 表示抓的是空白处（= 平移画布）。
     grabbed: Option<usize>,
     /// 指针底下的端口，用来放大高亮。
@@ -222,14 +118,47 @@ pub struct Graph {
     connect: Option<Connect>,
     /// 打开着的节点右键菜单：哪个节点、在屏幕哪儿弹出。
     menu: Option<(usize, Pos2)>,
+    /// 一道刀光。
     slash: Option<Slash>,
+}
+
+/// 按节点 id 索引的贴图缓存。
+#[derive(Default)]
+struct Textures {
+    /// 卡片缩略图。开始新的一次运行 / 清空运行记录时整批丢掉重建。
+    card: HashMap<String, egui::TextureHandle>,
+}
+
+/// 动画与帧率读数。
+#[derive(Default)]
+struct Anim {
+    /// 正在断裂的连线。
     severing: Vec<Severing>,
-    /// 节点缩略图（按节点 id）。开始新的一次运行 / 清空运行记录时整批丢掉重建。
-    textures: HashMap<String, egui::TextureHandle>,
-    /// 点了卡片上的「运行至此」：这个节点 id 要交给调用方去跑。
-    pending_run: Option<String>,
     /// 刚落到画布上的节点（id → 落下的时刻），用来放入场动画。
     entering: HashMap<String, f64>,
+    /// 右下角帧率读数（指数平滑后的 fps）。
+    fps: f32,
+    /// 上一帧的时刻，用来算帧间隔。
+    last_frame: Option<f64>,
+}
+
+pub struct Graph {
+    pub nodes: Vec<Node>,
+    pub wires: Vec<Wire>,
+    pub view: Viewport,
+    /// 画布内容的版本号。改一下就加一，用来判断有没有未保存的改动。
+    /// 平移 / 缩放不算 —— 那是视图状态，不落盘。
+    pub revision: u64,
+    /// 当前选中的节点（`运行至此` 认它）。
+    pub selected: Option<usize>,
+    /// 交互瞬态（抓住的节点 / 端口 / 菜单 / 刀光）。
+    interaction: Interaction,
+    /// 按节点 id 索引的贴图缓存。
+    textures: Textures,
+    /// 动画与帧率。
+    anim: Anim,
+    /// 点了卡片上的「运行至此」：这个节点 id 要交给调用方去跑。
+    pending_run: Option<String>,
     /// Ctrl+C 复制的节点。
     clipboard: Option<Node>,
     /// Ctrl+S：交给外壳去落盘。
@@ -240,57 +169,10 @@ pub struct Graph {
     /// 重新折行，某些缩放下会多出一行，文字于是一跳一跳的。同时卡片高度也照着
     /// 这个高度算，长说明不会把卡片撑出下边框。
     notes: HashMap<String, TextBlock>,
-    /// 「输入框」节点里那张图（按节点 id）。存的路径没变就不重新解码。
-    drop_textures: HashMap<String, (String, egui::TextureHandle)>,
-    /// 正在「打字」的「输入框」节点（按 id）。空框点一下才进这个状态。
-    drop_editing: HashSet<String>,
     /// 点过空白处：把上一次运行的高亮收起来（下一次运行再亮回来）。
     run_marks_hidden: bool,
-    /// 右下角帧率读数（指数平滑后的 fps）。
-    fps: f32,
-    /// 上一帧的时刻，用来算帧间隔。
-    last_frame: Option<f64>,
     /// 需要模型的节点正在下的那些模型（按节点 id）。**不落盘**。
     downloads: Downloads,
-}
-
-/// 一段折好行的文字：每行文本、每行高度、总高。都在流坐标下（未乘缩放）。
-#[derive(Clone)]
-struct TextBlock {
-    lines: Vec<String>,
-    rows: Vec<f32>,
-    height: f32,
-}
-
-/// 说明 / 提示用的字号（流坐标）。
-const NOTE_FONT: f32 = 9.5;
-
-/// 按端口 id 找下标。认不出来就退回第一个 —— 老存档里可能存着已经删掉的端口。
-fn port_index(ports: &[Port], id: &str) -> usize {
-    ports.iter().position(|port| port.id == id).unwrap_or(0)
-}
-
-/// 新的节点实例 id。
-fn new_id() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
-/// 按当前参数重算一个节点的端口。
-///
-/// 参数一改就调 —— 端口类型可能跟着参数走（「输入」选的文件、「图像格式转换」的目标格式、
-/// 「图像压缩」的模式）。
-fn refresh_ports(node: &mut Node) {
-    let (inputs, outputs) = crate::catalog::ports_for(&node.kind, &node.params);
-    node.inputs = inputs;
-    node.outputs = outputs;
-}
-
-/// 按 id 找节点类型。
-///
-/// 故意写成不挂在 `self` 上的自由函数：这样「读类型声明」和「改节点参数」
-/// 是两个互不相干的借用，不用为了避开借用检查去克隆参数。
-fn kind_of<'a>(kinds: &'a [Kind], node: &Node) -> Option<&'a Kind> {
-    kinds.iter().find(|kind| kind.id == node.kind)
 }
 
 impl Graph {
@@ -347,38 +229,29 @@ impl Graph {
         Self {
             nodes,
             wires,
-            pan: egui::vec2(40.0, 30.0),
-            zoom: 0.8,
+            view: Viewport {
+                pan: egui::vec2(40.0, 30.0),
+                zoom: 0.8,
+            },
             revision: 0,
             selected: None,
-            grabbed: None,
-            hovered_port: None,
-            connect: None,
-            menu: None,
-            slash: None,
-            severing: Vec::new(),
-            textures: HashMap::new(),
+            interaction: Interaction::default(),
+            textures: Textures::default(),
+            anim: Anim::default(),
             pending_run: None,
-            entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
             notes: HashMap::new(),
-            drop_textures: HashMap::new(),
-            drop_editing: HashSet::new(),
             run_marks_hidden: false,
-            fps: 0.0,
-            last_frame: None,
             downloads: Downloads::default(),
         }
     }
 
     /// 从节点库拖出来的节点落在哪儿：`screen` 是松手时的屏幕位置。`now` 用来做入场动画。
     pub fn add_node_at(&mut self, screen: Pos2, kind: &Kind, now: f64) {
-        let height = height_of(kind, &kind.defaults, &self.notes);
-        let pos = self.to_flow(screen) - egui::vec2(NODE_W, height) * 0.5;
         let mut node = Node {
             id: new_id(),
-            pos,
+            pos: Pos2::ZERO,
             kind: kind.id.clone(),
             title: kind.name.clone(),
             inputs: Vec::new(),
@@ -389,9 +262,12 @@ impl Graph {
             run: None,
         };
         refresh_ports(&mut node);
-        self.entering.insert(node.id.clone(), now);
+        // 高度用**画卡片那一套**算（同一份代码），落点才不会偏。
+        let height = height_of_node(std::slice::from_ref(kind), &node, &self.notes);
+        node.pos = self.view.to_flow(screen) - egui::vec2(NODE_W, height) * 0.5;
+        self.anim.entering.insert(node.id.clone(), now);
         self.nodes.push(node);
-        self.grabbed = Some(self.nodes.len() - 1);
+        self.interaction.grabbed = Some(self.nodes.len() - 1);
         self.touch();
     }
 
@@ -482,48 +358,26 @@ impl Graph {
         Self {
             nodes,
             wires,
-            pan: egui::vec2(40.0, 30.0),
-            zoom: 0.8,
+            view: Viewport {
+                pan: egui::vec2(40.0, 30.0),
+                zoom: 0.8,
+            },
             // 刚打开的工作流没有未保存的改动。
             revision: 0,
             selected: None,
-            grabbed: None,
-            hovered_port: None,
-            connect: None,
-            menu: None,
-            slash: None,
-            severing: Vec::new(),
-            textures: HashMap::new(),
+            interaction: Interaction::default(),
+            textures: Textures::default(),
+            anim: Anim::default(),
             pending_run: None,
-            entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
             notes: HashMap::new(),
-            drop_textures: HashMap::new(),
-            drop_editing: HashSet::new(),
             run_marks_hidden: false,
-            fps: 0.0,
-            last_frame: None,
             downloads: Downloads::default(),
         }
     }
 
     // ---- 坐标换算：流坐标 <-> 屏幕坐标 ----
-
-    fn to_screen(&self, p: Pos2) -> Pos2 {
-        (p.to_vec2() * self.zoom + self.pan).to_pos2()
-    }
-
-    fn to_flow(&self, p: Pos2) -> Pos2 {
-        ((p.to_vec2() - self.pan) / self.zoom).to_pos2()
-    }
-
-    fn port_rows(&self, i: usize) -> usize {
-        let node = &self.nodes[i];
-        // 只数**节点自己的**输入：参数端口画在参数那一行，不占端口列。
-        let declared = node.inputs.iter().filter(|port| !port.is_param()).count();
-        declared.max(node.outputs.len()).max(1)
-    }
 
     fn flow_rect(&self, kinds: &[Kind], i: usize) -> Rect {
         Rect::from_min_size(
@@ -534,7 +388,7 @@ impl Graph {
 
     fn screen_rect(&self, kinds: &[Kind], i: usize) -> Rect {
         let r = self.flow_rect(kinds, i);
-        Rect::from_min_max(self.to_screen(r.min), self.to_screen(r.max))
+        Rect::from_min_max(self.view.to_screen(r.min), self.view.to_screen(r.max))
     }
 
     /// 第 `k` 个输入端口（流坐标）。
@@ -560,43 +414,17 @@ impl Graph {
         )
     }
 
-    /// 参数区左上角相对卡片顶部的高度（流坐标）。
-    fn params_top(&self, i: usize) -> f32 {
-        HEADER_H + self.port_rows(i) as f32 * PORT_ROW_H + PARAMS_GAP
-    }
-
     /// 某个参数行上那个小圆点相对卡片顶部的高度（流坐标）。
     ///
-    /// 参数不可见、或者这个参数根本没有端口时就返回 `None`。走法必须和
-    /// [`Self::draw_node_controls`] 的排版完全一致，否则圆点会飘到别的行上。
+    /// 参数不可见、或者这个参数根本没有端口时就返回 `None`。位置直接读
+    /// [`param_slots`] —— 和绘制控件用的是同一份排版。
     fn param_port_offset(&self, kinds: &[Kind], i: usize, param_id: &str) -> Option<f32> {
         let node = &self.nodes[i];
         let kind = kind_of(kinds, node)?;
-        let mut y = self.params_top(i);
-        for param in &kind.params {
-            if !param.visible(&node.params) {
-                continue;
-            }
-            // 开关是「标签 + 开关」一行，圆点就对在这一行正中。
-            if matches!(param.control, crate::catalog::Control::Bool) {
-                if param.id == param_id {
-                    return Some(y + PARAM_BOOL_H * 0.5);
-                }
-                y += PARAM_BOOL_H + PARAM_GAP;
-                continue;
-            }
-            // 其余是「标签一行 + 控件一行」—— 圆点对在标签那一行（没标签就对控件）。
-            if param.id == param_id {
-                let line = if has_label(param) {
-                    PARAM_LABEL_H * 0.5
-                } else {
-                    control_height(param, &node.params) * 0.5
-                };
-                return Some(y + line);
-            }
-            y += param_block_height(param, &node.params, &self.notes) + PARAM_GAP;
-        }
-        None
+        param_slots(node, kind, &self.notes)
+            .into_iter()
+            .find(|slot| slot.id == param_id)
+            .map(|slot| slot.dot_y)
     }
 
     /// 连线的四个控制点（**流坐标**）。
@@ -647,26 +475,8 @@ impl Graph {
         // 参数说明与运行提示先折好行、量好高 —— 卡片高度靠它，折行也靠它。
         self.sync_notes(ui, kinds);
 
-        // 文件拖入 / Ctrl+V 粘贴：先收下来，这一帧就能看到结果。
-        if self.handle_drop_input(ui.ctx(), kinds) {
-            self.touch();
-        }
-
         self.handle_input(ui, &resp, kinds, now);
         self.advance(now);
-
-        // 十字光标只在**还按着右键**的时候。收刀之后那段跟出的光效不该拖着光标 ——
-        // 松手就该变回普通光标。
-        let holding = self
-            .slash
-            .as_ref()
-            .is_some_and(|slash| slash.release.is_none());
-        if holding {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-        } else if self.hovered_port.is_some() || self.connect.is_some() {
-            // 端口上给个「能点」的手型。
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
 
         let painter = ui.painter_at(rect);
 
@@ -675,12 +485,12 @@ impl Graph {
         // 全部拼进**一个 Mesh**：几千个 `circle_filled` 会让 epaint 每帧重新三角化
         // 几千个形状，平移时位置又全变、缓存也命中不了 —— 用一个网格一次画出去，
         // 图形一模一样，每帧的开销则从「几千个形状」降到「一个」+ 拼顶点的循环。
-        let step = DOT_GAP * self.zoom;
+        let step = DOT_GAP * self.view.zoom;
         if step > 5.0 {
             let texture = dot_texture(ui.ctx());
             let mut mesh = egui::Mesh::with_texture(texture.id());
-            let ox = self.pan.x.rem_euclid(step);
-            let oy = self.pan.y.rem_euclid(step);
+            let ox = self.view.pan.x.rem_euclid(step);
+            let oy = self.view.pan.y.rem_euclid(step);
             let mut y = rect.top() - step + oy;
             while y < rect.bottom() + step {
                 let mut x = rect.left() - step + ox;
@@ -706,7 +516,8 @@ impl Graph {
 
         // ---- 节点 ----
         let pointer = ui.input(|input| input.pointer.hover_pos());
-        self.entering
+        self.anim
+            .entering
             .retain(|_, started| now - *started < ENTER_SECS);
         let enter: Vec<f32> = self
             .nodes
@@ -738,12 +549,12 @@ impl Graph {
                 ] {
                     style
                         .text_styles
-                        .insert(text_style, FontId::monospace(size * self.zoom));
+                        .insert(text_style, FontId::monospace(size * self.view.zoom));
                 }
-                style.spacing.button_padding = egui::vec2(5.0, 1.0) * self.zoom;
-                style.spacing.interact_size.y = 18.0 * self.zoom;
-                style.spacing.icon_width = 9.0 * self.zoom;
-                style.spacing.item_spacing = egui::vec2(4.0, 3.0) * self.zoom;
+                style.spacing.button_padding = egui::vec2(5.0, 1.0) * self.view.zoom;
+                style.spacing.interact_size.y = 18.0 * self.view.zoom;
+                style.spacing.icon_width = 9.0 * self.view.zoom;
+                style.spacing.item_spacing = egui::vec2(4.0, 3.0) * self.view.zoom;
             }
             for (i, &factor) in enter.iter().enumerate() {
                 let mut faded = ui.painter_at(rect);
@@ -779,23 +590,45 @@ impl Graph {
         self.pending_run.take()
     }
 
+    /// 这一帧画布想要的鼠标光标 —— 给外壳在**所有面板都画完之后**调用。
+    ///
+    /// 还按着右键（刀光没收）时是十字；悬停在端口上、或正在拉线时是手型；
+    /// 其余情况返回 `None`，交给别的控件决定。
+    ///
+    /// 之所以不能在这里（`ui()` 里）直接设：光标是「后设的赢」，而状态药丸、
+    /// 按钮会在画布之后各自设自己的悬停光标，会把十字盖掉。
+    pub fn cursor_icon(&self) -> Option<egui::CursorIcon> {
+        let holding = self
+            .interaction
+            .slash
+            .as_ref()
+            .is_some_and(|slash| slash.release.is_none());
+        if holding {
+            Some(egui::CursorIcon::Crosshair)
+        } else if self.interaction.hovered_port.is_some() || self.interaction.connect.is_some() {
+            Some(egui::CursorIcon::PointingHand)
+        } else {
+            None
+        }
+    }
+
     /// 记一帧的时间，算出平滑后的 fps。
     ///
     /// 空闲一段时间后的第一帧间隔会很大（甚至几秒），那种不算 —— 否则一恢复
     /// 交互，读数会被那一帧拖到个位数。
     fn measure_fps(&mut self, now: f64) {
-        if let Some(last) = self.last_frame {
+        if let Some(last) = self.anim.last_frame {
             let delta = now - last;
             if delta > 0.0 && delta <= 0.5 {
                 let instant = (1.0 / delta) as f32;
-                self.fps = if self.fps <= 0.0 {
+                self.anim.fps = if self.anim.fps <= 0.0 {
                     instant
                 } else {
-                    self.fps * 0.9 + instant * 0.1
+                    self.anim.fps * 0.9 + instant * 0.1
                 };
             }
         }
-        self.last_frame = Some(now);
+        self.anim.last_frame = Some(now);
     }
 
     /// 右下角一个灰色的帧率读数，保留到整数位。
@@ -803,7 +636,7 @@ impl Graph {
     /// 数字和 `fps` 都自己排版：数字在一个固定宽度里**右对齐**，紧跟着单位 ——
     /// 位数变化（60 → 100）时数字从右边长出去，`fps` 一动不动，才不会左右抖。
     fn draw_fps(&self, ui: &egui::Ui) {
-        if self.fps <= 0.0 {
+        if self.anim.fps <= 0.0 {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -823,7 +656,7 @@ impl Graph {
                     theme::INK_3,
                 );
                 let number = painter.layout_no_wrap(
-                    format!("{}", self.fps.round() as i64),
+                    format!("{}", self.anim.fps.round() as i64),
                     font,
                     theme::INK_3,
                 );
@@ -893,16 +726,16 @@ impl Graph {
 
     /// 以画布中央为锚点缩放。
     fn zoom_by(&mut self, factor: f32, canvas: Rect) {
-        let anchor = self.to_flow(canvas.center());
-        self.zoom = (self.zoom * factor).clamp(0.15, 2.0);
-        self.pan = canvas.center().to_vec2() - anchor.to_vec2() * self.zoom;
+        let anchor = self.view.to_flow(canvas.center());
+        self.view.zoom = (self.view.zoom * factor).clamp(0.15, 2.0);
+        self.view.pan = canvas.center().to_vec2() - anchor.to_vec2() * self.view.zoom;
     }
 
     /// 把所有节点框进视野。
     fn fit_view(&mut self, canvas: Rect, kinds: &[Kind]) {
         if self.nodes.is_empty() {
-            self.zoom = 1.0;
-            self.pan = egui::vec2(40.0, 30.0);
+            self.view.zoom = 1.0;
+            self.view.pan = egui::vec2(40.0, 30.0);
             return;
         }
         let mut bounds: Option<Rect> = None;
@@ -919,22 +752,22 @@ impl Graph {
         let Some(bounds) = bounds else { return };
         let scale = (canvas.width() / bounds.width().max(1.0))
             .min(canvas.height() / bounds.height().max(1.0));
-        self.zoom = (scale * 0.75).clamp(0.2, 1.05);
-        self.pan = canvas.center().to_vec2() - bounds.center().to_vec2() * self.zoom;
+        self.view.zoom = (scale * 0.75).clamp(0.2, 1.05);
+        self.view.pan = canvas.center().to_vec2() - bounds.center().to_vec2() * self.view.zoom;
     }
 
     /// 有没有还在跑的动画，决定要不要继续申请重绘。
     pub fn is_animating(&self) -> bool {
-        self.slash.is_some()
-            || !self.severing.is_empty()
-            || self.connect.is_some()
-            || !self.entering.is_empty()
+        self.interaction.slash.is_some()
+            || !self.anim.severing.is_empty()
+            || self.interaction.connect.is_some()
+            || !self.anim.entering.is_empty()
             || self.downloads.any()
     }
 
     /// 入场动画的进度（0→1，缓出）。不在 `entering` 里就是 1。
     fn enter_factor(&self, id: &str, now: f64) -> f32 {
-        match self.entering.get(id) {
+        match self.anim.entering.get(id) {
             Some(started) => {
                 let t = ((now - started) / ENTER_SECS).clamp(0.0, 1.0) as f32;
                 1.0 - (1.0 - t) * (1.0 - t)
@@ -945,13 +778,14 @@ impl Graph {
 
     /// 推进两个定时动画：断口回缩、收刀跟出。
     fn advance(&mut self, now: f64) {
-        self.severing
+        self.anim
+            .severing
             .retain(|entry| now - entry.started < SEVER_SECS);
 
-        if let Some(slash) = &self.slash {
+        if let Some(slash) = &self.interaction.slash {
             if let Some(start) = slash.release {
                 if now - start >= OVERTAKE_SECS {
-                    self.slash = None;
+                    self.interaction.slash = None;
                 }
             }
         }
@@ -962,16 +796,16 @@ impl Graph {
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
         if scroll.abs() > 0.01 && resp.contains_pointer() {
             if let Some(p) = ui.input(|input| input.pointer.hover_pos()) {
-                let anchor = self.to_flow(p);
-                self.zoom = (self.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 2.0);
-                self.pan = p.to_vec2() - anchor.to_vec2() * self.zoom;
+                let anchor = self.view.to_flow(p);
+                self.view.zoom = (self.view.zoom * (1.0 + scroll * 0.0015)).clamp(0.15, 2.0);
+                self.view.pan = p.to_vec2() - anchor.to_vec2() * self.view.zoom;
             }
         }
 
         // ---- 端口悬停 ----
-        self.hovered_port = ui
+        self.interaction.hovered_port = ui
             .input(|input| input.pointer.hover_pos())
-            .and_then(|p| self.port_at(kinds, self.to_flow(p)));
+            .and_then(|p| self.port_at(kinds, self.view.to_flow(p)));
 
         // ---- 左键：从端口拉线 / 拖节点 / 拖空白平移画布 ----
         if resp.drag_started_by(PointerButton::Primary) {
@@ -982,16 +816,16 @@ impl Graph {
                 .input(|input| input.pointer.press_origin())
                 .or_else(|| resp.interact_pointer_pos());
             if let Some(p) = origin {
-                let flow = self.to_flow(p);
+                let flow = self.view.to_flow(p);
                 // 落在端口上就是拉线，否则才是拖节点 —— 端口优先。
                 match self.port_at(kinds, flow) {
                     Some(from) => {
-                        self.connect = Some(Connect {
+                        self.interaction.connect = Some(Connect {
                             from,
                             to: p,
                             target: None,
                         });
-                        self.grabbed = None;
+                        self.interaction.grabbed = None;
                     }
                     None => {
                         // 摇起来的节点提到最上面（最后碰过的在最上层），顺便让它聚焦。
@@ -1001,7 +835,7 @@ impl Graph {
                         if let Some(index) = hit {
                             self.selected = Some(index);
                         }
-                        self.grabbed = hit;
+                        self.interaction.grabbed = hit;
                     }
                 }
             }
@@ -1009,11 +843,16 @@ impl Graph {
 
         if resp.dragged_by(PointerButton::Primary) {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let Some(from) = self.connect.as_ref().map(|connect| connect.from) {
+                if let Some(from) = self
+                    .interaction
+                    .connect
+                    .as_ref()
+                    .map(|connect| connect.from)
+                {
                     let target = self
-                        .port_at(kinds, self.to_flow(p))
+                        .port_at(kinds, self.view.to_flow(p))
                         .filter(|candidate| self.can_link(from, *candidate));
-                    if let Some(connect) = self.connect.as_mut() {
+                    if let Some(connect) = self.interaction.connect.as_mut() {
                         connect.to = p;
                         connect.target = target;
                     }
@@ -1021,25 +860,25 @@ impl Graph {
             }
 
             // 正在拉线就别同时拖节点了。
-            if self.connect.is_none() {
+            if self.interaction.connect.is_none() {
                 let delta = resp.drag_delta();
-                match self.grabbed {
+                match self.interaction.grabbed {
                     Some(i) => {
-                        self.nodes[i].pos += delta / self.zoom;
+                        self.nodes[i].pos += delta / self.view.zoom;
                         self.touch();
                     }
-                    None => self.pan += delta,
+                    None => self.view.pan += delta,
                 }
             }
         }
 
         if resp.drag_stopped_by(PointerButton::Primary) {
-            if let Some(connect) = self.connect.take() {
+            if let Some(connect) = self.interaction.connect.take() {
                 if let Some(target) = connect.target {
                     self.link(connect.from, target);
                 }
             }
-            self.grabbed = None;
+            self.interaction.grabbed = None;
         }
 
         // ---- 左键单击：先看卡片上的工具按钮，再看选中 ----------------
@@ -1087,7 +926,7 @@ impl Graph {
                 }
             }
             if !handled {
-                let hit = pointer.and_then(|p| self.hit(kinds, self.to_flow(p)));
+                let hit = pointer.and_then(|p| self.hit(kinds, self.view.to_flow(p)));
                 if hit.is_none() {
                     // 点空白处：把上一次运行的高亮收起来（下一次运行再亮回来）。
                     if !self.run_marks_hidden {
@@ -1097,7 +936,7 @@ impl Graph {
                 }
                 self.selected = hit.map(|index| self.bring_to_front(index));
                 // 点一下就收掉节点菜单 —— 选中变了，菜单里的下标就靠不住了。
-                self.menu = None;
+                self.interaction.menu = None;
             }
         }
 
@@ -1105,13 +944,13 @@ impl Graph {
         // 右键单击（没拖过阈值）不划刀 —— 那是要在节点上开菜单。
         if resp.secondary_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                let hit = self.hit(kinds, self.to_flow(p));
-                self.menu = hit.map(|index| (index, p));
+                let hit = self.hit(kinds, self.view.to_flow(p));
+                self.interaction.menu = hit.map(|index| (index, p));
                 if let Some(index) = hit {
                     self.selected = Some(index);
                 }
             } else {
-                self.menu = None;
+                self.interaction.menu = None;
             }
         }
         if resp.drag_started_by(PointerButton::Secondary) {
@@ -1121,8 +960,8 @@ impl Graph {
                 .or_else(|| resp.interact_pointer_pos());
             if let Some(p) = origin {
                 // 落在节点上的右键不划刀 —— 那该留给节点的右键菜单。
-                if self.hit(kinds, self.to_flow(p)).is_none() {
-                    self.slash = Some(Slash {
+                if self.hit(kinds, self.view.to_flow(p)).is_none() {
+                    self.interaction.slash = Some(Slash {
                         from: p,
                         to: p,
                         doomed: Vec::new(),
@@ -1132,7 +971,9 @@ impl Graph {
             }
         }
         if resp.dragged_by(PointerButton::Secondary) {
-            if let (Some(p), Some(slash)) = (resp.interact_pointer_pos(), self.slash.as_mut()) {
+            if let (Some(p), Some(slash)) =
+                (resp.interact_pointer_pos(), self.interaction.slash.as_mut())
+            {
                 slash.to = p;
             }
             self.refresh_doomed(kinds);
@@ -1168,7 +1009,7 @@ impl Graph {
                     // 粘到指针处；指针不在画布上就退回原件的位置。
                     let at = ui
                         .input(|input| input.pointer.hover_pos())
-                        .map(|p| self.to_flow(p))
+                        .map(|p| self.view.to_flow(p))
                         .unwrap_or(node.pos);
                     self.paste_node(node, at);
                 }
@@ -1181,7 +1022,7 @@ impl Graph {
 
     /// 拖动过程中重算「将被删除」的连线。
     fn refresh_doomed(&mut self, kinds: &[Kind]) {
-        let Some(slash) = &self.slash else {
+        let Some(slash) = &self.interaction.slash else {
             return;
         };
         let (from, to) = (slash.from, slash.to);
@@ -1190,8 +1031,8 @@ impl Graph {
             return;
         }
 
-        let a = self.to_flow(from);
-        let b = self.to_flow(to);
+        let a = self.view.to_flow(from);
+        let b = self.view.to_flow(to);
 
         let doomed = (0..self.wires.len())
             .filter(|&i| {
@@ -1201,19 +1042,19 @@ impl Graph {
             })
             .collect();
 
-        if let Some(slash) = self.slash.as_mut() {
+        if let Some(slash) = self.interaction.slash.as_mut() {
             slash.doomed = doomed;
         }
     }
 
     /// 收刀：把切中的连线摘掉、起断裂动画，并让刀光跟出后消散。
     fn finish_slash(&mut self, kinds: &[Kind], now: f64) {
-        let Some(mut slash) = self.slash.take() else {
+        let Some(mut slash) = self.interaction.slash.take() else {
             return;
         };
 
-        let a = self.to_flow(slash.from);
-        let b = self.to_flow(slash.to);
+        let a = self.view.to_flow(slash.from);
+        let b = self.view.to_flow(slash.to);
 
         let mut cuts = Vec::new();
         for i in 0..self.wires.len() {
@@ -1227,7 +1068,7 @@ impl Graph {
         // 从后往前删，免得下标挪位。
         let cut_count = cuts.len();
         for (i, curve, t) in cuts.into_iter().rev() {
-            self.severing.push(Severing {
+            self.anim.severing.push(Severing {
                 curve,
                 t,
                 started: now,
@@ -1240,7 +1081,7 @@ impl Graph {
 
         slash.doomed.clear();
         slash.release = Some(now);
-        self.slash = Some(slash);
+        self.interaction.slash = Some(slash);
     }
 
     fn draw_wire(
@@ -1253,23 +1094,23 @@ impl Graph {
     ) {
         let wire = &self.wires[i];
         let curve = self.wire_points(kinds, wire);
-        let screen: Cubic = curve.map(|p| self.to_screen(p));
+        let screen: Cubic = curve.map(|p| self.view.to_screen(p));
 
         // 被刀光扫到：先铺一层更宽的发光，再画本体，并轻轻搏动。
-        if let Some(slash) = &self.slash {
+        if let Some(slash) = &self.interaction.slash {
             if slash.doomed.contains(&i) {
                 let pulse = 0.55 + 0.45 * (now * 6.0).sin() as f32;
                 painter.add(CubicBezierShape::from_points_stroke(
                     screen,
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(9.0 * self.zoom, theme::danger_alpha(0.16 * pulse)),
+                    Stroke::new(9.0 * self.view.zoom, theme::danger_alpha(0.16 * pulse)),
                 ));
                 painter.add(CubicBezierShape::from_points_stroke(
                     screen,
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(2.4 * self.zoom, theme::danger_alpha(pulse)),
+                    Stroke::new(2.4 * self.view.zoom, theme::danger_alpha(pulse)),
                 ));
                 return;
             }
@@ -1280,9 +1121,9 @@ impl Graph {
             self.dashed_curve(
                 painter,
                 &curve,
-                Stroke::new((1.6 * self.zoom).max(1.0), theme::DANGER),
-                5.0 * self.zoom,
-                4.0 * self.zoom,
+                Stroke::new((1.6 * self.view.zoom).max(1.0), theme::DANGER),
+                5.0 * self.view.zoom,
+                4.0 * self.view.zoom,
             );
             return;
         }
@@ -1296,7 +1137,7 @@ impl Graph {
             false,
             Color32::TRANSPARENT,
             Stroke::new(
-                (1.5 * self.zoom).max(1.0),
+                (1.5 * self.view.zoom).max(1.0),
                 if ran { theme::ACCENT } else { theme::WIRE },
             ),
         ));
@@ -1319,7 +1160,7 @@ impl Graph {
 
         let points: Vec<Pos2> = geometry::sample(curve, geometry::steps_for(curve))
             .into_iter()
-            .map(|p| self.to_screen(p))
+            .map(|p| self.view.to_screen(p))
             .collect();
 
         let mut travelled = 0.0;
@@ -1348,11 +1189,11 @@ impl Graph {
     }
 
     fn draw_severing(&self, painter: &egui::Painter, now: f64) {
-        for entry in &self.severing {
+        for entry in &self.anim.severing {
             let progress = ((now - entry.started) / SEVER_SECS).clamp(0.0, 1.0) as f32;
             let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
             let fade = 1.0 - ((progress - 0.5) / 0.5).max(0.0);
-            let stroke = Stroke::new(2.4 * self.zoom, theme::danger_alpha(fade));
+            let stroke = Stroke::new(2.4 * self.view.zoom, theme::danger_alpha(fade));
 
             let (left, right) = geometry::split(&entry.curve, entry.t);
 
@@ -1364,8 +1205,8 @@ impl Graph {
             }
 
             // 断口的那一下光。
-            let point = self.to_screen(geometry::at(&entry.curve, entry.t));
-            let radius = (3.0 + eased * 20.0) * self.zoom;
+            let point = self.view.to_screen(geometry::at(&entry.curve, entry.t));
+            let radius = (3.0 + eased * 20.0) * self.view.zoom;
             let alpha = (1.0 - progress * 2.4).max(0.0);
             painter.circle_filled(point, radius, theme::danger_alpha(alpha * 0.9));
         }
@@ -1374,13 +1215,13 @@ impl Graph {
     fn stroke_curve(&self, painter: &egui::Painter, curve: &Cubic, stroke: Stroke) {
         let points: Vec<Pos2> = geometry::sample(curve, geometry::steps_for(curve))
             .into_iter()
-            .map(|p| self.to_screen(p))
+            .map(|p| self.view.to_screen(p))
             .collect();
         painter.line(points, stroke);
     }
 
     fn draw_slash(&self, painter: &egui::Painter, now: f64) {
-        let Some(slash) = &self.slash else {
+        let Some(slash) = &self.interaction.slash else {
             return;
         };
 
@@ -1428,7 +1269,7 @@ impl Graph {
     /// 卡片右上角两个工具按钮的矩形（屏幕坐标）：返回 `(运行至此, 删除)`。
     fn node_tool_rects(&self, kinds: &[Kind], i: usize) -> (Rect, Rect) {
         let r = self.screen_rect(kinds, i);
-        let z = self.zoom;
+        let z = self.view.zoom;
         let s = TOOL_SIZE * z;
         let pad = 5.0 * z;
         let gap = 1.0 * z;
@@ -1440,7 +1281,7 @@ impl Graph {
 
     /// 指针现在悬在哪个节点上（决定要不要露出工具按钮）。
     fn hovered_node(&self, kinds: &[Kind], pointer: Option<Pos2>) -> Option<usize> {
-        pointer.and_then(|p| self.hit(kinds, self.to_flow(p)))
+        pointer.and_then(|p| self.hit(kinds, self.view.to_flow(p)))
     }
 
     /// 某个端口在流坐标里的位置。
@@ -1454,7 +1295,7 @@ impl Graph {
 
     /// 指针底下有没有端口。判定半径是**屏幕**像素 —— 缩放不该让端口更难或更好点。
     fn port_at(&self, kinds: &[Kind], flow: Pos2) -> Option<PortRef> {
-        let reach = PORT_HIT / self.zoom;
+        let reach = PORT_HIT / self.view.zoom;
         let mut best: Option<(f32, PortRef)> = None;
 
         for node in 0..self.nodes.len() {
@@ -1487,8 +1328,9 @@ impl Graph {
     /// （起点 / 落点）因此永远一样大。只看 `hovered_port` 是不够的：落点靠的是
     /// `connect.target`，两者偶尔会错开一帧，端点就会一大一小。
     fn port_scale(&self, port: PortRef) -> f32 {
-        let emphasized = self.hovered_port == Some(port)
+        let emphasized = self.interaction.hovered_port == Some(port)
             || self
+                .interaction
                 .connect
                 .as_ref()
                 .is_some_and(|connect| connect.from == port || connect.target == Some(port));
@@ -1501,7 +1343,8 @@ impl Graph {
 
     /// 这个端口是不是当前这根线可以落下的地方。
     fn is_valid_target(&self, port: PortRef) -> bool {
-        self.connect
+        self.interaction
+            .connect
             .as_ref()
             .is_some_and(|connect| connect.target == Some(port))
     }
@@ -1526,10 +1369,7 @@ impl Graph {
         };
 
         // 一个输入端口只接一条线。想换就先划断那一条。
-        let occupied = self
-            .wires
-            .iter()
-            .any(|wire| wire.to == input.node && wire.to_port == target.id);
+        let occupied = self.wire_at_port(input.node, &target.id, true).is_some();
 
         !occupied && target.ty.accepts(source.ty)
     }
@@ -1550,12 +1390,12 @@ impl Graph {
 
     /// 节点上的右键菜单。
     fn draw_menu(&mut self, ui: &egui::Ui) {
-        let Some((index, at)) = self.menu else {
+        let Some((index, at)) = self.interaction.menu else {
             return;
         };
         // 先把要显示的字取出来，免得闭包里再借 `self`。
         let Some(title) = self.nodes.get(index).map(|node| node.title.clone()) else {
-            self.menu = None;
+            self.interaction.menu = None;
             return;
         };
 
@@ -1592,7 +1432,7 @@ impl Graph {
             None => {}
         }
         if !open || acted {
-            self.menu = None;
+            self.interaction.menu = None;
         }
     }
 
@@ -1650,7 +1490,7 @@ impl Graph {
             }
         }
         self.selected = None;
-        self.menu = None;
+        self.interaction.menu = None;
         self.touch();
     }
 
@@ -1665,7 +1505,7 @@ impl Graph {
         refresh_ports(&mut copy);
         self.nodes.push(copy);
         self.selected = Some(self.nodes.len() - 1);
-        self.menu = None;
+        self.interaction.menu = None;
         self.touch();
     }
 
@@ -1678,7 +1518,7 @@ impl Graph {
         refresh_ports(&mut node);
         self.nodes.push(node);
         self.selected = Some(self.nodes.len() - 1);
-        self.menu = None;
+        self.interaction.menu = None;
         self.touch();
     }
 
@@ -1780,24 +1620,35 @@ impl Graph {
 
         let file = result.outputs.iter().find_map(|output| output.path.clone());
         // 输出是色板（hex 一行一个）的话，把颜色拆出来，卡片底下画一排小色块。
-        let palette = result
+        let palette: Option<Vec<[u8; 4]>> = result
             .outputs
             .iter()
             .find_map(|output| output.palette.as_ref())
             .map(|colors| colors.iter().map(|color| color_rgba(color)).collect());
-        self.nodes[index].palette = palette;
-        self.nodes[index].run = Some(NodeRun {
-            status: result.status,
-            ms: result.elapsed_ms,
-            error: result.error.clone(),
-            warnings: result.warnings.clone(),
-            file,
-        });
 
-        // 缩略图一个节点只传一次；「输入框」自己就把值摆出来了，不用再摆一条。
-        if self.textures.contains_key(&result.node_id)
-            || crate::catalog::has_drop_zone(&self.nodes[index].kind)
-        {
+        // 幂等短路：内容没变就不重写 —— 否则每帧都要 clone 一遍运行文本。
+        let node = &self.nodes[index];
+        let unchanged = node.palette == palette
+            && node.run.as_ref().is_some_and(|run| {
+                run.status == result.status
+                    && run.ms == result.elapsed_ms
+                    && run.error == result.error
+                    && run.warnings == result.warnings
+                    && run.file == file
+            });
+        if !unchanged {
+            self.nodes[index].palette = palette;
+            self.nodes[index].run = Some(NodeRun {
+                status: result.status,
+                ms: result.elapsed_ms,
+                error: result.error.clone(),
+                warnings: result.warnings.clone(),
+                file,
+            });
+        }
+
+        // 缩略图一个节点只传一次。
+        if self.textures.card.contains_key(&result.node_id) {
             return;
         }
         let Some(url) = result
@@ -1818,7 +1669,7 @@ impl Graph {
             image,
             egui::TextureOptions::NEAREST,
         );
-        self.textures.insert(result.node_id.clone(), texture);
+        self.textures.card.insert(result.node_id.clone(), texture);
         self.nodes[index].preview = true;
     }
 
@@ -1826,7 +1677,7 @@ impl Graph {
     ///
     /// 开始新的一次运行、或用户清空运行记录时调。
     pub fn reset_run_marks(&mut self) {
-        self.textures.clear();
+        self.textures.card.clear();
         for node in &mut self.nodes {
             node.preview = false;
             node.palette = None;
@@ -1850,7 +1701,7 @@ impl Graph {
         painter.rect_filled(inner, cr, theme::SURFACE_3);
 
         // 棋盘格：只在格子上画第二种颜色，比每格画两个矩形省一半。
-        let cell = CHECKER * self.zoom;
+        let cell = CHECKER * self.view.zoom;
         if cell > 2.0 {
             let mut row = 0usize;
             let mut y = inner.top();
@@ -1902,14 +1753,14 @@ impl Graph {
 
     /// 正在拉的那根线。靠近合法端口就吸附到端口中心。
     fn draw_connecting(&self, painter: &egui::Painter, kinds: &[Kind], now: f64) {
-        let Some(connect) = &self.connect else {
+        let Some(connect) = &self.interaction.connect else {
             return;
         };
 
-        let a = self.to_screen(self.port_pos(kinds, connect.from));
+        let a = self.view.to_screen(self.port_pos(kinds, connect.from));
         // 有落点候选就直接吸到那个端口上 —— 手感上就是「啪」地贴过去。
         let b = match connect.target {
-            Some(target) => self.to_screen(self.port_pos(kinds, target)),
+            Some(target) => self.view.to_screen(self.port_pos(kinds, target)),
             None => connect.to,
         };
         let snapped = connect.target.is_some();
@@ -1922,7 +1773,7 @@ impl Graph {
         };
 
         let color = if snapped { theme::ACCENT } else { theme::INK_3 };
-        let width = (1.8 * self.zoom).max(1.2);
+        let width = (1.8 * self.view.zoom).max(1.2);
 
         // 还没接到端口上：整根线一呼一吸地泛蓝光，提示「尚未连接」。
         let pulse = if snapped {
@@ -1935,7 +1786,7 @@ impl Graph {
                 false,
                 Color32::TRANSPARENT,
                 Stroke::new(
-                    width + 7.0 * self.zoom,
+                    width + 7.0 * self.view.zoom,
                     theme::accent_alpha(0.04 + 0.10 * wave),
                 ),
             ));
@@ -1962,10 +1813,10 @@ impl Graph {
         if !snapped {
             painter.circle_filled(
                 b,
-                (5.0 + pulse * 2.5) * self.zoom,
+                (5.0 + pulse * 2.5) * self.view.zoom,
                 theme::accent_alpha(0.16 + 0.18 * pulse),
             );
-            painter.circle_filled(b, 3.0 * self.zoom, color);
+            painter.circle_filled(b, 3.0 * self.view.zoom, color);
         }
     }
 
@@ -1986,7 +1837,7 @@ impl Graph {
         let node = &self.nodes[i];
         let r = self.screen_rect(kinds, i);
         let cr = CornerRadius::same(theme::R_CARD);
-        let z = self.zoom;
+        let z = self.view.zoom;
 
         // 卡片里面的字一律剪到卡片内 —— 长警告 / 长错误、甚至文件名也不会溢出去。
         let body = painter.with_clip_rect(r);
@@ -2001,6 +1852,8 @@ impl Graph {
         // 要模型但本地还没有：整个节点禁用，卡片上挂一个下载面板（见 `draw_node_controls`）。
         let model_missing =
             kind_of(kinds, node).is_some_and(|kind| kind.model_missing(&node.params));
+        // 是不是流程的起点 —— 只看元数据，不靠「有没有输入端口」猜。
+        let is_source = kind_of(kinds, node).is_some_and(|kind| kind.is_source);
 
         // 白底（投影已经在上一遍里铺好了）。
         painter.rect_filled(r, cr, theme::SURFACE);
@@ -2045,8 +1898,8 @@ impl Graph {
         painter.galley(egui::pos2(x, cy - title.size().y * 0.5), title, theme::INK);
         x += title_w + 6.0 * z;
 
-        // 「起点」标签：输入端口的节点才没有输入。
-        if node.inputs.is_empty() {
+        // 「起点」标签：流程从它开始。
+        if is_source {
             let tag = painter.layout_no_wrap(
                 "起点".to_string(),
                 FontId::monospace(9.0 * z),
@@ -2147,10 +2000,9 @@ impl Graph {
         // 注意这几行放到函数**最后**去画：端口要盖在卡片边线上，不能被它切一刀。
 
         // ---- 参数区底色（浅灰，圆底） ----
-        let (warn_h, error_h, actions_h) = run_extra(node, &self.notes);
-        // 这一段是不是最后一段（模型面板 / 缩略图 / 提示……）—— 不是的话底角不收圆。
-        let panel_h = model_panel_height(kinds, node);
-        let params_last = !params_following(kinds, node, &self.notes);
+        // 参数区以下各段的高度只算一次（`card_sections`），下面按顺序往下画。
+        let sections = card_sections(kinds, node, &self.notes);
+        let params_last = sections.total() <= 0.0;
         let params_bottom =
             r.top() + (node_body_top(node) + params_height_of(kinds, node, &self.notes)) * z;
         if let Some(kind) = kind_of(kinds, node) {
@@ -2177,10 +2029,10 @@ impl Graph {
         }
 
         // ---- 模型下载面板的底色（紧贴参数区，控件由 `draw_node_controls` 画） ----
-        if panel_h > 0.0 {
+        if sections.model > 0.0 {
             let rect = Rect::from_min_size(
                 egui::pos2(r.left(), params_bottom),
-                egui::vec2(r.width(), panel_h * z),
+                egui::vec2(r.width(), sections.model * z),
             );
             painter.rect_filled(
                 rect,
@@ -2202,17 +2054,17 @@ impl Graph {
         }
 
         // ---- 参数区以下的几段 ----
-        let body_pad = if panel_h > 0.0 {
+        let body_pad = if sections.model > 0.0 {
             0.0
-        } else if params_following(kinds, node, &self.notes) {
+        } else if sections.total() > 0.0 {
             BODY_PAD
         } else {
             0.0
         };
-        let mut y = params_bottom + (panel_h + body_pad) * z;
+        let mut y = params_bottom + (sections.model + body_pad) * z;
 
         if node.preview {
-            if let Some(texture) = self.textures.get(&node.id) {
+            if let Some(texture) = self.textures.card.get(&node.id) {
                 painter.line_segment(
                     [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
                     Stroke::new(1.0, theme::HAIRLINE),
@@ -2223,7 +2075,7 @@ impl Graph {
                 );
                 self.draw_preview(painter, inner, texture, theme::SURFACE);
             }
-            y += PREVIEW_H * z;
+            y += sections.preview * z;
         }
 
         // ---- 色板：一排小色块 ----
@@ -2243,17 +2095,19 @@ impl Graph {
                     z,
                 );
             }
-            y += PALETTE_H * z;
+            y += sections.palette * z;
         }
 
         // ---- 运行提示 ----
         // 不再是一排橙色的「!」，而是一块淡蓝底 + 信息图标 + 会折行的正文：
         // 读完是「知道发生了什么」而不是「出事了」。
-        if warn_h > 0.0 {
+        if sections.warn > 0.0 {
             if let Some(run) = &node.run {
-                let last = error_h == 0.0 && actions_h == 0.0;
-                let panel =
-                    Rect::from_min_size(egui::pos2(r.left(), y), egui::vec2(r.width(), warn_h * z));
+                let last = sections.error == 0.0 && sections.actions == 0.0;
+                let panel = Rect::from_min_size(
+                    egui::pos2(r.left(), y),
+                    egui::vec2(r.width(), sections.warn * z),
+                );
                 painter.rect_filled(
                     panel,
                     CornerRadius {
@@ -2284,16 +2138,16 @@ impl Graph {
                     ny += (notice_height(warning, &self.notes) + NOTICE_STACK) * z;
                 }
             }
-            y += warn_h * z;
+            y += sections.warn * z;
         }
 
-        if error_h > 0.0 {
+        if sections.error > 0.0 {
             if let Some(run) = &node.run {
                 if let Some(error) = &run.error {
-                    let last = actions_h == 0.0;
+                    let last = sections.actions == 0.0;
                     let rect = Rect::from_min_size(
                         egui::pos2(r.left(), y),
-                        egui::vec2(r.width(), error_h * z),
+                        egui::vec2(r.width(), sections.error * z),
                     );
                     painter.rect_filled(
                         rect,
@@ -2318,10 +2172,10 @@ impl Graph {
                     }
                 }
             }
-            y += error_h * z;
+            y += sections.error * z;
         }
 
-        if actions_h > 0.0 {
+        if sections.actions > 0.0 {
             if let Some(run) = &node.run {
                 if let Some(file) = &run.file {
                     painter.line_segment(
@@ -2360,7 +2214,6 @@ impl Graph {
                     );
                 }
             }
-            let _ = actions_h;
         }
 
         // 卡片边线最后画 —— 否则会被参数区那层铺满整宽的灰底盖住（失败时尤其明显）。
@@ -2425,9 +2278,9 @@ impl Graph {
             input,
         };
         let p = if input {
-            self.to_screen(self.in_port(kinds, i, k))
+            self.view.to_screen(self.in_port(kinds, i, k))
         } else {
-            self.to_screen(self.out_port(kinds, i, k))
+            self.view.to_screen(self.out_port(kinds, i, k))
         };
         let linked = self.port_linked(i, &port.id, input);
         // 出错的（非法连线 / 必填未接）→ 红；参数端口是浅蓝（可选）；
@@ -2445,10 +2298,11 @@ impl Graph {
         // 拉线的**起点**和它可能落下的**落点** —— 两端都用同一套「正要连上」的动画
         // （同一个 `port_pending`），看起来才是一件东西。
         let is_source = self
+            .interaction
             .connect
             .as_ref()
             .is_some_and(|connect| connect.from == here);
-        let hovering = self.hovered_port == Some(here);
+        let hovering = self.interaction.hovered_port == Some(here);
         let valid = self.is_valid_target(here);
 
         // 端点「被强调」时统一的一套观感 —— 拉线的**起点**、它可能落下的**落点**、
@@ -2510,7 +2364,7 @@ impl Graph {
         painter.galley(
             egui::pos2(
                 chip.center().x - badge.size().x * 0.5,
-                crate::widgets::ink_top(&badge, chip.center().y),
+                crate::ui::widgets::ink_top(&badge, chip.center().y),
             ),
             badge,
             type_ink,
@@ -2520,34 +2374,33 @@ impl Graph {
         painter.galley(
             egui::pos2(
                 chip.right() + gap,
-                crate::widgets::ink_top(&label, chip.center().y),
+                crate::ui::widgets::ink_top(&label, chip.center().y),
             ),
             label,
             label_color,
         );
     }
 
-    /// 这个端口是不是接了条被静态检查判为非法的线。
-    fn port_invalid(&self, marks: &Marks, node_index: usize, port_id: &str, input: bool) -> bool {
-        self.wires.iter().any(|wire| {
-            let touches = if input {
-                wire.to == node_index && wire.to_port == port_id
-            } else {
-                wire.from == node_index && wire.from_port == port_id
-            };
-            touches && marks.invalid_edges.contains(&wire.id(&self.nodes))
-        })
-    }
-
-    /// 这个端口接没接线。
-    fn port_linked(&self, node_index: usize, port_id: &str, input: bool) -> bool {
-        self.wires.iter().any(|wire| {
+    /// 这个端口上接的线（有的话）。输入 / 输出两种端口共用它。
+    fn wire_at_port(&self, node_index: usize, port_id: &str, input: bool) -> Option<&Wire> {
+        self.wires.iter().find(|wire| {
             if input {
                 wire.to == node_index && wire.to_port == port_id
             } else {
                 wire.from == node_index && wire.from_port == port_id
             }
         })
+    }
+
+    /// 这个端口是不是接了条被静态检查判为非法的线。
+    fn port_invalid(&self, marks: &Marks, node_index: usize, port_id: &str, input: bool) -> bool {
+        self.wire_at_port(node_index, port_id, input)
+            .is_some_and(|wire| marks.invalid_edges.contains(&wire.id(&self.nodes)))
+    }
+
+    /// 这个端口接没接线。
+    fn port_linked(&self, node_index: usize, port_id: &str, input: bool) -> bool {
+        self.wire_at_port(node_index, port_id, input).is_some()
     }
 
     /// 「另存为」：把产物拷到用户挑的位置。
@@ -2564,7 +2417,7 @@ impl Graph {
     /// 卡片底部「产物操作行」两个按钮的矩形：`(在文件夹中显示, 另存为)`。
     fn node_action_rects(&self, kinds: &[Kind], i: usize) -> (Rect, Rect) {
         let r = self.screen_rect(kinds, i);
-        let z = self.zoom;
+        let z = self.view.zoom;
         let s = TOOL_SIZE * z;
         let pad = 7.0 * z;
         let y = r.bottom() - RUN_ACTIONS_H * z + (RUN_ACTIONS_H * z - s) * 0.5;
@@ -2582,7 +2435,7 @@ impl Graph {
         i: usize,
         now: f64,
     ) -> bool {
-        let zoom = self.zoom;
+        let zoom = self.view.zoom;
         // 缩得太小时控件会挤成一团，索性只留标题和端口（LOD）。
         if zoom < PARAM_LOD_ZOOM {
             return false;
@@ -2590,6 +2443,7 @@ impl Graph {
         let Some(kind) = kind_of(kinds, &self.nodes[i]).cloned() else {
             return false;
         };
+        let node_id = self.nodes[i].id.clone();
         let showing: Vec<usize> = (0..kind.params.len())
             .filter(|&k| kind.params[k].visible(&self.nodes[i].params))
             .collect();
@@ -2601,10 +2455,11 @@ impl Graph {
         }
 
         let card = self.screen_rect(kinds, i);
-        let mut y = card.top() + self.params_top(i) * zoom;
+        // 每个可见参数块占哪几行 —— 绘制读它，端口圆点也读它（`param_slots`）。
+        let slots = param_slots(&self.nodes[i], &kind, &self.notes);
         let mut changed = false;
 
-        for k in showing {
+        for (k, slot) in showing.iter().copied().zip(slots.iter()) {
             let param = &kind.params[k];
             let left = card.left() + 10.0 * zoom;
             let width = card.width() - 20.0 * zoom;
@@ -2625,7 +2480,7 @@ impl Graph {
             // 开关：标签和开关同一行。
             if matches!(param.control, Control::Bool) {
                 let row = Rect::from_min_size(
-                    egui::pos2(left, y),
+                    egui::pos2(left, card.top() + slot.control_y * zoom),
                     egui::vec2(width, PARAM_BOOL_H * zoom),
                 );
                 let mut label_x = row.left();
@@ -2645,45 +2500,48 @@ impl Graph {
                     egui::pos2(row.right() - 30.0 * zoom, row.top()),
                     egui::vec2(30.0 * zoom, row.height()),
                 );
-                if let Some(value) =
-                    control(ui, i, param, switch, &self.nodes[i].params, zoom, disabled)
-                {
+                if let Some(value) = control(
+                    ui,
+                    &node_id,
+                    param,
+                    switch,
+                    &self.nodes[i].params,
+                    zoom,
+                    disabled,
+                ) {
                     self.nodes[i].params.insert(param.id.clone(), value);
                     refresh_ports(&mut self.nodes[i]);
                     changed = true;
                 }
-                y += (PARAM_BOOL_H + PARAM_GAP) * zoom;
                 continue;
             }
 
             // 标签一行（没有标签就整行省掉）。
-            if has_label(param) {
+            if let Some(label_y) = slot.label_y {
+                let label_top = card.top() + label_y * zoom;
                 let line = PARAM_LABEL_H * zoom;
                 let mut label_x = left;
                 if let Some(port) = &port {
-                    label_x += type_chip(ui.painter(), port, left, y + line * 0.5, zoom);
+                    label_x += type_chip(ui.painter(), port, left, label_top + line * 0.5, zoom);
                 }
                 ui.painter().text(
-                    egui::pos2(label_x, y),
+                    egui::pos2(label_x, label_top),
                     Align2::LEFT_TOP,
                     &param.label,
                     FontId::monospace(10.0 * zoom),
                     theme::INK_3,
                 );
-                y += (PARAM_LABEL_H + PARAM_LABEL_GAP) * zoom;
             }
 
             // 控件一行。
-            let height = control_height(param, &self.nodes[i].params) * zoom;
-            let control_rect = Rect::from_min_size(egui::pos2(left, y), egui::vec2(width, height));
-            if matches!(param.control, Control::DropZone) {
-                // 「输入框」是一块自定义的大输入区（拖文件 / 粘贴 / 打字）。
-                if self.draw_drop_zone(ui, i, &param.id, control_rect, zoom) {
-                    changed = true;
-                }
-            } else if let Some(value) = control(
+            let height = slot.control_h * zoom;
+            let control_rect = Rect::from_min_size(
+                egui::pos2(left, card.top() + slot.control_y * zoom),
+                egui::vec2(width, height),
+            );
+            if let Some(value) = control(
                 ui,
-                i,
+                &node_id,
                 param,
                 control_rect,
                 &self.nodes[i].params,
@@ -2694,18 +2552,20 @@ impl Graph {
                 refresh_ports(&mut self.nodes[i]);
                 changed = true;
             }
-            y += height;
 
             // 说明一行（自动折行）。
-            if let Some(note) = &param.description {
-                y += PARAM_NOTE_GAP * zoom;
+            if let (Some(note_y), Some(note)) = (slot.note_y, &param.description) {
                 if let Some(block) = self.notes.get(note) {
-                    draw_block(ui.painter(), block, zoom, left, y, theme::INK_3);
+                    draw_block(
+                        ui.painter(),
+                        block,
+                        zoom,
+                        left,
+                        card.top() + note_y * zoom,
+                        theme::INK_3,
+                    );
                 }
-                y += note_height(note, &self.notes) * zoom;
             }
-
-            y += PARAM_GAP * zoom;
         }
 
         // ---- 模型下载面板（紧贴参数区：挑源 + 下载 / 进度 / 重试） ----
@@ -2741,14 +2601,15 @@ impl Graph {
             return;
         };
 
-        let pad = 10.0 * zoom;
+        let pad = MODEL_PAD * zoom;
         let left = rect.left() + pad;
         let width = rect.width() - pad * 2.0;
         let top = rect.top() + pad;
-        let note_y = top + 16.0 * zoom;
-        let select_y = top + 34.0 * zoom;
-        let select_h = 24.0 * zoom;
-        let action_h = 28.0 * zoom;
+        let note_y = top + MODEL_TITLE_H * zoom;
+        let select_y = top + (MODEL_TITLE_H + MODEL_NOTE_H) * zoom;
+        let select_h = MODEL_SELECT_H * zoom;
+        let action_h = MODEL_ACTION_H * zoom;
+        let action_y = select_y + select_h + MODEL_ACTION_GAP * zoom;
 
         // 当前状态：正在下 / 失败 / 待下载。
         let busy = self.downloads.busy(&node_id);
@@ -2759,7 +2620,7 @@ impl Graph {
         let fraction = self
             .downloads
             .get(&node_id)
-            .and_then(crate::models::Download::fraction);
+            .and_then(crate::state::models::Download::fraction);
         let source = self.downloads.source(&node_id);
 
         // 标题：模型名 + 大小。
@@ -2800,7 +2661,7 @@ impl Graph {
             let current = serde_json::json!(source.to_string());
             if let Some(value) = select_field(
                 ui,
-                ui.id().with(("model-source", i)),
+                ui.id().with(("model-source", &node_id)),
                 select_rect,
                 Some(&current),
                 &options,
@@ -2814,11 +2675,12 @@ impl Graph {
         }
 
         // 底下一整行：待下载 → 主色按钮；正在下 → 进度条（点一下取消）；失败 → 重试。
-        let action = Rect::from_min_size(
-            egui::pos2(left, rect.bottom() - pad - action_h),
-            egui::vec2(width, action_h),
+        let action = Rect::from_min_size(egui::pos2(left, action_y), egui::vec2(width, action_h));
+        let resp = ui.interact(
+            action,
+            ui.id().with(("model-action", &node_id)),
+            Sense::click(),
         );
-        let resp = ui.interact(action, ui.id().with(("model-action", i)), Sense::click());
         let hot = resp.hovered();
         if hot {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -2909,7 +2771,7 @@ impl Graph {
             painter.galley(
                 egui::pos2(
                     x + icon_box + gap,
-                    crate::widgets::ink_top(&galley, action.center().y),
+                    crate::ui::widgets::ink_top(&galley, action.center().y),
                 ),
                 galley,
                 Color32::WHITE,
@@ -2919,278 +2781,8 @@ impl Graph {
             }
         }
     }
-
-    /// 文件拖入 / `Ctrl+V` 粘贴：统一收下来，交给一个「输入区」节点。返回有没有变。
-    ///
-    /// **不能按指针位置挑**：系统在拖放过程中根本不上报光标位置（X11 的 `XdndPosition`
-    /// 不转成 `CursorMoved`，winit 的 Wayland 后端干脆没有文件拖放）。所以顺序是：
-    /// 光标（如果恰好有效）落在哪个框里 → 选中的那个 → 唯一的那个。
-    fn handle_drop_input(&mut self, ctx: &egui::Context, kinds: &[Kind]) -> bool {
-        // 有东西聚焦（用户在打字）时，粘贴归那个文本框。
-        let typing = ctx.memory(|memory| memory.focused()).is_some();
-
-        let dropped: Option<String> = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .first()
-                .map(|file| file.path().to_string_lossy().to_string())
-        });
-        let pasted: Option<String> = if typing {
-            None
-        } else {
-            ctx.input(|input| {
-                input.events.iter().find_map(|event| match event {
-                    egui::Event::Paste(text) => Some(text.clone()),
-                    _ => None,
-                })
-            })
-        };
-        let Some(payload) = dropped.or(pasted) else {
-            return false;
-        };
-
-        // 所有带「输入区」的节点：`(节点下标, 参数 id)`。
-        let targets: Vec<(usize, String)> = (0..self.nodes.len())
-            .filter_map(|i| {
-                let param = kind_of(kinds, &self.nodes[i])?
-                    .params
-                    .iter()
-                    .find(|param| matches!(param.control, Control::DropZone))?;
-                Some((i, param.id.clone()))
-            })
-            .collect();
-        if targets.is_empty() {
-            return false;
-        }
-
-        let pos = ctx.input(|input| input.pointer.latest_pos());
-        let chosen = pos
-            .and_then(|p| {
-                targets
-                    .iter()
-                    .find(|(i, _)| self.screen_rect(kinds, *i).contains(p))
-                    .cloned()
-            })
-            .or_else(|| {
-                targets
-                    .iter()
-                    .find(|(i, _)| self.selected == Some(*i))
-                    .cloned()
-            })
-            .unwrap_or_else(|| targets[0].clone());
-        let (i, param_id) = chosen;
-
-        // 粘 / 拖进来的如果是一个真实存在的文件，就当文件；否则当文本。
-        let single = payload.trim();
-        if !single.contains('\n') && std::path::Path::new(single).is_file() {
-            self.set_drop_file(i, &param_id, single);
-        } else {
-            self.set_drop_text(i, &param_id, &payload);
-        }
-        true
-    }
-
-    /// 「输入框」节点那块大输入区：把文件拖进来、`Ctrl+V` 粘贴，或者点一下直接打字。
-    /// 返回内容有没有变。
-    fn draw_drop_zone(
-        &mut self,
-        ui: &mut egui::Ui,
-        i: usize,
-        param_id: &str,
-        rect: Rect,
-        zoom: f32,
-    ) -> bool {
-        let ctx = ui.ctx().clone();
-        let node_id = self.nodes[i].id.clone();
-        let interact_id = ui.id().with(("drop", i, param_id));
-        let edit_id = interact_id.with("edit");
-        let cr = CornerRadius::same(theme::R_CTL);
-
-        // 控件区 = 上面一块框（固定 `DROP_H` 高）+ 下面一行「清空」按钮。
-        let box_rect = Rect::from_min_size(rect.min, egui::vec2(rect.width(), DROP_H * zoom));
-        let action_rect = Rect::from_min_max(egui::pos2(rect.left(), box_rect.bottom()), rect.max);
-        let content = drop_content(&self.nodes[i].params, param_id);
-
-        let pointer = ctx.input(|input| input.pointer.hover_pos());
-        let over = pointer.is_some_and(|p| box_rect.contains(p));
-        let dragging_files = ctx.input(|input| !input.raw.hovered_files.is_empty());
-        let editing = self.drop_editing.contains(&node_id);
-        // 悬停 / 拖文件：平滑过渡，而不是一下变色。拖文件时这个高亮不依赖指针位置
-        // （拖放过程里系统根本不上报光标位置），见 `handle_drop_input`。
-        let hot = ctx.animate_bool_with_time(interact_id.with("hot"), over || dragging_files, 0.16);
-        let drag = ctx.animate_bool_with_time(interact_id.with("drag"), dragging_files, 0.14);
-        // 内容出现时淡入。
-        let appear = ctx.animate_bool_with_time(
-            interact_id.with("appear"),
-            !matches!(content, Drop::Empty) || editing,
-            0.22,
-        );
-
-        let mut changed = false;
-        // ---- 下方：清空按钮（只有有东西可清时才出现）----
-        if !matches!(content, Drop::Empty) {
-            let button = Rect::from_min_size(
-                egui::pos2(action_rect.left(), action_rect.top() + 6.0 * zoom),
-                egui::vec2(74.0 * zoom, 24.0 * zoom),
-            );
-            if clear_button(ui, interact_id.with("clear"), button, zoom) {
-                self.set_drop_text(i, param_id, "");
-                self.drop_editing.remove(&node_id);
-                changed = true;
-            }
-        }
-
-        let rect = box_rect;
-        match &content {
-            // ---- 装着一张图：直接显示 ----
-            Drop::File(path) => {
-                let texture = self.drop_texture(&ctx, &node_id, path);
-                let mut painter = ui.painter_at(rect.expand(1.0));
-                painter.set_opacity(appear);
-                match &texture {
-                    Some(texture) => self.draw_preview(&painter, rect, texture, theme::SURFACE_2),
-                    None => {
-                        painter.rect_filled(rect, cr, theme::SURFACE_2);
-                        painter.rect_stroke(
-                            rect,
-                            cr,
-                            Stroke::new(1.0, theme::HAIRLINE),
-                            StrokeKind::Inside,
-                        );
-                        painter.text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            "读不出这个文件",
-                            FontId::monospace(10.0 * zoom),
-                            theme::DANGER,
-                        );
-                    }
-                }
-            }
-            // ---- 文本（或空框刚点进打字）：一块文本框 ----
-            _ if matches!(&content, Drop::Text(_)) || editing => {
-                let mut draft = match &content {
-                    Drop::Text(text) => text.clone(),
-                    _ => String::new(),
-                };
-                let inner = rect.shrink(9.0 * zoom);
-                // **先把框画出来，再放文本框** —— 反了的话白底会把字盖住。
-                {
-                    let mut painter = ui.painter_at(rect.expand(1.0));
-                    painter.set_opacity(appear);
-                    input_shell(&painter, rect, theme::R_CTL);
-                }
-                let resp = ui.put(
-                    inner,
-                    egui::TextEdit::multiline(&mut draft)
-                        .id(edit_id)
-                        .frame(egui::Frame::NONE)
-                        .font(FontId::monospace(11.5 * zoom))
-                        .desired_width(inner.width())
-                        .hint_text("在这里打字…"),
-                );
-                input_shell_state(
-                    ui.painter(),
-                    rect,
-                    theme::R_CTL,
-                    resp.hovered(),
-                    resp.has_focus(),
-                );
-                if resp.changed() {
-                    self.set_drop_text(i, param_id, &draft);
-                    changed = true;
-                } else if resp.lost_focus() {
-                    // 没打字就点开了别处 —— 退回虚线框。
-                    self.drop_editing.remove(&node_id);
-                }
-            }
-            // ---- 空着：虚线大框 + 输入图标 + 提示 ----
-            _ => {
-                {
-                    let mut painter = ui.painter_at(rect.expand(1.0));
-                    painter.set_opacity(1.0 - appear);
-                    // 悬停 / 拖上去都平滑变色。
-                    let border = mix(theme::HAIRLINE_STRONG, theme::ACCENT, hot.max(drag));
-                    let fill = mix(theme::SURFACE_2, theme::ACCENT_SOFT, drag);
-                    painter.rect_filled(rect, cr, fill);
-                    dashed_rect(&painter, rect, zoom, border);
-                    let icon = Rect::from_center_size(
-                        egui::pos2(rect.center().x, rect.center().y - 12.0 * zoom),
-                        egui::Vec2::splat(24.0 * zoom),
-                    );
-                    icons::plus(&painter, icon, mix(theme::INK_3, theme::ACCENT, hot));
-                    let hint = if can_drop_files() {
-                        "拖入文件 · 点击输入 · Ctrl+V"
-                    } else {
-                        "点击输入 · Ctrl+V"
-                    };
-                    painter.text(
-                        egui::pos2(rect.center().x, rect.center().y + 18.0 * zoom),
-                        Align2::CENTER_CENTER,
-                        hint,
-                        FontId::monospace(9.5 * zoom),
-                        mix(theme::INK_3, theme::ACCENT, hot),
-                    );
-                }
-                let resp = ui.interact(rect, interact_id, Sense::click());
-                if resp.clicked() {
-                    self.drop_editing.insert(node_id.clone());
-                    ctx.memory_mut(|memory| memory.request_focus(edit_id));
-                }
-            }
-        }
-
-        changed
-    }
-
-    /// 把一份文本写进输入区。
-    fn set_drop_text(&mut self, i: usize, param_id: &str, text: &str) {
-        self.nodes[i]
-            .params
-            .insert(param_id.to_string(), serde_json::json!(text));
-        refresh_ports(&mut self.nodes[i]);
-    }
-
-    /// 把一个文件路径写进输入区。
-    fn set_drop_file(&mut self, i: usize, param_id: &str, path: &str) {
-        self.nodes[i]
-            .params
-            .insert(param_id.to_string(), serde_json::json!({ "file": path }));
-        refresh_ports(&mut self.nodes[i]);
-    }
-
-    /// 输入区里那张图的纹理（按节点 id 缓存，路径没变就不重新解码）。
-    fn drop_texture(
-        &mut self,
-        ctx: &egui::Context,
-        node_id: &str,
-        path: &str,
-    ) -> Option<egui::TextureHandle> {
-        if let Some((cached, texture)) = self.drop_textures.get(node_id) {
-            if cached == path {
-                return Some(texture.clone());
-            }
-        }
-        let bytes = std::fs::read(path).ok()?;
-        let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
-        let (width, height) = image.dimensions();
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            image.as_raw(),
-        );
-        let texture = ctx.load_texture(
-            format!("drop:{node_id}"),
-            color,
-            egui::TextureOptions::NEAREST,
-        );
-        self.drop_textures
-            .insert(node_id.to_string(), (path.to_string(), texture.clone()));
-        Some(texture)
-    }
 }
 
-/// 两个颜色之间按 `t` 线性混合（0 = 全 `a`，1 = 全 `b`）。渐变用。
 /// 背景点阵用的小圆贴图：一张 `SIDE×SIDE` 的白色圆，带一点抗锯齿。
 ///
 /// 按 `(图标, 尺寸)` 的思路缓存进 `ctx.data`，只建一次。
@@ -3279,436 +2871,6 @@ fn draw_palette(painter: &egui::Painter, band: Rect, palette: &[[u8; 4]], z: f32
     }
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
-}
-
-/// 这个会话能不能收文件拖放。
-///
-/// winit 在设置了 `WAYLAND_DISPLAY` 时会选 Wayland 后端，而它的 **Wayland 后端不实现
-/// 文件拖放** —— 拖文件过来不会有任何事件。这种会话里就不提「拖入」了。
-fn can_drop_files() -> bool {
-    static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CAN.get_or_init(|| std::env::var("WAYLAND_DISPLAY").map_or(true, |value| value.is_empty()))
-}
-
-/// 「输入区」下面那个「清空」按钮。返回是否被点了。
-fn clear_button(ui: &mut egui::Ui, id: egui::Id, rect: Rect, zoom: f32) -> bool {
-    let resp = ui.interact(rect, id, Sense::click());
-    let cr = CornerRadius::same(theme::R_CTL);
-    let hot = resp.hovered();
-    let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        cr,
-        if hot {
-            theme::SURFACE_3
-        } else {
-            theme::SURFACE
-        },
-    );
-    painter.rect_stroke(
-        rect,
-        cr,
-        Stroke::new(
-            1.0,
-            if hot {
-                theme::HAIRLINE_STRONG
-            } else {
-                theme::HAIRLINE
-            },
-        ),
-        StrokeKind::Inside,
-    );
-    let ink = if hot { theme::INK } else { theme::INK_2 };
-    let icon = Rect::from_center_size(
-        egui::pos2(rect.left() + 16.0 * zoom, rect.center().y),
-        egui::Vec2::splat(12.0 * zoom),
-    );
-    icons::trash(painter, icon, ink);
-    painter.text(
-        egui::pos2(icon.right() + 6.0 * zoom, rect.center().y),
-        Align2::LEFT_CENTER,
-        "清空",
-        FontId::monospace(10.5 * zoom),
-        ink,
-    );
-    resp.clicked()
-}
-
-/// 「输入框」里现在装的是什么。
-#[derive(Clone, PartialEq)]
-enum Drop {
-    Empty,
-    Text(String),
-    File(String),
-}
-
-fn drop_content(params: &Params, param_id: &str) -> Drop {
-    match params.get(param_id) {
-        Some(Value::String(text)) if !text.is_empty() => Drop::Text(text.clone()),
-        Some(Value::Object(map)) => map
-            .get("file")
-            .and_then(Value::as_str)
-            .filter(|path| !path.is_empty())
-            .map(|path| Drop::File(path.to_string()))
-            .unwrap_or(Drop::Empty),
-        _ => Drop::Empty,
-    }
-}
-
-/// 一个节点的完整高度（流坐标）。
-fn height_of_node(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> f32 {
-    let (warn, error, actions) = run_extra(node, notes);
-    let panel = model_panel_height(kinds, node);
-    // 模型面板紧贴参数区，中间不留 `BODY_PAD` 那条缝。
-    let gap = if panel > 0.0 {
-        0.0
-    } else if params_following(kinds, node, notes) {
-        BODY_PAD
-    } else {
-        0.0
-    };
-    node_body_top(node)
-        + params_height_of(kinds, node, notes)
-        + panel
-        + gap
-        + if node.preview { PREVIEW_H } else { 0.0 }
-        + if node
-            .palette
-            .as_ref()
-            .is_some_and(|colors| !colors.is_empty())
-        {
-            PALETTE_H
-        } else {
-            0.0
-        }
-        + warn
-        + error
-        + actions
-}
-
-/// 模型「下载面板」占多高（不缺模型时是 0）。面板的控件在 `draw_node_controls` 里画。
-fn model_panel_height(kinds: &[Kind], node: &Node) -> f32 {
-    match kind_of(kinds, node) {
-        Some(kind) if kind.model_missing(&node.params) => MODEL_PANEL_H,
-        _ => 0.0,
-    }
-}
-
-/// 参数区后面还有没有别的段（模型面板 / 缩略图 / 色板 / 提示 / 错误 / 产物行）。
-/// 没有的话，参数区的圆底就贴到卡片底部，和卡片自己的圆角对齐。
-fn params_following(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> bool {
-    let (warn, error, actions) = run_extra(node, notes);
-    model_panel_height(kinds, node) > 0.0
-        || node.preview
-        || node
-            .palette
-            .as_ref()
-            .is_some_and(|colors| !colors.is_empty())
-        || warn > 0.0
-        || error > 0.0
-        || actions > 0.0
-}
-
-/// 端口区下沿（相对卡片顶部，流坐标）—— 也就是参数区的上沿。
-fn node_body_top(node: &Node) -> f32 {
-    // 只数**声明**的输入端口：参数端口画在参数那一行，不占端口列，也就
-    // 不撑高端口区 —— 否则灰底参数框会比里面的控件低一整行。
-    let declared = node.inputs.iter().filter(|port| !port.is_param()).count();
-    let rows = declared.max(node.outputs.len()).max(1) as f32;
-    HEADER_H + rows * PORT_ROW_H
-}
-
-/// 运行痕迹那几段各占多高：`(提示, 错误, 产物操作行)`。
-///
-/// 提示 / 错误都会折行，所以高度按实测的折行高度算 —— 否则长提示会被卡片的
-/// 下边框截掉（“图像压缩”运行后那行小结就是这么溢出的）。
-fn run_extra(node: &Node, notes: &HashMap<String, TextBlock>) -> (f32, f32, f32) {
-    let Some(run) = &node.run else {
-        return (0.0, 0.0, 0.0);
-    };
-    let warn = if run.warnings.is_empty() {
-        0.0
-    } else {
-        NOTICE_PAD * 2.0
-            + run
-                .warnings
-                .iter()
-                .map(|warning| notice_height(warning, notes))
-                .sum::<f32>()
-            + (run.warnings.len() - 1) as f32 * NOTICE_STACK
-    };
-    let error = match &run.error {
-        Some(error) => NOTICE_PAD * 2.0 + note_height(error, notes),
-        None => 0.0,
-    };
-    let actions = if run.file.is_some() {
-        RUN_ACTIONS_H
-    } else {
-        0.0
-    };
-    (warn, error, actions)
-}
-
-/// 节点在**默认参数、还没跑过**时的高度（流坐标）—— 只用来算刚拖出来的节点落在哪。
-/// 必须和 [`height_of_node`] 对得上：那边只有「参数区后面还有内容」时才多加 `BODY_PAD`，
-/// 刚拖出来的节点没有运行痕迹，所以这里也不加。模型面板要算进去，否则落点会偏高。
-fn height_of(kind: &Kind, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
-    let rows = kind.inputs.len().max(kind.outputs.len()).max(1) as f32;
-    HEADER_H
-        + rows * PORT_ROW_H
-        + params_height(kind, params, notes)
-        + if kind.model_missing(params) {
-            MODEL_PANEL_H
-        } else {
-            0.0
-        }
-}
-
-/// 参数区占多高。被 `visible_when` 藏掉的不占地方。
-fn params_height(kind: &Kind, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
-    let showing: Vec<&Param> = kind.params.iter().filter(|p| p.visible(params)).collect();
-    if showing.is_empty() {
-        return 0.0;
-    }
-    let blocks: f32 = showing
-        .iter()
-        .map(|param| param_block_height(param, params, notes))
-        .sum();
-    let gaps = (showing.len() - 1) as f32 * PARAM_GAP;
-    PARAMS_GAP + blocks + gaps + PARAMS_BOTTOM
-}
-
-/// 多行文本框要占多高：行数越多越高，长文本不会溢出下边框。
-fn multiline_height(text: &str) -> f32 {
-    let lines = text.lines().count().max(1) as f32;
-    (lines * PARAM_TEXT_LINE + 10.0).max(PARAM_TEXT_ROW_H)
-}
-
-/// 一段会折行的文字的**总高**（流坐标）。优先用实测值（`sync_notes` 量的）；
-/// 还没量到（比如刚从节点库拖出来的那一帧）就退回一个粗略估计。
-fn wrapped_height(text: &str, width: f32, notes: &HashMap<String, TextBlock>) -> f32 {
-    notes
-        .get(text)
-        .map(|block| block.height)
-        .unwrap_or_else(|| estimate_wrapped_height(text, width))
-}
-
-/// 一句参数说明占多高（整宽）。
-fn note_height(note: &str, notes: &HashMap<String, TextBlock>) -> f32 {
-    wrapped_height(note, NODE_W - 20.0, notes)
-}
-
-/// 一条运行提示占多高（要减掉前面那个图标）。
-fn notice_height(note: &str, notes: &HashMap<String, TextBlock>) -> f32 {
-    wrapped_height(note, notice_text_width(), notes)
-}
-
-/// 按固定字号、给定宽度折好行，量出行高与总高。
-fn measure_block(painter: &egui::Painter, text: &str, width: f32, color: Color32) -> TextBlock {
-    let galley = painter.layout(text.to_owned(), FontId::monospace(NOTE_FONT), color, width);
-    TextBlock {
-        lines: galley.rows.iter().map(|row| row.text()).collect(),
-        rows: galley.rows.iter().map(|row| row.rect().height()).collect(),
-        height: galley.size().y,
-    }
-}
-
-/// 画一段折好的文字：逐行按 `zoom` 缩放，不再重新折行（位置与预留高度完全一致）。
-fn draw_block(
-    painter: &egui::Painter,
-    block: &TextBlock,
-    zoom: f32,
-    x: f32,
-    y: f32,
-    color: Color32,
-) {
-    let mut yy = y;
-    for (line, row) in block.lines.iter().zip(&block.rows) {
-        let galley =
-            painter.layout_no_wrap(line.clone(), FontId::monospace(NOTE_FONT * zoom), color);
-        painter.galley(egui::pos2(x, yy), galley, color);
-        yy += row * zoom;
-    }
-}
-
-/// 粗略估计：汉字按约 9.6px、半角按约 5.7px 估宽，再按可用宽度折行。
-fn estimate_wrapped_height(text: &str, width: f32) -> f32 {
-    let mut lines = 1.0f32;
-    let mut used = 0.0f32;
-    for ch in text.chars() {
-        let w = if ch.is_ascii() { 5.7 } else { 9.6 };
-        if used > 0.0 && used + w > width {
-            lines += 1.0;
-            used = 0.0;
-        }
-        used += w;
-    }
-    // 行高取彮：与实测（9.5px 等宽约 13px 一行）对齐。
-    lines * 13.0
-}
-
-/// 这个参数的控件占多高（流坐标）。
-fn control_height(param: &Param, params: &Params) -> f32 {
-    match &param.control {
-        Control::Text {
-            multiline: true, ..
-        } => {
-            let text = params.get(&param.id).and_then(Value::as_str).unwrap_or("");
-            multiline_height(text)
-        }
-        Control::Bool => PARAM_BOOL_H,
-        Control::Color => color_height(),
-        Control::DropZone => {
-            // 有内容时下面多一行「清空」按钮。
-            if matches!(drop_content(params, &param.id), Drop::Empty) {
-                DROP_H
-            } else {
-                DROP_H + DROP_ACTION_H
-            }
-        }
-        _ => PARAM_CONTROL_H,
-    }
-}
-
-/// 一个参数（标签 + 控件 + 说明）一共占多高。
-fn param_block_height(param: &Param, params: &Params, notes: &HashMap<String, TextBlock>) -> f32 {
-    let control = control_height(param, params);
-    if matches!(param.control, Control::Bool) {
-        return control.max(PARAM_LABEL_H);
-    }
-    // 没有标签就不占标签那一行（「来源」里的节点只有一个值，不写名字更简洁）。
-    let mut height = control;
-    if has_label(param) {
-        height += PARAM_LABEL_H + PARAM_LABEL_GAP;
-    }
-    if let Some(note) = &param.description {
-        height += PARAM_NOTE_GAP + note_height(note, notes);
-    }
-    height
-}
-
-/// 参数有没有名字。空名字表示这条参数不画标签行 —— 「来源」里那些「只有一个值」的参数
-/// （字面量的值、输入框）就用它，省掉一行「值」。
-fn has_label(param: &Param) -> bool {
-    !param.label.is_empty()
-}
-
-fn params_height_of(kinds: &[Kind], node: &Node, notes: &HashMap<String, TextBlock>) -> f32 {
-    match kind_of(kinds, node) {
-        Some(kind) => params_height(kind, &node.params, notes),
-        None => 0.0,
-    }
-}
-
-/// 画一个参数的控件；返回值表示这个参数被改了。
-fn control(
-    ui: &mut egui::Ui,
-    node: usize,
-    param: &Param,
-    rect: Rect,
-    params: &Params,
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let id = ui.id().with(("param", node, param.id.as_str()));
-    let current = params.get(&param.id);
-
-    match &param.control {
-        Control::Bool => {
-            let mut value = current.and_then(Value::as_bool).unwrap_or(false);
-            // 禁用态：开关还是开关，只是灰下去、不再响应 —— 而不是换成一个灰块。
-            if disabled {
-                toggle_disabled(ui.painter(), rect, value);
-                return None;
-            }
-            widgets::switch(ui, id, rect, &mut value).then(|| serde_json::json!(value))
-        }
-
-        Control::Number {
-            min,
-            max,
-            integer,
-            unit,
-            ..
-        } => number_field(
-            ui,
-            id,
-            rect,
-            current.and_then(Value::as_f64).unwrap_or(*min),
-            *min,
-            *max,
-            *integer,
-            unit.as_deref(),
-            zoom,
-            disabled,
-        ),
-
-        Control::Slider {
-            min,
-            max,
-            integer,
-            unit,
-            ..
-        } => {
-            let value = current.and_then(Value::as_f64).unwrap_or(*min);
-            if disabled {
-                disabled_shell(ui.painter(), rect, theme::R_CTL);
-                muted_value(
-                    ui.painter(),
-                    rect,
-                    &format!(
-                        "{}{}",
-                        format_number(value, *integer),
-                        unit.as_deref().unwrap_or("")
-                    ),
-                    zoom,
-                );
-                return None;
-            }
-            widgets::slider(
-                ui,
-                id,
-                rect,
-                value as f32,
-                *min as f32,
-                *max as f32,
-                *integer,
-                unit.as_deref().unwrap_or(""),
-            )
-            .map(|next| serde_json::json!(next as f64))
-        }
-
-        Control::Text {
-            multiline,
-            placeholder,
-        } => text_field(
-            ui,
-            id,
-            rect,
-            current,
-            *multiline,
-            placeholder.as_deref(),
-            zoom,
-            disabled,
-        ),
-
-        Control::Select { options } => select_field(ui, id, rect, current, options, zoom, disabled),
-
-        Control::Color => color_field(ui, id, rect, current, zoom, disabled),
-
-        Control::File { .. } => file_field(ui, id, rect, current, &param.control, zoom, disabled),
-
-        // 输入区不走这里 —— 它由 `Graph::draw_drop_zone` 自己画。
-        Control::DropZone => None,
-    }
-}
-
-/// 端点被强调时的统一外观。拉线的起点、落点、被悬停的端点都调它 ——
-/// **外圈半径始终一样**，所以从「悬停」到「起点 / 落点」不会有大小的跳变；
 /// 区别只在「正要连上」（`pending`）时多一圈搏动的描边。要改这份动画，只改这里一处。
 fn port_halo(painter: &egui::Painter, p: Pos2, z: f32, now: f64, pending: bool) {
     let (radius, alpha) = if pending {
@@ -3749,7 +2911,7 @@ fn type_chip(painter: &egui::Painter, port: &Port, x: f32, center_y: f32, zoom: 
     painter.galley(
         egui::pos2(
             r.center().x - g.size().x * 0.5,
-            crate::widgets::ink_top(&g, r.center().y),
+            crate::ui::widgets::ink_top(&g, r.center().y),
         ),
         g,
         color,
@@ -3757,1160 +2919,10 @@ fn type_chip(painter: &egui::Painter, port: &Port, x: f32, center_y: f32, zoom: 
     w + CHIP_TRAIL * zoom
 }
 
-/// 禁用态的外壳：灰底 + 发丝边。参数被上游接管（或控件本身不可用时）用它，
-/// 控件还是控件的样子，只是不再响应、颜色弱下去 —— 不再用统一灰块代替。
-fn disabled_shell(painter: &egui::Painter, rect: Rect, radius: u8) {
-    painter.rect_filled(rect, CornerRadius::same(radius), theme::SURFACE_2);
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(radius),
-        Stroke::new(1.0, theme::HAIRLINE),
-        StrokeKind::Inside,
-    );
-}
-
-/// 禁用态里那行读不切的字：左对齐，和可编辑时的内边距一致，剪在框里。
-fn muted_value(painter: &egui::Painter, rect: Rect, text: &str, zoom: f32) {
-    let inner = rect.shrink2(egui::vec2(8.0 * zoom, 0.0));
-    painter.with_clip_rect(inner).text(
-        egui::pos2(inner.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::monospace(11.5 * zoom),
-        theme::INK_3,
-    );
-}
-
-fn input_shell(painter: &egui::Painter, rect: Rect, radius: u8) {
-    painter.rect_filled(rect, CornerRadius::same(radius), theme::SURFACE);
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(radius),
-        Stroke::new(1.0, theme::HAIRLINE),
-        StrokeKind::Inside,
-    );
-}
-
-/// 悬停 / 聚焦时叠上去的那圈边（画在内容之上，不会盖住字）。
-fn input_shell_state(
-    painter: &egui::Painter,
-    rect: Rect,
-    radius: u8,
-    hovered: bool,
-    focused: bool,
-) {
-    let color = if focused {
-        theme::ACCENT
-    } else if hovered {
-        theme::HAIRLINE_STRONG
-    } else {
-        return;
-    };
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(radius),
-        Stroke::new(1.0, color),
-        StrokeKind::Inside,
-    );
-}
-
-/// 数字 → 文本。整数不留小数点，小数最多两位。
-fn format_number(value: f64, integer: bool) -> String {
-    if integer {
-        format!("{}", value.round() as i64)
-    } else {
-        let rounded = (value * 100.0).round() / 100.0;
-        if rounded.fract() == 0.0 {
-            format!("{}", rounded as i64)
-        } else {
-            format!("{rounded}")
-        }
-    }
-}
-
-/// 数字输入框：带边框的可输入框 + 可选的单位小框。
-#[allow(clippy::too_many_arguments)]
-fn number_field(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    rect: Rect,
-    value: f64,
-    min: f64,
-    max: f64,
-    integer: bool,
-    unit: Option<&str>,
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let radius = theme::R_CTL;
-    let unit_w = unit.map_or(0.0, |text| {
-        text.chars().count() as f32 * 7.0 * zoom + 16.0 * zoom
-    });
-    let gap = if unit_w > 0.0 { 4.0 * zoom } else { 0.0 };
-    let input = Rect::from_min_size(
-        rect.min,
-        egui::vec2((rect.width() - unit_w - gap).max(10.0), rect.height()),
-    );
-
-    // 禁用态：数字框还是数字框，只是灰下去、不再可编辑。
-    if disabled {
-        disabled_shell(ui.painter(), input, radius);
-        muted_value(ui.painter(), input, &format_number(value, integer), zoom);
-        if let Some(unit) = unit {
-            let box_rect = Rect::from_min_size(
-                egui::pos2(input.right() + gap, rect.top()),
-                egui::vec2(unit_w, rect.height()),
-            );
-            disabled_shell(ui.painter(), box_rect, radius);
-            ui.painter().text(
-                box_rect.center(),
-                Align2::CENTER_CENTER,
-                unit,
-                FontId::monospace(11.0 * zoom),
-                theme::INK_3,
-            );
-        }
-        return None;
-    }
-
-    input_shell(ui.painter(), input, radius);
-
-    // 正在编辑时用草稿；不在编辑就跟着外部值走 ——
-    // 这样既能敲 ".5" 这种中间状态，载入工作流时也能立刻跟过去。
-    let editing = ui.ctx().memory(|memory| memory.focused()) == Some(id);
-    let shown = format_number(value, integer);
-    let mut draft = if editing {
-        ui.data_mut(|data| data.get_temp::<String>(id).unwrap_or_else(|| shown.clone()))
-    } else {
-        shown
-    };
-    let inner = input.shrink2(egui::vec2(8.0 * zoom, 3.0 * zoom));
-    let resp = ui.put(
-        inner,
-        egui::TextEdit::singleline(&mut draft)
-            .id(id)
-            .frame(egui::Frame::NONE)
-            .font(FontId::monospace(11.5 * zoom))
-            .desired_width(inner.width()),
-    );
-    if ui.ctx().memory(|memory| memory.focused()) == Some(id) {
-        ui.data_mut(|data| data.insert_temp(id, draft.clone()));
-    }
-    input_shell_state(
-        ui.painter(),
-        input,
-        radius,
-        resp.hovered(),
-        resp.has_focus(),
-    );
-
-    if let Some(unit) = unit {
-        let box_rect = Rect::from_min_size(
-            egui::pos2(input.right() + gap, rect.top()),
-            egui::vec2(unit_w, rect.height()),
-        );
-        input_shell(ui.painter(), box_rect, radius);
-        ui.painter().text(
-            box_rect.center(),
-            Align2::CENTER_CENTER,
-            unit,
-            FontId::monospace(11.0 * zoom),
-            theme::INK_3,
-        );
-    }
-
-    if resp.changed() {
-        if let Ok(parsed) = draft.trim().parse::<f64>() {
-            let mut value = parsed.clamp(min, max);
-            if integer {
-                value = value.round();
-            }
-            return Some(serde_json::json!(value));
-        }
-    }
-    None
-}
-
-/// 文本输入框：带边框的可输入框（多行则高一些）。
-#[allow(clippy::too_many_arguments)]
-fn text_field(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    rect: Rect,
-    current: Option<&Value>,
-    multiline: bool,
-    placeholder: Option<&str>,
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let radius = theme::R_CTL;
-    let value = current.and_then(Value::as_str).unwrap_or("");
-
-    // 禁用态：文本框还是文本框，只是灰下去、不再可编辑。
-    if disabled {
-        disabled_shell(ui.painter(), rect, radius);
-        let inner = rect.shrink2(egui::vec2(8.0 * zoom, 3.0 * zoom));
-        let painter = ui.painter().with_clip_rect(inner);
-        let galley = painter.layout(
-            value.to_string(),
-            FontId::monospace(11.5 * zoom),
-            theme::INK_3,
-            inner.width(),
-        );
-        painter.galley(inner.min, galley, theme::INK_3);
-        return None;
-    }
-
-    input_shell(ui.painter(), rect, radius);
-
-    let mut value = value.to_string();
-    let inner = rect.shrink2(egui::vec2(8.0 * zoom, 3.0 * zoom));
-    let mut widget = if multiline {
-        // 行数跟着内容走 —— 长文本会把框撑高，不会溢出下边框。
-        let rows = value.lines().count().clamp(3, 20);
-        egui::TextEdit::multiline(&mut value).desired_rows(rows)
-    } else {
-        egui::TextEdit::singleline(&mut value)
-    };
-    if let Some(hint) = placeholder {
-        widget = widget.hint_text(hint);
-    }
-    let resp = ui.put(
-        inner,
-        widget
-            .id(id)
-            .frame(egui::Frame::NONE)
-            .font(FontId::monospace(11.5 * zoom))
-            .desired_width(inner.width()),
-    );
-    input_shell_state(ui.painter(), rect, radius, resp.hovered(), resp.has_focus());
-
-    if resp.changed() {
-        Some(serde_json::json!(value))
-    } else {
-        None
-    }
-}
-
-/// 颜色控件（收起时）那条色条的高度（流坐标）。
-const COLOR_BAR_H: f32 = PARAM_CONTROL_H;
-/// 弹出的取色器宽度与内部各段高度（屏幕像素，不跟缩放走 —— 取色要看得清）。
-const PICKER_W: f32 = 236.0;
-const PICKER_SV_H: f32 = 132.0;
-const PICKER_HUE_H: f32 = 16.0;
-
-/// 颜色控件占多高（流坐标）—— 收起时就是一条色条。
-fn color_height() -> f32 {
-    COLOR_BAR_H
-}
-
-/// 颜色控件：收起时是一条显示当前颜色的色条，点开是一个**通用取色器**
-/// —— 取色区（x = 饱和度，y = 亮度）、色相条、R/G/B、Hex、不透明度，双向同步。
-///
-/// 通用可复用：哪个节点声明一个 `Color` 参数就能用上它。
-fn color_field(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    rect: Rect,
-    current: Option<&Value>,
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let rgba = color_rgba(current.and_then(Value::as_str).unwrap_or("#000000"));
-    let radius = CornerRadius::same(theme::R_CTL);
-
-    let resp = ui.interact(rect, id.with("bar"), Sense::click());
-    if !disabled && resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let fade = if disabled { 0.4 } else { 1.0 };
-    paint_color_chip(ui.painter(), rect, rgba, radius, fade);
-    // 色条上把 hex 写出来，不点开也一眼看得到是什么颜色。
-    ui.painter().text(
-        egui::pos2(rect.right() - 8.0 * zoom, rect.center().y),
-        Align2::RIGHT_CENTER,
-        color_string(rgba),
-        FontId::monospace(10.0 * zoom),
-        readable_ink(rgba).gamma_multiply(fade),
-    );
-
-    if disabled {
-        return None;
-    }
-
-    let ctx = ui.ctx().clone();
-    let open_id = id.with("open");
-    let mut open = temp_bool(&ctx, open_id).unwrap_or(false);
-    if resp.clicked() {
-        open = !open;
-    }
-
-    let changed = if open {
-        color_picker(ui, id, rect, rgba)
-    } else {
-        None
-    };
-
-    // 点别处就收起来。点在色条上不算「别处」—— 那是在切换开合。
-    if open && ctx.input(|input| input.pointer.any_click()) {
-        if let Some(point) = ctx.input(|input| input.pointer.interact_pos()) {
-            let inside_bar = rect.contains(point);
-            let inside_popup =
-                temp_rect(&ctx, id.with("popup-rect")).is_some_and(|r| r.contains(point));
-            if !inside_bar && !inside_popup {
-                open = false;
-            }
-        }
-    }
-    ctx.data_mut(|data| data.insert_temp(open_id, open));
-
-    changed
-}
-
-/// 弹出的取色器。返回 `Some(值)` 表示这一帧把颜色改了。
-fn color_picker(ui: &mut egui::Ui, id: egui::Id, bar: Rect, rgba: [u8; 4]) -> Option<Value> {
-    let ctx = ui.ctx().clone();
-    let hue_id = id.with("hue");
-    let (h, s, _) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
-    // 灰色的颜色里 h 无从得知，用上一次记住的色相，取色区才不会蹦到红。
-    let mut hue = if s > 0.0 {
-        h
-    } else {
-        temp_f32(&ctx, hue_id).unwrap_or(h)
-    };
-
-    let original = rgba;
-    let mut rgba = rgba;
-    let mut dirty = false;
-
-    let area = egui::Area::new(id.with("popup"))
-        .order(egui::Order::Tooltip)
-        .fixed_pos(egui::pos2(bar.left(), bar.bottom() + 6.0))
-        .show(&ctx, |ui| {
-            widgets::panel_frame().show(ui, |ui| {
-                ui.set_width(PICKER_W);
-                egui::Frame::default()
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        let inner_w = PICKER_W - 20.0;
-                        let (_, sat, val) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
-
-                        // ---- 取色区：x = 饱和度，y = 亮度 ----
-                        let (sv, sv_resp) = ui.allocate_exact_size(
-                            egui::vec2(inner_w, PICKER_SV_H),
-                            Sense::click_and_drag(),
-                        );
-                        draw_sv_square(ui.painter(), sv, hue);
-                        if let Some(point) = dragged_point(&sv_resp) {
-                            let new_sat = ((point.x - sv.left()) / sv.width()).clamp(0.0, 1.0);
-                            let new_val =
-                                1.0 - ((point.y - sv.top()) / sv.height()).clamp(0.0, 1.0);
-                            let (r, g, b) = hsv_to_rgb(hue, new_sat, new_val);
-                            rgba = [r, g, b, rgba[3]];
-                            dirty = true;
-                        }
-                        let cursor = egui::pos2(
-                            sv.left() + sat * sv.width(),
-                            sv.top() + (1.0 - val) * sv.height(),
-                        );
-                        ui.painter()
-                            .circle_stroke(cursor, 5.0, Stroke::new(2.0, Color32::WHITE));
-                        ui.painter().circle_stroke(
-                            cursor,
-                            6.5,
-                            Stroke::new(1.0, Color32::from_black_alpha(140)),
-                        );
-
-                        ui.add_space(8.0);
-
-                        // ---- 色相条 ----
-                        let (hue_rect, hue_resp) = ui.allocate_exact_size(
-                            egui::vec2(inner_w, PICKER_HUE_H),
-                            Sense::click_and_drag(),
-                        );
-                        draw_hue_bar(ui.painter(), hue_rect);
-                        if let Some(point) = dragged_point(&hue_resp) {
-                            hue = ((point.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0)
-                                * 360.0;
-                            let (_, sat, val) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
-                            let (r, g, b) = hsv_to_rgb(hue, sat, val);
-                            rgba = [r, g, b, rgba[3]];
-                            dirty = true;
-                        }
-                        let marker_x = hue_rect.left() + (hue / 360.0) * hue_rect.width();
-                        ui.painter().rect_stroke(
-                            Rect::from_center_size(
-                                egui::pos2(marker_x, hue_rect.center().y),
-                                egui::vec2(5.0, hue_rect.height() + 4.0),
-                            ),
-                            CornerRadius::same(3),
-                            Stroke::new(2.0, Color32::WHITE),
-                            StrokeKind::Outside,
-                        );
-
-                        ui.add_space(10.0);
-
-                        // ---- Hex + 不透明度 ----
-                        picker_row(ui, 22.0, |ui, row| {
-                            picker_label(ui, row, 0.0, "Hex");
-                            let hex_rect = Rect::from_min_size(
-                                egui::pos2(row.left() + 30.0, row.top()),
-                                egui::vec2(84.0, row.height()),
-                            );
-                            if let Some(text) =
-                                hex_field(ui, id.with("hex"), hex_rect, &color_string(rgba))
-                            {
-                                rgba = color_rgba(&text);
-                                dirty = true;
-                            }
-                            let alpha_rect = Rect::from_min_size(
-                                egui::pos2(hex_rect.right() + 8.0, row.top()),
-                                egui::vec2(
-                                    (row.right() - hex_rect.right() - 8.0).max(40.0),
-                                    row.height(),
-                                ),
-                            );
-                            if let Some(next) = widgets::slider(
-                                ui,
-                                id.with("alpha"),
-                                alpha_rect,
-                                rgba[3] as f32,
-                                0.0,
-                                255.0,
-                                true,
-                                "",
-                            ) {
-                                rgba[3] = next.round().clamp(0.0, 255.0) as u8;
-                                dirty = true;
-                            }
-                        });
-
-                        ui.add_space(6.0);
-
-                        // ---- R / G / B ----
-                        picker_row(ui, 22.0, |ui, row| {
-                            for (index, label) in ["R", "G", "B"].into_iter().enumerate() {
-                                let x = row.left() + index as f32 * 72.0;
-                                picker_label(ui, row, index as f32 * 72.0, label);
-                                let field = Rect::from_min_size(
-                                    egui::pos2(x + 14.0, row.top()),
-                                    egui::vec2(42.0, row.height()),
-                                );
-                                if let Some(value) = number_field(
-                                    ui,
-                                    id.with(label),
-                                    field,
-                                    rgba[index] as f64,
-                                    0.0,
-                                    255.0,
-                                    true,
-                                    None,
-                                    1.0,
-                                    false,
-                                ) {
-                                    if let Some(byte) = value.as_u64() {
-                                        rgba[index] = byte as u8;
-                                        dirty = true;
-                                    }
-                                }
-                            }
-                        });
-                    });
-            });
-        });
-    ctx.data_mut(|data| data.insert_temp(id.with("popup-rect"), area.response.rect));
-
-    // 记住色相供下次使用（全灰的颜色里 h 丢了）。
-    let (h, s, _) = rgb_to_hsv(rgba[0], rgba[1], rgba[2]);
-    let remembered = if s > 0.0 { h } else { hue };
-    ctx.data_mut(|data| data.insert_temp(hue_id, remembered));
-
-    if dirty && color_string(rgba) != color_string(original) {
-        Some(serde_json::json!(color_string(rgba)))
-    } else {
-        None
-    }
-}
-
-/// 取色器里的一行：把内容包进一个**定死 rect** 的子 scope。
-///
-/// 里面的输入框用的是 `ui.put`，它会顺手推进父级光标；若直接摊在父级的
-/// `horizontal` 里排，每个输入框的宽度会被算两次 —— 一行很快挤爆，字母和框就叠上了。
-/// 包一层定死 rect 的 scope 后，父级只按这一行的尺寸推进一次，里面怎么放都不影响外面。
-fn picker_row(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui, Rect)) {
-    let width = ui.available_width();
-    let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-    ui.scope_builder(egui::UiBuilder::new().max_rect(row), |ui| {
-        // 占下整行的位置，让父级按这一行的尺寸推进（而不是按内容拼出来的那块）。
-        let _ = ui.allocate_rect(row, Sense::hover());
-        add(ui, row);
-    });
-}
-
-/// 取色器一行的左侧小标签（在行内坐标里，`offset` 是相对行左边的偏移）。
-fn picker_label(ui: &egui::Ui, row: Rect, offset: f32, text: &str) {
-    ui.painter().text(
-        egui::pos2(row.left() + offset, row.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::monospace(10.0),
-        theme::INK_3,
-    );
-}
-
-/// 取色 / 拖动时指针落在控件上的那一点。
-fn dragged_point(resp: &egui::Response) -> Option<Pos2> {
-    (resp.dragged() || resp.clicked())
-        .then(|| resp.interact_pointer_pos())
-        .flatten()
-}
-
-/// 取色区：白色→色相 的横向渐变，叠上 透明→黑 的纵向渐变。
-/// x 是饱和度、y 是亮度，所以左上角是白、右上角是纯色、底部是黑。
-fn draw_sv_square(painter: &egui::Painter, rect: Rect, hue: f32) {
-    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
-    let hue_color = Color32::from_rgb(r, g, b);
-    let clear = Color32::from_rgba_unmultiplied(0, 0, 0, 0);
-    let black = Color32::from_rgb(0, 0, 0);
-
-    let mut horizontal = egui::Mesh::default();
-    push_quad(
-        &mut horizontal,
-        rect,
-        [Color32::WHITE, hue_color, hue_color, Color32::WHITE],
-    );
-    painter.add(egui::Shape::mesh(horizontal));
-
-    let mut vertical = egui::Mesh::default();
-    push_quad(&mut vertical, rect, [clear, clear, black, black]);
-    painter.add(egui::Shape::mesh(vertical));
-
-    // 取色区 / 色相条不加圆角：渐变是方角的网格，裁不出圆角，索性就方着来。
-    painter.rect_stroke(
-        rect,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, theme::HAIRLINE),
-        StrokeKind::Inside,
-    );
-}
-
-/// 色相条：红→黄→绿→青→蓝→品红→红的一条渐变。
-fn draw_hue_bar(painter: &egui::Painter, rect: Rect) {
-    const STOPS: [(f32, [u8; 3]); 7] = [
-        (0.0, [255, 0, 0]),
-        (1.0 / 6.0, [255, 255, 0]),
-        (2.0 / 6.0, [0, 255, 0]),
-        (3.0 / 6.0, [0, 255, 255]),
-        (4.0 / 6.0, [0, 0, 255]),
-        (5.0 / 6.0, [255, 0, 255]),
-        (1.0, [255, 0, 0]),
-    ];
-    let mut mesh = egui::Mesh::default();
-    for (t, [r, g, b]) in STOPS {
-        let x = rect.left() + t * rect.width();
-        let color = Color32::from_rgb(r, g, b);
-        mesh.vertices
-            .push(solid_vertex(egui::pos2(x, rect.top()), color));
-        mesh.vertices
-            .push(solid_vertex(egui::pos2(x, rect.bottom()), color));
-    }
-    for pair in (0..STOPS.len() - 1).map(|i| (i as u32 * 2, i as u32 * 2 + 1)) {
-        let (a, b) = pair;
-        mesh.indices
-            .extend_from_slice(&[a, b, a + 3, a, a + 3, a + 2]);
-    }
-    painter.add(egui::Shape::mesh(mesh));
-    painter.rect_stroke(
-        rect,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, theme::HAIRLINE),
-        StrokeKind::Inside,
-    );
-}
-
-/// 一个用顶点颜色着色的四边形（不采样贴图，所以 uv 指向字体的白点）。
-/// 顶点顺序：左上、右上、右下、左下。
-fn push_quad(mesh: &mut egui::Mesh, rect: Rect, colors: [Color32; 4]) {
-    let corners = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-    ];
-    for (point, color) in corners.into_iter().zip(colors) {
-        mesh.vertices.push(solid_vertex(point, color));
-    }
-    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-}
-
-fn solid_vertex(pos: Pos2, color: Color32) -> egui::epaint::Vertex {
-    egui::epaint::Vertex {
-        pos,
-        uv: egui::epaint::WHITE_UV,
-        color,
-    }
-}
-
-/// 把 `rect` 的四个圆角补成 `bg`：直角矩形（棋盘格、图片）会盖到圆角外面，
-/// 四角于是露出灰角。这里在四个角各补一小块「方角减四分之一圆」的月亮形，
-/// 把溢出圆角的那部分盖回背景色。用一小片顶点色网格拼出来（`radius` 是圆角半径）。
-fn mask_corners(painter: &egui::Painter, rect: Rect, radius: f32, bg: Color32) {
-    let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
-    if r <= 0.5 {
-        return;
-    }
-    use std::f32::consts::{FRAC_PI_2, PI, TAU};
-    // 每个角：方角顶点 + 圆心 + 圆弧的起 / 止角（屏幕 y 向下）。
-    let corners = [
-        (
-            rect.left_top(),
-            egui::pos2(rect.left() + r, rect.top() + r),
-            PI,
-            PI + FRAC_PI_2,
-        ),
-        (
-            rect.right_top(),
-            egui::pos2(rect.right() - r, rect.top() + r),
-            PI + FRAC_PI_2,
-            TAU,
-        ),
-        (
-            rect.right_bottom(),
-            egui::pos2(rect.right() - r, rect.bottom() - r),
-            0.0,
-            FRAC_PI_2,
-        ),
-        (
-            rect.left_bottom(),
-            egui::pos2(rect.left() + r, rect.bottom() - r),
-            FRAC_PI_2,
-            PI,
-        ),
-    ];
-
-    let steps = ((r * 2.0) as usize).clamp(4, 16);
-    let mut mesh = egui::Mesh::default();
-    for (corner, center, start, end) in corners {
-        let base = mesh.vertices.len() as u32;
-        mesh.vertices.push(solid_vertex(corner, bg));
-        for step in 0..=steps {
-            let angle = start + (end - start) * (step as f32 / steps as f32);
-            let point = egui::pos2(center.x + r * angle.cos(), center.y + r * angle.sin());
-            mesh.vertices.push(solid_vertex(point, bg));
-        }
-        // 从方角顶点扇形铺到这段圆弧上。
-        for step in 0..steps {
-            mesh.indices
-                .extend_from_slice(&[base, base + 1 + step as u32, base + 2 + step as u32]);
-        }
-    }
-    painter.add(egui::Shape::mesh(mesh));
-}
-
-/// 色条：一块浅灰圆角底，再盖上颜色。半透明的颜色透出底，看起来就是「没铺满」。
-///
-/// 不用棋盘格：棋盘格是一堆方角小方块，盖不住圆角 —— 四角会从圆弧外面冒出来。
-/// 浅灰底 + 整块圆角颜色就完全落在圆角里，而且不管衬在什么背景上都对。
-fn paint_color_chip(
-    painter: &egui::Painter,
-    rect: Rect,
-    rgba: [u8; 4],
-    radius: CornerRadius,
-    fade: f32,
-) {
-    painter.rect_filled(rect, radius, theme::SURFACE_3.gamma_multiply(fade));
-    painter.rect_filled(
-        rect,
-        radius,
-        Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]).gamma_multiply(fade),
-    );
-    // 完全透明时画一道斜杠，一眼能看出「这里没颜色」。
-    if rgba[3] == 0 {
-        painter.line_segment(
-            [
-                egui::pos2(rect.left() + 6.0, rect.bottom() - 6.0),
-                egui::pos2(rect.right() - 6.0, rect.top() + 6.0),
-            ],
-            Stroke::new(1.5, theme::ACCENT_LINE.gamma_multiply(fade)),
-        );
-    }
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, theme::HAIRLINE.gamma_multiply(fade)),
-        StrokeKind::Inside,
-    );
-}
-
-/// 色块上的字用黑还是白：按亮度挑，保证读得清。
-fn readable_ink(rgba: [u8; 4]) -> Color32 {
-    let luma = 0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32;
-    // 半透明时底下透出的是浅灰底，亮色或透明都用深色字。
-    if rgba[3] < 128 || luma > 150.0 {
-        theme::INK
-    } else {
-        Color32::WHITE
-    }
-}
-
-/// 一个小的十六进制输入框（类似 `number_field`，但它收的是文本）。
-fn hex_field(ui: &mut egui::Ui, id: egui::Id, rect: Rect, current: &str) -> Option<String> {
-    input_shell(ui.painter(), rect, theme::R_CTL);
-    let editing = ui.ctx().memory(|memory| memory.focused()) == Some(id);
-    let mut draft = if editing {
-        ui.data_mut(|data| data.get_temp::<String>(id))
-            .unwrap_or_else(|| current.to_string())
-    } else {
-        current.to_string()
-    };
-    let inner = rect.shrink2(egui::vec2(7.0, 3.0));
-    let resp = ui.put(
-        inner,
-        egui::TextEdit::singleline(&mut draft)
-            .id(id)
-            .frame(egui::Frame::NONE)
-            .font(FontId::monospace(11.0))
-            .desired_width(inner.width()),
-    );
-    if ui.ctx().memory(|memory| memory.focused()) == Some(id) {
-        ui.data_mut(|data| data.insert_temp(id, draft.clone()));
-    }
-    input_shell_state(
-        ui.painter(),
-        rect,
-        theme::R_CTL,
-        resp.hovered(),
-        resp.has_focus(),
-    );
-    resp.changed().then_some(draft)
-}
-
-fn temp_bool(ctx: &egui::Context, id: egui::Id) -> Option<bool> {
-    ctx.data_mut(|data| data.get_temp::<bool>(id))
-}
-
-fn temp_f32(ctx: &egui::Context, id: egui::Id) -> Option<f32> {
-    ctx.data_mut(|data| data.get_temp::<f32>(id))
-}
-
-fn temp_rect(ctx: &egui::Context, id: egui::Id) -> Option<Rect> {
-    ctx.data_mut(|data| data.get_temp::<Rect>(id))
-}
-
-/// RGB → HSV。h 是 0–360，s / v 是 0–1。
-fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-    let hue = if delta <= f32::EPSILON {
-        0.0
-    } else if max == r {
-        60.0 * (((g - b) / delta) % 6.0)
-    } else if max == g {
-        60.0 * ((b - r) / delta + 2.0)
-    } else {
-        60.0 * ((r - g) / delta + 4.0)
-    };
-    let hue = if hue < 0.0 { hue + 360.0 } else { hue };
-    let sat = if max <= f32::EPSILON {
-        0.0
-    } else {
-        delta / max
-    };
-    (hue, sat, max)
-}
-
-/// HSV → RGB。
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let c = v * s;
-    let h = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
-    let (r, g, b) = match h as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = v - c;
-    (
-        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
-
-/// 把颜色字符串解成 RGBA。`transparent` → 全透明；坏值 → 黑。
-///
-/// 值可能是一整段**色板文本**（hex 一行一个）—— 那种情况下取第一行：
-/// 需要一种颜色、却拿到一板多色的，就用第一个。
-fn color_rgba(value: &str) -> [u8; 4] {
-    let value = value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("");
-    if value.eq_ignore_ascii_case("transparent") {
-        return [0, 0, 0, 0];
-    }
-    let hex = value.trim_start_matches('#');
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return [0, 0, 0, 255];
-    }
-    let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap_or(0);
-    match hex.len() {
-        6 => [byte(0), byte(2), byte(4), 255],
-        8 => [byte(0), byte(2), byte(4), byte(6)],
-        _ => [0, 0, 0, 255],
-    }
-}
-
-/// RGBA → 颜色字符串：不透明用 6 位，有透明度用 8 位。
-fn color_string(rgba: [u8; 4]) -> String {
-    if rgba[3] == 255 {
-        format!("#{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2])
-    } else {
-        format!(
-            "#{:02x}{:02x}{:02x}{:02x}",
-            rgba[0], rgba[1], rgba[2], rgba[3]
-        )
-    }
-}
-
-/// 下拉框：带边框的按钮 + 一个弹出的列表（对勾 + 短说明）。
-fn select_field(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    rect: Rect,
-    current: Option<&Value>,
-    options: &[crate::catalog::Choice],
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let radius = theme::R_CTL;
-    let chosen = current.and_then(Value::as_str).unwrap_or("");
-    let label = options
-        .iter()
-        .find(|choice| choice.value == chosen)
-        .map(|choice| choice.label.clone())
-        .unwrap_or_else(|| "—".to_string());
-
-    // 禁用态：还是那个「文字 + 箭头」的下拉框，只是灰下去、点不开。
-    if disabled {
-        disabled_shell(ui.painter(), rect, radius);
-        let label_area = Rect::from_min_max(
-            egui::pos2(rect.left() + 8.0 * zoom, rect.top()),
-            egui::pos2(rect.right() - 20.0 * zoom, rect.bottom()),
-        );
-        ui.painter().with_clip_rect(label_area).text(
-            egui::pos2(rect.left() + 8.0 * zoom, rect.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::monospace(11.5 * zoom),
-            theme::INK_3,
-        );
-        icons::chevron_down(
-            ui.painter(),
-            Rect::from_center_size(
-                egui::pos2(rect.right() - 9.0 * zoom, rect.center().y),
-                egui::vec2(12.0 * zoom, 12.0 * zoom),
-            ),
-            theme::HAIRLINE_STRONG,
-        );
-        return None;
-    }
-
-    input_shell(ui.painter(), rect, radius);
-    let resp = ui.interact(rect, id, Sense::click());
-    // 名称剪到「箭头之前」，长了也不会碰到箭头或出框。
-    let label_area = Rect::from_min_max(
-        egui::pos2(rect.left() + 8.0 * zoom, rect.top()),
-        egui::pos2(rect.right() - 20.0 * zoom, rect.bottom()),
-    );
-    let label_painter = ui.painter().with_clip_rect(label_area);
-    label_painter.text(
-        egui::pos2(rect.left() + 8.0 * zoom, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::monospace(11.5 * zoom),
-        theme::INK,
-    );
-    icons::chevron_down(
-        ui.painter(),
-        Rect::from_center_size(
-            egui::pos2(rect.right() - 9.0 * zoom, rect.center().y),
-            egui::vec2(12.0 * zoom, 12.0 * zoom),
-        ),
-        theme::INK_3,
-    );
-    input_shell_state(ui.painter(), rect, radius, resp.hovered(), false);
-
-    let mut picked = None;
-    // 弹层宽度按最宽的一项算 —— 否则窄的下拉框一展开，说明文字就会顶出去。
-    let painter = ui.painter();
-    let needed = options.iter().fold(rect.width(), |widest, choice| {
-        let label = painter
-            .layout_no_wrap(choice.label.clone(), FontId::monospace(11.5), theme::INK)
-            .size()
-            .x;
-        let hint = choice.hint.as_ref().map_or(0.0, |hint| {
-            painter
-                .layout_no_wrap(hint.clone(), FontId::monospace(10.0), theme::INK_3)
-                .size()
-                .x
-                + 10.0
-        });
-        widest.max(11.0 + 6.0 + label + 6.0 + hint + 18.0)
-    });
-    egui::Popup::menu(&resp)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-        .show(|ui| {
-            ui.set_width(needed);
-            for choice in options {
-                if menu_item(
-                    ui,
-                    &choice.label,
-                    choice.hint.as_deref(),
-                    choice.value == chosen,
-                    zoom,
-                ) {
-                    picked = Some(choice.value.clone());
-                }
-            }
-        });
-    picked.map(|value| serde_json::json!(value))
-}
-
-/// 弹出列表里的一行：对勾 + 名称 + 右侧短说明。
-fn menu_item(
-    ui: &mut egui::Ui,
-    label: &str,
-    hint: Option<&str>,
-    selected: bool,
-    zoom: f32,
-) -> bool {
-    let height = 24.0 * zoom.max(0.8);
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(theme::R_CTL), theme::ACCENT_SOFT);
-    }
-    let ink = if selected { theme::ACCENT } else { theme::INK };
-    let check = Rect::from_center_size(
-        egui::pos2(rect.left() + 11.0 * zoom.max(0.8), rect.center().y),
-        egui::vec2(12.0 * zoom.max(0.8), 12.0 * zoom.max(0.8)),
-    );
-    if selected {
-        icons::check(ui.painter(), check, theme::ACCENT);
-    }
-
-    // 给右侧说明留出位置，名称按剩下的宽度折行 —— 两边都不出框。
-    let painter = ui.painter();
-    let hint_w = hint.map_or(0.0, |text| {
-        painter
-            .layout_no_wrap(text.to_string(), FontId::monospace(10.0), theme::INK_3)
-            .size()
-            .x
-            + 10.0
-    });
-    let label_x = check.right() + 6.0;
-    let avail = (rect.right() - 8.0 - hint_w - label_x).max(16.0);
-    let galley = painter.layout(label.to_string(), FontId::monospace(11.5), ink, avail);
-    painter.galley(
-        egui::pos2(label_x, crate::widgets::ink_top(&galley, rect.center().y)),
-        galley,
-        ink,
-    );
-    if let Some(hint) = hint {
-        painter.text(
-            egui::pos2(rect.right() - 8.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            hint,
-            FontId::monospace(10.0),
-            theme::INK_3,
-        );
-    }
-    resp.clicked()
-}
-
-/// 禁用态的开关：同一个轨道和圆点，只是灰下去、不响应。
-fn toggle_disabled(painter: &egui::Painter, rect: Rect, value: bool) {
-    let height = rect.height() * 0.8;
-    let width = (height * 1.8).min(rect.width());
-    let track = Rect::from_min_size(
-        egui::pos2(rect.right() - width, rect.center().y - height * 0.5),
-        egui::vec2(width, height),
-    );
-    let radius = CornerRadius::same((height * 0.5) as u8);
-    painter.rect_filled(track, radius, theme::SURFACE_3);
-    painter.rect_stroke(
-        track,
-        radius,
-        Stroke::new(1.0, theme::HAIRLINE_STRONG),
-        StrokeKind::Inside,
-    );
-    let pad = height * 0.15;
-    let dot = height * 0.5 - pad;
-    let travel = (track.width() - 2.0 * (dot + pad)).max(0.0);
-    let x = track.left() + dot + pad + if value { travel } else { 0.0 };
-    painter.circle_filled(egui::pos2(x, track.center().y), dot, theme::SURFACE);
-}
-
-/// 文件 / 目录选择。
-///
-/// 设计上：空着时是个虚线框的按钮；选完之后文件名顶在原来的位置，
-/// 鼠标移上去才重新变回「换一个」。
-fn file_field(
-    ui: &mut egui::Ui,
-    id: egui::Id,
-    rect: Rect,
-    current: Option<&Value>,
-    control: &Control,
-    zoom: f32,
-    disabled: bool,
-) -> Option<Value> {
-    let Control::File {
-        dialog_title,
-        extensions,
-        directory,
-    } = control
-    else {
-        return None;
-    };
-
-    let path = current.and_then(Value::as_str).unwrap_or("");
-    let name = file_name(path);
-    let empty = name.is_empty();
-
-    // 禁用态：还是那个文件框，只是灰下去、点不开。
-    if disabled {
-        let painter = ui.painter();
-        disabled_shell(painter, rect, theme::R_CTL);
-        let label = if empty {
-            if *directory {
-                "选择目录…"
-            } else {
-                "选择文件…"
-            }
-        } else {
-            name.as_str()
-        };
-        painter.with_clip_rect(rect).text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::monospace(10.0 * zoom),
-            theme::INK_3,
-        );
-        return None;
-    }
-
-    let resp = ui.interact(rect, id, Sense::click());
-    let corner = CornerRadius::same(theme::R_CTL);
-
-    {
-        let painter = ui.painter();
-        if empty {
-            // 虚线框 —— 空着的时候一眼能看出「这里还没填」。
-            dashed_rect(painter, rect, zoom, theme::HAIRLINE_STRONG);
-        } else {
-            painter.rect_filled(rect, corner, theme::SURFACE_2);
-            painter.rect_stroke(
-                rect,
-                corner,
-                Stroke::new(1.0, theme::HAIRLINE),
-                StrokeKind::Inside,
-            );
-        }
-
-        let (label, color) = if empty {
-            (
-                if *directory {
-                    "选择目录…".to_string()
-                } else {
-                    "选择文件…".to_string()
-                },
-                theme::INK_3,
-            )
-        } else if resp.hovered() {
-            (
-                if *directory {
-                    "换一个目录".to_string()
-                } else {
-                    "换一个文件".to_string()
-                },
-                theme::ACCENT,
-            )
-        } else {
-            (name, theme::INK_2)
-        };
-
-        // 文件名可能很长，剪在框里。
-        painter.with_clip_rect(rect).text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::monospace(10.0 * zoom),
-            color,
-        );
-    }
-
-    if !resp.clicked() {
-        return None;
-    }
-
-    let mut dialog = rfd::FileDialog::new().set_title(dialog_title);
-    if !extensions.is_empty() {
-        dialog = dialog.add_filter("支持的格式", extensions);
-    }
-    let picked = if *directory {
-        dialog.pick_folder()
-    } else {
-        dialog.pick_file()
-    };
-    picked.map(|path| serde_json::json!(path.to_string_lossy()))
-}
-
-/// 路径最后一段。目录选完也是显示最后一段，和文件一样。
-fn file_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default()
-}
-
-/// 虚线矩形。egui 没有内置的虚线描边，就自己按段画。
-fn dashed_rect(painter: &egui::Painter, rect: Rect, zoom: f32, color: Color32) {
-    let dash = 4.0 * zoom;
-    let gap = 3.0 * zoom;
-    let stroke = Stroke::new(1.0, color);
-
-    let edge = |a: Pos2, b: Pos2| {
-        let total = (b - a).length();
-        if total <= 0.0 {
-            return;
-        }
-        let dir = (b - a) / total;
-        let mut start = 0.0;
-        while start < total {
-            let end = (start + dash).min(total);
-            painter.line_segment([a + dir * start, a + dir * end], stroke);
-            start = end + gap;
-        }
-    };
-
-    edge(rect.left_top(), rect.right_top());
-    edge(rect.right_top(), rect.right_bottom());
-    edge(rect.right_bottom(), rect.left_bottom());
-    edge(rect.left_bottom(), rect.left_top());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starrytools_core::model::params::Params;
 
     /// 汉字说明不能按「字符数 ÷ 固定值」估 —— 那样一条 20 多字的说明会被估成一行，
     /// 卡片就不够高、把说明截出下边框（“图像压缩”的“元数据”就是这么溢出的）。
@@ -5055,27 +3067,20 @@ mod tests {
         Graph {
             nodes,
             wires: Vec::new(),
-            pan: Vec2::ZERO,
-            zoom: 1.0,
+            view: Viewport {
+                pan: egui::Vec2::ZERO,
+                zoom: 1.0,
+            },
             revision: 0,
             selected: None,
-            grabbed: None,
-            hovered_port: None,
-            connect: None,
-            menu: None,
-            slash: None,
-            severing: Vec::new(),
-            textures: HashMap::new(),
+            interaction: Interaction::default(),
+            textures: Textures::default(),
+            anim: Anim::default(),
             pending_run: None,
-            entering: HashMap::new(),
             clipboard: None,
             save_requested: false,
             notes: HashMap::new(),
-            drop_textures: HashMap::new(),
-            drop_editing: HashSet::new(),
             run_marks_hidden: false,
-            fps: 0.0,
-            last_frame: None,
             downloads: Downloads::default(),
         }
     }
@@ -5260,8 +3265,8 @@ mod tests {
 
         let graph = canvas(&["upscale"]);
         assert_eq!(
-            graph.port_rows(0),
-            1,
+            node_body_top(&graph.nodes[0]),
+            HEADER_H + PORT_ROW_H,
             "端口列只数非参数端口（这里只有一个图像输入）"
         );
     }
@@ -5283,7 +3288,7 @@ mod tests {
         let offset = graph
             .param_port_offset(&kinds, 0, "percent")
             .expect("percent 该有定位偏移");
-        let params_top = graph.params_top(0);
+        let params_top = node_body_top(&graph.nodes[0]) + PARAMS_GAP;
 
         assert_eq!(port.x, card.left(), "参数端口该贴卡片左缘");
         assert!(
@@ -5303,16 +3308,19 @@ mod tests {
     /// 参数端口，灰框就比控件低一整行。
     #[test]
     fn the_params_panel_lines_up_with_where_the_controls_are_drawn() {
+        let kinds = crate::catalog::all();
         let graph = canvas(&["upscale"]);
+        let kind = kinds.iter().find(|kind| kind.id == "upscale").unwrap();
 
         // 灰底参数框的上沿（相对卡片顶部）。
         let panel_top = node_body_top(&graph.nodes[0]);
-        // 控件开始画的位置（= 上沿 + PARAMS_GAP）。
-        let controls_top = graph.params_top(0);
+        // 实际绘制用的第一个参数块的顶部 —— 应当正好在参数框上沿下方 PARAMS_GAP。
+        let slots = param_slots(&graph.nodes[0], kind, &graph.notes);
+        let first_top = slots[0].label_y.unwrap_or(slots[0].control_y);
         assert_eq!(
-            controls_top - panel_top,
+            first_top - panel_top,
             PARAMS_GAP,
-            "参数框上沿到第一个控件之间应当正好是 PARAMS_GAP"
+            "参数框上沿到第一个参数块之间应当正好是 PARAMS_GAP"
         );
         // upscale 只声明了一个图像输入；参数端口 `param:percent` 不该算进端口列。
         assert_eq!(
@@ -5322,14 +3330,13 @@ mod tests {
         );
     }
 
-    /// 刚拖出来的节点落在哪儿用的是 `height_of`，画出来用的是 `height_of_node` ——
-    /// 两者必须一致，否则落点会比实际位置偏一点。
+    /// 刚拖出来的节点要**以指针为中心**落下来 —— 落点用的高度和画卡片用的高度必须是同一个
+    /// （`add_node_at` 现在直接复用 `height_of_node`，所以这条是结构上的保证，不再是两条求和路径）。
     #[test]
-    fn a_dropped_node_is_centred_by_its_real_height() {
+    fn a_dropped_node_is_centred_on_the_pointer() {
         let kinds = crate::catalog::all();
         for id in [
             "read",
-            "input_box",
             "convert_image",
             "compress_image",
             "crop_image",
@@ -5340,13 +3347,17 @@ mod tests {
             // 本地没模型时卡片会多出一块下载面板 —— 落点也得把它算进去。
             "background_removal",
         ] {
-            let graph = canvas(&[id]);
+            let mut graph = canvas(&[]);
             let kind = kinds.iter().find(|kind| kind.id == id).unwrap();
-            let projected = height_of(kind, &kind.defaults, &graph.notes);
-            let actual = height_of_node(&kinds, &graph.nodes[0], &graph.notes);
+            // `canvas` 的 pan 是 0、zoom 是 1，所以流坐标就是屏幕坐标。
+            let screen = egui::pos2(300.0, 200.0);
+            graph.add_node_at(screen, kind, 0.0);
+            let node = graph.nodes.last().unwrap();
+            let height = height_of_node(&kinds, node, &graph.notes);
+            let centre = egui::pos2(node.pos.x + NODE_W * 0.5, node.pos.y + height * 0.5);
             assert!(
-                (projected - actual).abs() < 0.001,
-                "{id}：height_of={projected} 与实际高度 {actual} 对不上"
+                (centre - screen).length() < 0.001,
+                "{id}：落点 {centre:?} 偏离指针 {screen:?}"
             );
         }
     }
