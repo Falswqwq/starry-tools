@@ -20,12 +20,7 @@ use crate::ui::library::Library;
 use crate::ui::prompt;
 use crate::ui::report;
 use crate::ui::theme;
-
-/// 动画期间的重绘上限（帧/秒）。空闲时不重绘，所以这只是「动起来时」的上限。
-///
-/// 整帧的硬上限在 `settings::Settings::max_fps` 里（设置面板可调）—— 它按最小间隔
-/// 在帧开头节流，连鼠标事件带来的帧也算在内。
-const ANIM_FPS: f32 = 60.0;
+use starrytools_core::model::workflow::Workflow;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -76,8 +71,9 @@ struct App {
     settings: settings::Settings,
     /// 顶部弹出的一条提示（保存 / 加载失败之类）以及它出现的时刻。
     toast: Option<(String, f64)>,
-    /// 上一帧开始的时刻，用来做帧率节流。
-    last_frame: Option<std::time::Instant>,
+    /// `to_workflow` 的结果，按画布的**语义**版本号缓存 —— 拖动节点时不必每帧重建。
+    /// 键是 `Graph::check_revision()`。
+    workflow_cache: Option<(u64, Workflow)>,
 }
 
 impl App {
@@ -101,23 +97,8 @@ impl App {
             prompt: prompt::Prompt::default(),
             settings: settings::Settings::load(),
             toast: None,
-            last_frame: None,
+            workflow_cache: None,
         }
-    }
-
-    /// 帧率节流：距离上一帧不足 `1 / max_fps` 就睡一会儿。
-    ///
-    /// 这么做的代价是给输入带来最多约一帧的延迟，换的是帧率不再被鼠标事件拉满。
-    fn limit_frame_rate(&mut self) {
-        let target = std::time::Duration::from_secs_f32(1.0 / self.settings.clamped_fps());
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_frame {
-            let elapsed = now.duration_since(last);
-            if elapsed < target {
-                std::thread::sleep(target - elapsed);
-            }
-        }
-        self.last_frame = Some(std::time::Instant::now());
     }
 
     /// 新建 / 打开之后把画布换成工作区当前那一份。
@@ -125,6 +106,8 @@ impl App {
         let graph = Graph::from_workflow(self.workspace.workflow(), &self.kinds);
         self.workspace.mark_saved(&graph);
         self.graph = graph;
+        // 换了整张图，语义版本从头开始 —— 缓存的旧工作流不能再认。
+        self.workflow_cache = None;
     }
 
     fn apply(&mut self, action: chrome::Action) {
@@ -163,18 +146,23 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.limit_frame_rate();
         let ctx = ui.ctx().clone();
 
         let rect = ui.max_rect();
         ui.painter()
             .rect_filled(rect, CornerRadius::same(0), theme::CANVAS);
 
-        // 静态检查按画布版本号缓存 —— 它会去读输入节点选中的文件（要读文件头），
-        // 不能每帧跑。借用在块里结束，免得和下面画布的 `&mut self` 撞上。
-        let workflow = self.graph.to_workflow(self.workspace.workflow());
+        // 静态检查只在**语义**改动后才重算 —— 它会去读输入节点选中的文件（要读文件头），
+        // 不能每帧跑；拖动节点 / 平移画布只动几何，不该让它失效（见 `Graph::check_revision`）。
+        // 借用在块里结束，免得和下面画布的 `&mut self` 撞上。
+        let content = self.graph.check_revision();
+        if self.workflow_cache.as_ref().map(|(rev, _)| *rev) != Some(content) {
+            let workflow = self.graph.to_workflow(self.workspace.workflow());
+            self.workflow_cache = Some((content, workflow));
+        }
         let (mut marks, runnable, errors, first_bad) = {
-            let resolved = self.check.get(self.graph.revision, &workflow);
+            let workflow = &self.workflow_cache.as_ref().expect("刚放进去").1;
+            let resolved = self.check.get(content, workflow);
             let bad = resolved
                 .issues
                 .iter()
@@ -199,6 +187,7 @@ impl eframe::App for App {
         // 运行进行中的实时进度：跑到哪儿、哪些已经跑完（带各自的结果）。
         if let Some(live) = self.runner.live() {
             marks.running = live.running.clone();
+            marks.step = live.step.clone();
             for (id, result) in &live.done {
                 match result.status {
                     starrytools_core::engine::NodeStatus::Ok => {
@@ -296,9 +285,15 @@ impl eframe::App for App {
         // （动画本身会自己请求重绘；这里只补上「时间在走」的那种：运行中、刀光未散。）
         //
         // 用 `request_repaint_after` 而不是 `request_repaint`：空闲时根本不会重绘，
-        // 而动画期间也只钉在 ANIM_FPS 这一档，不至于在高刷屏上把 CPU 拉满。
+        // 而动画期间也只钉在用户设的帧率上限上。
+        //
+        // **不**在帧里 `sleep` —— 那会推后输入事件的处理，而且当上限与刷新率相等时
+        // 极易错过下一个 vsync、反而掉帧。输入事件本来就会触发一帧（这是响应性），
+        // 这里节流的是**自发的**动画重绘。
         if running || self.graph.is_animating() || toast_alive {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / ANIM_FPS));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                1.0 / self.settings.clamped_fps(),
+            ));
         }
     }
 }

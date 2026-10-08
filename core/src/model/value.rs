@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::error::NodeError;
 use crate::image_io::ImageValue;
 use crate::interaction::{Interaction, InteractionKind, InteractionResponse};
-use crate::model::port_type::{ImageFormat, PortType};
+use crate::media::MediaValue;
+use crate::model::port_type::PortType;
+use crate::progress::{NodeStep, Progress};
 
 /// 下游写盘时该用的文件名 —— 「重命名」节点留下的提示。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,10 +20,10 @@ pub struct OutputName {
 }
 
 impl OutputName {
-    /// 给定图像实际的格式，算出最终的文件名。
-    pub fn file_name(&self, format: ImageFormat) -> String {
+    /// 给定写盘用的扩展名，算出最终的文件名。
+    pub fn file_name(&self, extension: &str) -> String {
         if self.auto_extension {
-            format!("{}.{}", self.stem, format.extension())
+            format!("{}.{}", self.stem, extension)
         } else {
             self.stem.clone()
         }
@@ -41,6 +43,8 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Image(ImageValue),
+    /// 非图像的产物（视频……）。与图像一样都是「能写盘的东西」。
+    Media(MediaValue),
     /// 带着名字的值 —— 「重命名」节点的产物。里面是什么类型都行。
     Named(Box<NamedValue>),
 }
@@ -88,6 +92,7 @@ impl Value {
             Value::Number(_) => PortType::Number,
             Value::Bool(_) => PortType::Bool,
             Value::Image(image) => PortType::Image(image.format()),
+            Value::Media(media) => media.port_type(),
         }
     }
 
@@ -129,6 +134,7 @@ impl Value {
                 ),
                 Err(_) => format!("{} · {} 字节", image.format().badge(), image.byte_len()),
             },
+            Value::Media(media) => media.describe(),
         }
     }
 
@@ -143,8 +149,26 @@ impl Value {
             Value::Bool(value) => serde_json::json!(value),
             // `inner()` 已经把名字剥光了，这里只是给编译器一个交代。
             Value::Named(named) => named.inner.to_param_json()?,
-            Value::Image(_) => return None,
+            Value::Image(_) | Value::Media(_) => return None,
         })
+    }
+
+    /// 取产物字节，连同它写盘该用的扩展名。图像和通用媒体都算产物。
+    pub fn product(&self) -> Option<(&[u8], &'static str)> {
+        match self.inner() {
+            Value::Image(image) => Some((image.bytes(), image.format().extension())),
+            Value::Media(media) => Some((media.bytes(), media.extension())),
+            _ => None,
+        }
+    }
+
+    /// 产物原来的出处（文件路径）—— 写盘起名时用。
+    pub fn product_origin(&self) -> Option<&std::path::Path> {
+        match self.inner() {
+            Value::Image(image) => image.origin(),
+            Value::Media(media) => media.origin(),
+            _ => None,
+        }
     }
 
     pub fn as_image(&self) -> Result<&ImageValue, NodeError> {
@@ -266,6 +290,8 @@ pub struct NodeArgs<'a> {
     pub warnings: &'a mut Vec<String>,
     /// 与界面通话的通道。没有界面时（脱离 GUI 直接调 `run`）是 `None`。
     pub interaction: Option<&'a Interaction>,
+    /// 运行进度通道（只有长任务会用到）。脱离 GUI 直接调 `run` 时是 `None`。
+    pub progress: Option<&'a Progress>,
 }
 
 impl NodeArgs<'_> {
@@ -307,5 +333,13 @@ impl NodeArgs<'_> {
 
     pub fn warn(&mut self, message: impl Into<String>) {
         self.warnings.push(message.into());
+    }
+
+    /// 报一次运行中的进度 —— 界面会在卡片上画进度条与帧计数。
+    /// 没有界面时什么也不做。
+    pub fn report(&self, step: NodeStep) {
+        if let Some(progress) = self.progress {
+            progress.step(self.node_id, step);
+        }
     }
 }

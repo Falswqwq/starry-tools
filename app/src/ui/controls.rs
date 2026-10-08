@@ -18,7 +18,22 @@ use crate::ui::widgets;
 /// 单个控件一行的高度（流坐标）—— 取色条也用它。
 pub(crate) const PARAM_CONTROL_H: f32 = 24.0;
 
-/// 画一个参数的控件；返回值表示这个参数被改了。
+/// 一个控件这一帧发生了什么。
+///
+/// 文件框**不在这里弹对话框** —— 弹原生框会阻塞整帧，所以只把「用户想选文件」
+/// 这件事报出来，由画布拿后台选择器去开（见 [`crate::state::dialog`]）。
+pub(crate) enum ControlEvent {
+    /// 参数被改了。
+    Changed(Value),
+    /// 用户点了文件 / 目录框，要开一个选择框。
+    PickFile {
+        title: String,
+        extensions: Vec<String>,
+        directory: bool,
+    },
+}
+
+/// 画一个参数的控件；返回值表示这一帧它发生了什么。
 pub(crate) fn control(
     ui: &mut egui::Ui,
     node_id: &str,
@@ -27,7 +42,7 @@ pub(crate) fn control(
     params: &Params,
     zoom: f32,
     disabled: bool,
-) -> Option<Value> {
+) -> Option<ControlEvent> {
     // 控件的 id 用**节点自己的 id**（而不是下标）—— 节点置顶 / 删除会重排下标，
     // 用下标做 id 会让同一个节点的控件被当成新控件，正在编辑的文本框、展开的下拉都会丢状态。
     let id = ui.id().with(("param", node_id, param.id.as_str()));
@@ -41,7 +56,8 @@ pub(crate) fn control(
                 toggle_disabled(ui.painter(), rect, value);
                 return None;
             }
-            widgets::switch(ui, id, rect, &mut value).then(|| serde_json::json!(value))
+            widgets::switch(ui, id, rect, &mut value)
+                .then(|| ControlEvent::Changed(serde_json::json!(value)))
         }
 
         Control::Number {
@@ -61,7 +77,8 @@ pub(crate) fn control(
             unit.as_deref(),
             zoom,
             disabled,
-        ),
+        )
+        .map(ControlEvent::Changed),
 
         Control::Slider {
             min,
@@ -95,7 +112,7 @@ pub(crate) fn control(
                 *integer,
                 unit.as_deref().unwrap_or(""),
             )
-            .map(|next| serde_json::json!(next as f64))
+            .map(|next| ControlEvent::Changed(serde_json::json!(next as f64)))
         }
 
         Control::Text {
@@ -110,11 +127,16 @@ pub(crate) fn control(
             placeholder.as_deref(),
             zoom,
             disabled,
-        ),
+        )
+        .map(ControlEvent::Changed),
 
-        Control::Select { options } => select_field(ui, id, rect, current, options, zoom, disabled),
+        Control::Select { options } => {
+            select_field(ui, id, rect, current, options, zoom, disabled).map(ControlEvent::Changed)
+        }
 
-        Control::Color => color_field(ui, id, rect, current, zoom, disabled),
+        Control::Color => {
+            color_field(ui, id, rect, current, zoom, disabled).map(ControlEvent::Changed)
+        }
 
         Control::File { .. } => file_field(ui, id, rect, current, &param.control, zoom, disabled),
     }
@@ -1165,7 +1187,7 @@ pub(crate) fn file_field(
     control: &Control,
     zoom: f32,
     disabled: bool,
-) -> Option<Value> {
+) -> Option<ControlEvent> {
     let Control::File {
         dialog_title,
         extensions,
@@ -1256,16 +1278,12 @@ pub(crate) fn file_field(
         return None;
     }
 
-    let mut dialog = rfd::FileDialog::new().set_title(dialog_title);
-    if !extensions.is_empty() {
-        dialog = dialog.add_filter("支持的格式", extensions);
-    }
-    let picked = if *directory {
-        dialog.pick_folder()
-    } else {
-        dialog.pick_file()
-    };
-    picked.map(|path| serde_json::json!(path.to_string_lossy()))
+    // 只把「要选」报出去 —— 真正的对话框由画布在后台线程上开（见 `state::dialog`）。
+    Some(ControlEvent::PickFile {
+        title: dialog_title.clone(),
+        extensions: extensions.clone(),
+        directory: *directory,
+    })
 }
 
 /// 路径最后一段。目录选完也是显示最后一段，和文件一样。

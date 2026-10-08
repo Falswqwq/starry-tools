@@ -126,7 +126,9 @@ impl Downloads {
 
     /// 收一次后台的进度。下完了就把这一项收掉 —— 下一帧节点会因为磁盘上有了文件而恢复。
     /// 失败则把原因留下来，让卡片显示「重试」。
-    pub fn poll(&mut self) {
+    ///
+    /// 返回**刚刚下载完**的节点 id：调用方据此重算那个节点的「缺不缺模型」缓存。
+    pub fn poll(&mut self) -> Vec<String> {
         let mut done: Vec<String> = Vec::new();
         for (id, task) in &mut self.tasks {
             loop {
@@ -155,8 +157,9 @@ impl Downloads {
                 }
             }
         }
-        for id in done {
-            self.tasks.remove(&id);
+        for id in &done {
+            self.tasks.remove(id);
         }
+        done
     }
 }

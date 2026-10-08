@@ -351,7 +351,7 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 15, "内置工具的数量（改动时请一并更新这条）");
+    assert_eq!(kinds.len(), 16, "内置工具的数量（改动时请一并更新这条）");
 
     let convert = kinds
         .iter()
@@ -359,10 +359,10 @@ fn kind_metadata_is_a_stable_contract() {
         .unwrap();
     assert_eq!(convert["name"], "图像格式转换");
     assert_eq!(convert["isSource"], false);
-    assert_eq!(convert["inputs"][0]["ty"]["image"], "any");
+    assert_eq!(convert["inputs"][0]["ty"], "img");
     assert_eq!(convert["inputs"][0]["required"], true);
     // 输出格式跟着「目标格式」走，清单（节点库卡片）里给的是泛化的 IMG。
-    assert_eq!(convert["outputs"][0]["ty"]["image"], "any");
+    assert_eq!(convert["outputs"][0]["ty"], "img");
 
     let format_param = convert["params"]
         .as_array()
@@ -438,7 +438,7 @@ fn kind_metadata_is_a_stable_contract() {
 
     let upscale = kinds.iter().find(|kind| kind["id"] == "upscale").unwrap();
     assert_eq!(upscale["name"], "缩放图像");
-    assert_eq!(upscale["inputs"][0]["ty"]["image"], "png");
+    assert_eq!(upscale["inputs"][0]["ty"], "png");
     assert_eq!(upscale["params"][0]["control"], "number");
     assert_eq!(upscale["params"][0]["unit"], "%");
     assert_eq!(upscale["defaults"]["percent"], 200.0);
@@ -448,9 +448,9 @@ fn kind_metadata_is_a_stable_contract() {
         .find(|kind| kind["id"] == "compress_image")
         .unwrap();
     assert_eq!(compress["name"], "图像压缩");
-    assert_eq!(compress["inputs"][0]["ty"]["image"], "any");
+    assert_eq!(compress["inputs"][0]["ty"], "img");
     // 输出格式跟着压缩方式走，卡片上是泛化的 IMG。
-    assert_eq!(compress["outputs"][0]["ty"]["image"], "any");
+    assert_eq!(compress["outputs"][0]["ty"], "img");
     let loss = compress["params"]
         .as_array()
         .unwrap()
@@ -499,8 +499,8 @@ fn kind_metadata_is_a_stable_contract() {
         .find(|kind| kind["id"] == "crop_image")
         .unwrap();
     assert_eq!(crop["name"], "图像裁切");
-    assert_eq!(crop["inputs"][0]["ty"]["image"], "png");
-    assert_eq!(crop["outputs"][0]["ty"]["image"], "png");
+    assert_eq!(crop["inputs"][0]["ty"], "png");
+    assert_eq!(crop["outputs"][0]["ty"], "png");
     let modes: Vec<&str> = crop["params"]
         .as_array()
         .unwrap()
@@ -542,7 +542,7 @@ fn kind_metadata_is_a_stable_contract() {
         .find(|kind| kind["id"] == "save_output")
         .unwrap();
     assert_eq!(save["name"], "保存到目录");
-    assert_eq!(save["inputs"][0]["ty"]["image"], "any");
+    assert_eq!(save["inputs"][0]["ty"], "file");
     assert_eq!(save["outputs"][0]["ty"], "text");
     let directory_param = save["params"]
         .as_array()
@@ -902,9 +902,7 @@ fn save_to_directory_writes_and_respects_overwrite() {
     workflow
         .nodes
         .push(node("save", crate::nodes::save::KIND, params));
-    workflow
-        .edges
-        .push(edge("e1", "in", "out", "save", "image"));
+    workflow.edges.push(edge("e1", "in", "out", "save", "file"));
 
     let first = run(&workflow, None, &dir.join("out")).unwrap();
     assert!(first.ok, "{:?}", first.nodes);
@@ -959,9 +957,7 @@ fn rename_pipeline(dir: &Path, name: &str, auto_extension: bool) -> (PathBuf, Ru
         .push(node("save", crate::nodes::save::KIND, save_params));
 
     workflow.edges.push(edge("e1", "in", "out", "rn", "in"));
-    workflow
-        .edges
-        .push(edge("e2", "rn", "out", "save", "image"));
+    workflow.edges.push(edge("e2", "rn", "out", "save", "file"));
 
     let report = run(&workflow, None, &dir.join("out")).unwrap();
     (target, report)
@@ -1025,7 +1021,7 @@ fn rename_survives_a_re_encode_and_follows_the_real_format() {
     workflow.edges.push(edge("e2", "rn", "out", "c", "image"));
     workflow
         .edges
-        .push(edge("e3", "c", "image", "save", "image"));
+        .push(edge("e3", "c", "image", "save", "file"));
 
     let report = run(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);

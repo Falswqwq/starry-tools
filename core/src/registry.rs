@@ -27,6 +27,9 @@ pub struct NodeSpec {
     /// 需要某个**得下载的模型**才能跑时，那个「模型」参数的 id。
     /// 界面据此在模型缺失时把节点整个禁用、挂一个下载按钮。
     pub model_param: Option<&'static str>,
+    /// 需要一个**外部程序**（如 `ffmpeg`）才能跑时，它的名字。
+    /// 界面据此在程序缺失时把节点整个禁用、挂一句提示。
+    pub requires_tool: Option<&'static str>,
     pub run: RunFn,
 }
 
@@ -37,6 +40,7 @@ impl NodeSpec {
             resolve_outputs: None,
             interactive: None,
             model_param: None,
+            requires_tool: None,
             run,
         }
     }
@@ -47,6 +51,7 @@ impl NodeSpec {
             resolve_outputs: Some(resolve_outputs),
             interactive: None,
             model_param: None,
+            requires_tool: None,
             run,
         }
     }
@@ -54,6 +59,12 @@ impl NodeSpec {
     /// 声明这个节点需要一个要下载的模型；`param` 是那个「模型」参数的 id。
     pub fn needs_model(mut self, param: &'static str) -> Self {
         self.model_param = Some(param);
+        self
+    }
+
+    /// 声明这个节点需要一个外部程序（如 `ffmpeg`）。
+    pub fn needs_tool(mut self, tool: &'static str) -> Self {
+        self.requires_tool = Some(tool);
         self
     }
 
@@ -128,6 +139,7 @@ impl Registry {
                     kind: spec.kind.clone(),
                     interactive: spec.is_interactive(&defaults),
                     model_param: spec.model_param.map(str::to_string),
+                    requires_tool: spec.requires_tool.map(str::to_string),
                     defaults,
                 }
             })
@@ -136,11 +148,12 @@ impl Registry {
 }
 
 fn builtin_specs() -> Vec<NodeSpec> {
-    vec![
+    let mut specs = vec![
         nodes::read::spec(),
         nodes::literal::text_spec(),
         nodes::literal::number_spec(),
         nodes::literal::bool_spec(),
+        // 图像类
         nodes::convert::spec(),
         nodes::compress::spec(),
         nodes::border::spec(),
@@ -150,9 +163,22 @@ fn builtin_specs() -> Vec<NodeSpec> {
         nodes::crop::spec(),
         nodes::transform::spec(),
         nodes::upscale::spec(),
-        nodes::rename::spec(),
-        nodes::save::spec(),
-    ]
+    ];
+    // feature 自带的节点跟在它们同类后面：「视频」排在各图像节点之后。
+    #[cfg(feature = "video")]
+    specs.extend(crate::features::video::specs());
+    specs.extend([nodes::rename::spec(), nodes::save::spec()]);
+    specs
+}
+
+/// 这台机器上有没有某个外部程序（节点自己声明需要它）。
+/// 不认识的工具当作「有」，不影响旧行为。
+pub fn tool_available(name: &str) -> bool {
+    match name {
+        #[cfg(feature = "video")]
+        "ffmpeg" => crate::features::video::tool_available(),
+        _ => true,
+    }
 }
 
 pub fn registry() -> &'static Registry {

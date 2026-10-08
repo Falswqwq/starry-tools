@@ -341,12 +341,18 @@ fn draw(
         return;
     }
     let ppp = ctx.pixels_per_point();
-    let square = Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
-    // 把位置**贴到物理像素网格**上：贴图是按物理像素 1:1 光栅化的，
+    // 贴图按 (图标, 物理像素) 缓存。把尺寸**量化到偶数档**：缩放画布时图标会经过许多
+    // 中间尺寸，不量化就会为每一个尺寸都光栅化一张、缓存也只增不减。量化后条目数少一大截。
+    let wanted = (side * ppp).round() as usize;
+    let px = (wanted.div_ceil(2) * 2).clamp(8, MAX_PX);
+    // 按量化后的尺寸画，并把中心**贴到物理像素网格**上：贴图是按物理像素 1:1 光栅化的，
     // 哪怕只差半个像素，双线性采样也会把整张图抹糊。
-    let snap = |p: Pos2| Pos2::new((p.x * ppp).round() / ppp, (p.y * ppp).round() / ppp);
-    let square = Rect::from_min_max(snap(square.min), snap(square.max));
-    let px = ((square.width() * ppp).round() as usize).clamp(8, MAX_PX);
+    let draw = px as f32 / ppp;
+    let center = Pos2::new(
+        (rect.center().x * ppp).round() / ppp,
+        (rect.center().y * ppp).round() / ppp,
+    );
+    let square = Rect::from_center_size(center, egui::Vec2::splat(draw));
     let handle = texture(ctx, name, svg, px);
     let uv = Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0));
 

@@ -3,6 +3,8 @@
 ## 环境与命令
 
 需要 Rust 1.90+ 和一个能跑 egui/wgpu 的图形环境。没有 Node，也不依赖 WebView。
+视频功能（默认开）运行时要本机装有 `ffmpeg` / `ffprobe`；没有也不影响其它功能，
+只是「视频压缩」节点会直接报错。
 
 ```sh
 cargo run --release -p starrytools-app   # 跑起来
@@ -33,10 +35,10 @@ cargo clippy --all-targets               # 静态检查
 Windows 上是 `%APPDATA%\`。界面上「工作流 → 打开存放目录」可以直接跳过去。
 
 产物文件名是 `序号-节点名.扩展名`，每次完整运行会先清掉上一次的同名产物（只清 `NN-`
-开头的那些），然后每个非起点节点的图像输出都会写一份到那里。跑单步时不清，否则会把
-别的节点的产物抹掉。
+开头的那些），然后每个非起点节点的**产物输出**（图像 / 视频……）都会写一份到那里。
+跑单步时不清，否则会把别的节点的产物抹掉。
 
-「[保存到目录](nodes/save.md)」是另一回事：它把图像写到你自己挑的目录里，
+「[保存到目录](nodes/save.md)」是另一回事：它把产物写到你自己挑的目录里，
 不走这条自动产物的路子。
 
 ## 加一个新工具
@@ -130,7 +132,28 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
   说清哪些参数下它会拦住运行（画布画成紫色）。运行里用 `args.ask(InteractionKind::..)`
   发请求、阻塞等答复；没有界面时会返回 `NodeError` 而不是 panic。见
   [紫色节点](interface.md#紫色阻塞节点) 与 `core/src/interaction.rs`。
+- **要外部程序才能跑的节点**加 `.needs_tool("ffmpeg")`：程序不在本地时，界面把节点整个
+  禁用并挂一句提示（和缺模型同一套）；节点自己也要在 `run` 里先 `ffmpeg::available()`
+  检查、缺了返回 `NodeError`（脱离 GUI 直接 `run` 时也靠它）。
+- **长任务可以报进度**：运行里调 `args.report(NodeStep { fraction, frame, total_frames, text })`，
+  界面会在卡片上画进度条与帧计数（视频压缩就是这么做的）。没有界面（脱离 GUI 直接
+  `run`）时它是空操作。
 - **别在节点里 panic。** 出错就返回 `NodeError`，它会按节点归类写进运行报告。
+
+### 加一个 feature（新类型 + 新节点）
+
+类型系统是**注册式**的：接口与具体类型都登记在一张表里（`core/src/types/`），节点只是
+元数据。所以新加一类功能不需要改界面，也不需要改核心的类型枚举。视频就是这么加进去的
+（`core/src/features/video/`），一个模块里包含三件事：
+
+1. **自己的格式枚举**（如 `VideoFormat`），带 `name()` / `badge()` / `label()` / `extension()`；
+2. **登记类型**：`register(&mut Registry)` 里调 `register_trait` / `register_type`，
+   说清接口、具体类型、实现的接口、颜色；
+3. **自报节点**：`specs() -> Vec<NodeSpec>`，在 `registry.rs` 的 `builtin_specs()` 里
+   用 `#[cfg(feature = "..")]` 接上。
+
+整个 feature 用一个 cargo feature 开关（如 `core/Cargo.toml` 里的 `video`），不用时不编译。
+需要外部工具的功能（如 ffmpeg）在运行时检查可用性，缺了就返回 `NodeError` 而不是 panic。
 
 ### 节点 id 与老存档
 
@@ -149,10 +172,13 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 ```
 Cargo.toml          根工作区（成员：core/、app/）
 core/               纯逻辑，不依赖任何 GUI 框架
-  src/model/        port_type / node_kind / value / params / workflow
+  src/types/        类型系统（注册式）—— 接口 / 具体类型 / 登记表
+  src/model/        node_kind / value / params / workflow
                     （node_kind 里放着「参数 → 可选输入端口」的推导规则）
   src/nodes/        内置工具，一个文件一个（literal.rs = 文本/数字/布尔字面量）
                     read.rs = 读文件
+  src/features/     可整块关掉的功能模块（video/ = 视频类型 + 视频节点）
+  src/media.rs      通用产物值（视频等非图像产物）
   src/engine/       静态检查 + 执行引擎（含测试）
   src/png_opt/      无损 PNG 优化：颜色类型 / 位深 / 调色板 / 逐行 filter / zopfli / 元数据
   src/png_quant.rs  调色板量化（有损）
@@ -172,6 +198,7 @@ app/                egui 界面
     geometry.rs     刀光的几何（贝塞尔采样 / 判交 / 切分），有测试
   src/ui/           外观
     theme.rs        设计令牌 + 中文字体回退
+    easing.rs       缓动函数与「待命」搏动频率（集中一处，各动画共用）
     widgets.rs      自绘按钮与浮层外壳（实心 / 幽灵 / 主色 / 危险）
     controls.rs     参数控件与颜色系统（数字 / 文本 / 下拉 / 开关 / 文件 / 取色器）
     icons.rs        图标：把 lucide SVG 光栅化成贴图
@@ -185,9 +212,11 @@ app/                egui 界面
     settings.rs     帧率上限 / 是否显示 fps
     run.rs          静态检查的缓存 + 后台跑工作流
     models.rs       要下载的模型（背景移除）的下载状态
+    dialog.rs       文件 / 目录选择：后台线程上开原生框，不阻塞界面
 ```
 
-界面不依赖任何外部运行库：窗口走 `eframe`/`wgpu`，文件对话框用 `rfd`，
+界面不依赖任何外部运行库：窗口走 `eframe`/`wgpu`，文件对话框用 `rfd`
+（**在后台线程上开** —— 同步版会把整帧卡住，Wayland 下窗口会被判定「未响应」），
 在文件管理器里定位用 `open`，数据目录用 `dirs` 自己拼 `com.falsw.starrytools`。
 
 ### 界面
@@ -209,6 +238,8 @@ app/                egui 界面
   想加 / 换图标，把对应的 `.svg` 丢进去、在 `icons.rs` 里加一行即可。
 - **动画**：卡片悬停上浮 / 展开、浮层淡入淡出、连线被刀光扫到时搏动、断开时两截回缩、
   开关滑块位移、运行中的 spinner、未保存蓝点的渐显、节点库展开时盖住文字的翻转箭头。
+  缓动曲线与「待命」搏动频率统一收在 `app/src/ui/easing.rs`（`ease_out_quad` /
+  `ease_out_cubic` / `BREATH`）。
 
 画布上的操作：左键拖节点、拖空白平移、滚轮缩放；**从端口往外拖可以接线**
 （一头输出一头输入、类型对得上、一个输入端口只接一条，未接上时线会呼吸发光）；
@@ -220,8 +251,14 @@ app/                egui 界面
 
 egui 是每帧重绘的，所以「哪些活儿不该每帧做」值得记一笔：
 
-- **静态检查按画布版本号缓存。** `graph.revision` 内容一变才加一（平移缩放不算），
-  `run::Check` 只在版本号变了时才重跑，否则每帧都会去读「读取」节点选的文件头（真的磁盘 IO）。
+- **静态检查按「语义版本号」缓存。** `Graph` 有两个版本号：`revision`（任何改动都加一，
+  用来算「未保存」）和 `check_revision`（**只有增删节点 / 改参数 / 改连线**才加一）。
+  `run::Check` 只认后者 —— 拖动节点 / 平移缩放不算语义变化，不会让检查失效，
+  否则每帧都会重跑全图拓扑、并去读「读取」节点选的文件头（真的磁盘 IO）。
+  外壳还把 `to_workflow` 的结果按这个版本号缓存了，拖动时不必每帧重建。
+- **「缺模型 / 缺工具」缓存在节点上。** 判定要 `stat` 磁盘 / 探一次工具，所以
+  存在 `Node::requirements` 里，只在参数变化或模型下载完成时重算（见 `refresh_ports`），
+  绘制路径上不碰磁盘。
 - **运行放后台线程。** zopfli 那一档能把界面卡死，`run::Runner` 在单独线程上跑、
   外壳轮询结果。
 - **只有真的在动才申请重绘。** 动画自己会 `request_repaint`，外壳只在「时间在走」的

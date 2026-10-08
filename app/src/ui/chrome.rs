@@ -5,12 +5,12 @@
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind};
 
+use crate::state::settings::{Settings, FPS_MAX, FPS_MIN};
+use crate::state::workspace::Workspace;
 use crate::ui::icons;
 use crate::ui::library::Library;
-use crate::state::settings::{Settings, FPS_MAX, FPS_MIN};
 use crate::ui::theme;
 use crate::ui::widgets::{self, Size, Variant};
-use crate::state::workspace::Workspace;
 
 pub enum Action {
     Save,
@@ -232,8 +232,11 @@ impl Chrome {
             .inner;
 
         // ---- 说明面板 ----
-        let desc_anim =
-            ctx.animate_bool_with_time(egui::Id::new("desc-anim"), self.describing, 0.13);
+        let desc_anim = ctx.animate_bool_with_time(
+            egui::Id::new("desc-anim"),
+            self.describing,
+            0.13,
+        );
         if desc_anim > 0.01 {
             let pos = egui::pos2(desc_rect.left(), desc_rect.bottom() + PANEL_GAP);
             let mut close = false;
@@ -293,8 +296,11 @@ impl Chrome {
 
         // ---- 设置面板 ----
         let mut settings_changed = false;
-        let settings_anim =
-            ctx.animate_bool_with_time(egui::Id::new("settings-anim"), self.settings_open, 0.13);
+        let settings_anim = ctx.animate_bool_with_time(
+            egui::Id::new("settings-anim"),
+            self.settings_open,
+            0.13,
+        );
         if settings_anim > 0.01 {
             let pos = egui::pos2(gear_rect.left(), gear_rect.bottom() + PANEL_GAP);
             let mut close = false;
@@ -383,7 +389,11 @@ impl Chrome {
         }
 
         // ---- 加载面板 ----
-        let load_anim = ctx.animate_bool_with_time(egui::Id::new("load-anim"), self.browsing, 0.13);
+        let load_anim = ctx.animate_bool_with_time(
+            egui::Id::new("load-anim"),
+            self.browsing,
+            0.13,
+        );
         if load_anim > 0.01 {
             let width = 360.0;
             let pos = egui::pos2(load_rect.right() - width, load_rect.bottom() + PANEL_GAP);

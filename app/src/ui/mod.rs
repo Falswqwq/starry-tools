@@ -2,6 +2,7 @@
 
 pub(crate) mod chrome;
 pub(crate) mod controls;
+pub(crate) mod easing;
 pub(crate) mod icons;
 pub(crate) mod library;
 pub(crate) mod prompt;

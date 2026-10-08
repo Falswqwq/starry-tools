@@ -361,5 +361,10 @@ pub struct NodeKindInfo {
     /// 界面据此：模型不在本地就把整个节点禁用，并在卡片上挂一个下载按钮。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_param: Option<String>,
+    /// 这个节点要一个**外部程序**（如 `ffmpeg`）才能跑时，给出它的名字。
+    ///
+    /// 界面据此：程序不在本地就把整个节点禁用，并在卡片上挂一句提示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_tool: Option<String>,
     pub defaults: Params,
 }

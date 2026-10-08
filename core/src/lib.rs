@@ -2,7 +2,8 @@
 //!
 //! 四个部分：
 //!
-//! * [`model`] —— 数据形状与类型系统（端口类型、参数、工作流存档格式）；
+//! * [`model`] —— 数据形状（参数、工作流存档格式）；
+//! * [`types`] —— 类型系统：具体类型实现接口，端口类型可以指向具体类型或接口；
 //! * [`nodes`] —— 每个工具就是一个文件，自报输入 / 输出 / 参数；
 //! * [`engine`] —— 静态检查（`resolve`）与真正执行（`run`）；
 //! * [`interaction`] —— 会停下来等用户操作的「阻塞节点」与界面之间的对话；
@@ -16,8 +17,10 @@
 pub mod bg_model;
 pub mod engine;
 pub mod error;
+pub mod features;
 pub mod image_io;
 pub mod interaction;
+pub mod media;
 pub mod model;
 pub mod nodes;
 pub mod palette;
@@ -28,5 +31,6 @@ pub mod progress;
 pub mod registry;
 pub mod rembg;
 pub mod storage;
+pub mod types;
 
 pub use error::AppError;

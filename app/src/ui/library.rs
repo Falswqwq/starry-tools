@@ -725,7 +725,10 @@ impl Library {
                     (card.right() - 11.0 - flag_w - x).max(16.0),
                 );
                 painter.galley(
-                    egui::pos2(x, crate::ui::widgets::label_top(&galley, r.center().y, y + 3.0)),
+                    egui::pos2(
+                        x,
+                        crate::ui::widgets::label_top(&galley, r.center().y, y + 3.0),
+                    ),
                     galley,
                     theme::INK_2.gamma_multiply(alpha),
                 );

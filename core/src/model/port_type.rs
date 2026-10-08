@@ -230,156 +230,16 @@ impl ImageFormat {
     }
 }
 
-/// 一个端口的类型。
+/// 一个端口的类型 —— 定义在 [`crate::types`]，这里再导出一遍，
+/// 让原来 `model::port_type::PortType` 的引用路径继续可用。
 ///
-/// 序列化后长这样：`"any"`、`"text"`、`"number"`、`"bool"`、`{"image":"png"}`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PortType {
-    /// 通配：什么值都能接。编辑期一律放行，运行期再要求实际值是个具体类型。
-    /// 「重命名」这类什么都不管的节点用它，将来加非图像的工具也靠它。
-    Any,
-    Text,
-    Number,
-    Bool,
-    Image(ImageFormat),
-}
-
-impl PortType {
-    /// 运行期真的拿到它时，这个类型算不算「说清楚了」。
-    /// 通配本身不是具体类型，格式未知的图像也不是。
-    pub fn is_concrete(self) -> bool {
-        !matches!(self, PortType::Any | PortType::Image(ImageFormat::Any))
-    }
-
-    pub fn is_image(self) -> bool {
-        matches!(self, PortType::Image(_))
-    }
-
-    pub fn image_format(self) -> Option<ImageFormat> {
-        match self {
-            PortType::Image(f) => Some(f),
-            _ => None,
-        }
-    }
-
-    /// 端口徽标：图像用格式短名，其余用中文字。
-    pub fn badge(self) -> &'static str {
-        match self {
-            PortType::Any => "ANY",
-            PortType::Text => "TXT",
-            PortType::Number => "NUM",
-            PortType::Bool => "BOOL",
-            PortType::Image(f) => f.badge(),
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PortType::Any => "任意值",
-            PortType::Text => "文本",
-            PortType::Number => "数字",
-            PortType::Bool => "布尔",
-            PortType::Image(f) => f.label(),
-        }
-    }
-
-    /// 编辑期检查：`self` 作为目标端口，能否接受 `source` 端口的数据。
-    ///
-    /// 比 [`PortType::strictly_accepts`] 宽松的地方：通配一头出现就放行，
-    /// 格式未知的图像可以接到任何图像端口上 —— 都等运行期再确认。
-    pub fn accepts(self, source: PortType) -> bool {
-        use PortType::*;
-        if self == Any || source == Any {
-            return true;
-        }
-        match (self, source) {
-            (Text, Text) | (Number, Number) | (Bool, Bool) => true,
-            (Image(ImageFormat::Any), Image(_)) => true,
-            (Image(target), Image(actual)) => target == actual || actual == ImageFormat::Any,
-            _ => false,
-        }
-    }
-
-    /// 运行期检查：端口声明 `self`，实际拿到的值是 `source`，是否严格匹配。
-    pub fn strictly_accepts(self, source: PortType) -> bool {
-        use PortType::*;
-        match (self, source) {
-            (Text, Text) | (Number, Number) | (Bool, Bool) => true,
-            // 声明得宽，实际值就得是个说得清楚的类型。
-            (Any, actual) => actual.is_concrete(),
-            // 目标声明得很宽，任何具体图像都行，但「格式未知」不是具体格式。
-            (Image(ImageFormat::Any), Image(actual)) => actual.is_concrete(),
-            (Image(target), Image(actual)) => target.is_concrete() && target == actual,
-            _ => false,
-        }
-    }
-}
+/// 具体有哪些接口、哪些类型，以及「谁能接到谁上」，都归 [`crate::types`] 管；
+/// 这个模块只剩下图像格式 [`ImageFormat`]。
+pub use crate::types::PortType;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_shape_is_stable() {
-        assert_eq!(serde_json::to_string(&PortType::Text).unwrap(), "\"text\"");
-        assert_eq!(serde_json::to_string(&PortType::Any).unwrap(), "\"any\"");
-        assert_eq!(
-            serde_json::to_string(&PortType::Image(ImageFormat::Png)).unwrap(),
-            "{\"image\":\"png\"}"
-        );
-        assert_eq!(
-            serde_json::to_string(&PortType::Image(ImageFormat::Jpeg)).unwrap(),
-            "{\"image\":\"jpeg\"}"
-        );
-    }
-
-    #[test]
-    fn any_image_only_flows_into_any_image() {
-        let png = PortType::Image(ImageFormat::Png);
-        let jpg = PortType::Image(ImageFormat::Jpeg);
-        let any = PortType::Image(ImageFormat::Any);
-
-        assert!(any.accepts(png));
-        assert!(any.accepts(jpg));
-        assert!(png.accepts(png));
-        assert!(!png.accepts(jpg));
-        assert!(!PortType::Text.accepts(png));
-        assert!(!png.accepts(PortType::Text));
-
-        // 编辑期放行「格式未知」，运行期不放行。
-        assert!(png.accepts(any));
-        assert!(!png.strictly_accepts(any));
-        assert!(any.strictly_accepts(jpg));
-        assert!(!any.strictly_accepts(any));
-        assert!(png.strictly_accepts(png));
-        assert!(!png.strictly_accepts(jpg));
-    }
-
-    #[test]
-    fn wildcard_port_takes_anything() {
-        let any = PortType::Any;
-        let sources = [
-            PortType::Text,
-            PortType::Number,
-            PortType::Bool,
-            PortType::Image(ImageFormat::Png),
-            PortType::Image(ImageFormat::Any),
-        ];
-        for source in sources {
-            assert!(any.accepts(source), "编辑期通配什么都能接：{source:?}");
-            assert!(
-                source.accepts(any),
-                "通配送出来的东西，编辑期也能接到任何端点上"
-            );
-        }
-
-        // 运行期要的是一个说得清的实例。
-        assert!(any.strictly_accepts(PortType::Text));
-        assert!(any.strictly_accepts(PortType::Image(ImageFormat::Png)));
-        assert!(!any.strictly_accepts(PortType::Any));
-        assert!(!any.strictly_accepts(PortType::Image(ImageFormat::Any)));
-    }
 
     #[test]
     fn names_match_serde() {

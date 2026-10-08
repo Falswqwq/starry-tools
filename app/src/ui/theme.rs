@@ -3,7 +3,8 @@
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Stroke, TextStyle};
 use egui::epaint::Shadow;
-use starrytools_core::model::port_type::{ImageFormat, PortType};
+use starrytools_core::model::port_type::PortType;
+use starrytools_core::types::TypeColor;
 
 // 画布
 pub const CANVAS: Color32 = Color32::from_rgb(0xfb, 0xfb, 0xfc);
@@ -39,6 +40,7 @@ pub const TYPE_UNKNOWN: Color32 = Color32::from_rgb(0x94, 0xa3, 0xb8);
 pub const TYPE_TEXT: Color32 = Color32::from_rgb(0x33, 0x41, 0x55);
 pub const TYPE_NUMBER: Color32 = Color32::from_rgb(0x47, 0x55, 0x69);
 pub const TYPE_BOOL: Color32 = Color32::from_rgb(0x64, 0x74, 0x8b);
+pub const TYPE_VIDEO: Color32 = Color32::from_rgb(0x0d, 0x94, 0x88);
 
 /// 紫色：**阻塞节点**（要你动手的节点）的边框色。它不是状态色，是「这类节点长这样」。
 pub const PURPLE: Color32 = Color32::from_rgb(0x7c, 0x3a, 0xed);
@@ -62,17 +64,23 @@ pub const R_CTL: u8 = 6;
 /// 类型徽标的颜色 —— **全应用唯一的一处**。端口列上的徽标、参数名前的徽标、
 /// 节点库卡片和详情里的徽标，全部走它，因此**同一类型的徽标在哪儿都同色**。
 ///
-/// 它只取决于**类型本身**（`PortType`），与节点、与选中 / 悬停 / 报错等状态无关，
-/// 也不借用 `ACCENT`（那个蓝表示选中 / 焦点）—— 徽标标的是类型，不是状态。
-/// 到底是 PNG 还是 JPG，由徽标上的字来说，颜色只分「图像 / 文本 / 数字 / 布尔 / 通配」。
+/// 它只取决于**类型本身**（`PortType::color()` 给出的语义色令牌），与节点、
+/// 与选中 / 悬停 / 报错等状态无关，也不借用 `ACCENT`（那个蓝表示选中 / 焦点）——
+/// 徽标标的是类型，不是状态。到底是 PNG 还是 JPG，由徽标上的字来说，颜色只分
+/// 「图像 / 视频 / 文本 / 数字 / 布尔 / 通配」这几类。
 pub fn badge_color(ty: PortType) -> Color32 {
-    match ty {
-        // 格式未知的通配图像，和 `Any` 一样留在灰阶里。
-        PortType::Image(ImageFormat::Any) | PortType::Any => TYPE_UNKNOWN,
-        PortType::Image(_) => TYPE_IMAGE,
-        PortType::Text => TYPE_TEXT,
-        PortType::Number => TYPE_NUMBER,
-        PortType::Bool => TYPE_BOOL,
+    type_color(ty.color())
+}
+
+/// 语义色令牌 → 具体颜色。新增一类类型（如视频）时，只在这里加一条。
+pub fn type_color(color: TypeColor) -> Color32 {
+    match color {
+        TypeColor::Unknown => TYPE_UNKNOWN,
+        TypeColor::Text => TYPE_TEXT,
+        TypeColor::Number => TYPE_NUMBER,
+        TypeColor::Bool => TYPE_BOOL,
+        TypeColor::Image => TYPE_IMAGE,
+        TypeColor::Video => TYPE_VIDEO,
     }
 }
 
@@ -262,6 +270,7 @@ pub fn apply(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starrytools_core::model::port_type::ImageFormat;
 
     /// 徽标配色只有 [`badge_color`] 这一处：同一类型任何地方都同色，
     /// 不同类型要能分得开。这条测试守的就是「别再有人往别处塞一个硬编码颜色」。
@@ -278,10 +287,11 @@ mod tests {
         assert_ne!(badge_color(PortType::Text), badge_color(PortType::Number));
         assert_ne!(badge_color(PortType::Number), badge_color(PortType::Bool));
 
-        // 格式未知的图像是通配，和 `Any` 一起走灰 —— 与具体格式的蓝分得开。
+        // 「图像」接口和具体图像同为图像类 —— 同色；格式由字（IMG / PNG）区分。
         let any_image = badge_color(PortType::Image(ImageFormat::Any));
-        assert_ne!(png, any_image);
-        assert_eq!(any_image, badge_color(PortType::Any));
+        assert_eq!(png, any_image);
+        // 而通配（ANY）是「说不清」，单独走灰。
+        assert_ne!(png, badge_color(PortType::Any));
 
         // 徽标色与「选中 / 焦点」的主题蓝分开：一个蓝色徽标不该被误读成“选中”。
         assert_ne!(png, ACCENT);

@@ -10,7 +10,7 @@ use starrytools_core::bg_model;
 use starrytools_core::model::node_kind::{ParamDef, ParamSpec, PortDef};
 use starrytools_core::model::params::Params;
 use starrytools_core::model::port_type::PortType;
-use starrytools_core::registry::registry;
+use starrytools_core::registry::{registry, tool_available};
 
 /// 一个端口在界面上需要知道的东西。
 #[derive(Clone)]
@@ -204,6 +204,8 @@ pub struct Kind {
     pub interactive: bool,
     /// 这个节点要一个**得下载的模型**才能跑时，那个「模型」参数的 id（见 [`Kind::model`]）。
     pub model_param: Option<String>,
+    /// 这个节点要一个**外部程序**（如 `ffmpeg`）才能跑时，它的名字（见 [`Kind::tool_missing`]）。
+    pub requires_tool: Option<String>,
     /// 新建节点时用的初始参数，免得在界面里再抄一遍默认值。
     pub defaults: Params,
 }
@@ -217,15 +219,6 @@ impl Kind {
             .and_then(Value::as_str)
             .unwrap_or_else(|| bg_model::default_model().id);
         bg_model::find(id)
-    }
-
-    /// 本地还没有这个节点要的模型吗 —— 界面据此把整个节点禁用、挂一个下载面板。
-    /// 需要模型但参数指向一个不认识的 id 时也算「缺」——那样才拦得住运行。
-    pub fn model_missing(&self, params: &Params) -> bool {
-        self.model_param.is_some()
-            && self
-                .model(params)
-                .is_none_or(|model| !bg_model::is_downloaded(model.id))
     }
 }
 
@@ -248,6 +241,7 @@ pub fn all() -> Vec<Kind> {
                 params: kind.params.iter().map(param).collect(),
                 interactive: info.interactive,
                 model_param: info.model_param,
+                requires_tool: info.requires_tool,
                 defaults: info.defaults,
             }
         })
@@ -271,6 +265,30 @@ pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<Port>, Vec<Port>) {
         ),
         None => (Vec::new(), Vec::new()),
     }
+}
+
+/// 某个节点在当前参数下「缺模型 / 缺外部程序」吗。
+///
+/// 两项都要碰磁盘（看模型文件在不在）/ 探一次工具，所以界面把它缓存在节点上，
+/// 只在**参数变化**或**模型下载完成**时重算 —— 不要在每帧的绘制路径里直接调。
+pub fn requirements(kind_id: &str, params: &Params) -> crate::canvas::node::Requirements {
+    let mut missing = crate::canvas::node::Requirements::default();
+    let Some(spec) = registry().get(kind_id) else {
+        return missing;
+    };
+    if let Some(param) = spec.model_param {
+        let id = params
+            .get(param)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| bg_model::default_model().id);
+        // 参数指向一个不认识的 id 也算「缺」——那样才拦得住运行。
+        missing.model_missing =
+            bg_model::find(id).is_none_or(|model| !bg_model::is_downloaded(model.id));
+    }
+    if let Some(tool) = spec.requires_tool {
+        missing.tool_missing = !tool_available(tool);
+    }
+    missing
 }
 
 /// 某个节点实例在**当前参数**下会不会拦住运行（紫色节点）。

@@ -4,8 +4,8 @@ use eframe::egui::{self, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Str
 
 use starrytools_core::engine::{NodeStatus, RunReport};
 
-use crate::ui::icons;
 use crate::state::run::Runner;
+use crate::ui::icons;
 use crate::ui::theme;
 use crate::ui::widgets::{self, Size, Variant};
 
@@ -321,9 +321,11 @@ impl Report {
         let mut x = rect.left() + 12.0;
         let cy = rect.center().y;
 
-        // 圆点。运行中时闪。
+        // 圆点。运行中时闪 —— 和端点 / 待连线的搏动一个频率。
         let dot_alpha = if status.busy {
-            let pulse = 0.35 + 0.65 * ((ui.input(|i| i.time) * 4.0).sin() as f32 * 0.5 + 0.5);
+            let pulse = 0.35
+                + 0.65
+                    * ((ui.input(|i| i.time) * crate::ui::easing::BREATH).sin() as f32 * 0.5 + 0.5);
             Color32::from_rgba_unmultiplied(
                 status.dot.r(),
                 status.dot.g(),

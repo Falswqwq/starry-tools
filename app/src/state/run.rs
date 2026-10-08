@@ -9,7 +9,7 @@ use starrytools_core::engine::{
 };
 use starrytools_core::interaction::{Interaction, InteractionRequest, InteractionResponse};
 use starrytools_core::model::workflow::Workflow;
-use starrytools_core::progress::{Progress, ProgressEvent};
+use starrytools_core::progress::{NodeStep, Progress, ProgressEvent};
 
 /// 画布上要额外画出来的东西：哪些连线有问题、哪些节点跑过、各花了多久。
 #[derive(Default)]
@@ -25,6 +25,8 @@ pub struct Marks {
     pub waiting: Option<String>,
     /// **正在跑**的那个节点（跑完就挪到下一个）—— 实时高亮用。
     pub running: Option<String>,
+    /// 正在跑的那个节点报上来的进度（进度条 / 帧计数用）：`(节点 id, 进度)`。
+    pub step: Option<(String, NodeStep)>,
 }
 
 impl Marks {
@@ -116,6 +118,8 @@ pub struct LiveRun {
     pub running: Option<String>,
     /// 已经跑完的节点 → 它的结果。
     pub done: HashMap<String, NodeRunResult>,
+    /// 正在跑的那个节点报上来的实时进度：`(节点 id, 进度)`。
+    pub step: Option<(String, NodeStep)>,
 }
 
 /// 跑一次工作流。
@@ -262,10 +266,17 @@ impl Runner {
             if let Some(live) = &mut self.live {
                 for event in events {
                     match event {
-                        ProgressEvent::Started { node_id } => live.running = Some(node_id),
+                        ProgressEvent::Started { node_id } => {
+                            live.running = Some(node_id);
+                            live.step = None;
+                        }
+                        ProgressEvent::Step { node_id, step } => {
+                            live.step = Some((node_id, step));
+                        }
                         ProgressEvent::Finished { result } => {
                             if live.running.as_deref() == Some(result.node_id.as_str()) {
                                 live.running = None;
+                                live.step = None;
                             }
                             live.done.insert(result.node_id.clone(), result);
                         }

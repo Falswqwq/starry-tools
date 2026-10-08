@@ -121,6 +121,37 @@ fn intersection_point(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> Option<Pos2> {
     Some(a + r * t)
 }
 
+/// 线段 `a`-`b` 是否可能碰到轴对齐矩形 `min`-`max`（slab 法）。
+///
+/// 用于刀光切线的**预筛**：先用控制点包围盒把明显不相交的连线筛掉，
+/// 就不用对每一条线都采样一遍折线了。
+pub fn segment_hits_aabb(a: Pos2, b: Pos2, min: Pos2, max: Pos2) -> bool {
+    let d = b - a;
+    let mut t0 = 0.0f32;
+    let mut t1 = 1.0f32;
+    let axes = [(a.x, d.x, min.x, max.x), (a.y, d.y, min.y, max.y)];
+    for (origin, dir, lo, hi) in axes {
+        if dir.abs() < 1e-9 {
+            // 平行于这根轴：起点不在这段范围内就永远碰不到。
+            if origin < lo || origin > hi {
+                return false;
+            }
+            continue;
+        }
+        let mut near = (lo - origin) / dir;
+        let mut far = (hi - origin) / dir;
+        if near > far {
+            std::mem::swap(&mut near, &mut far);
+        }
+        t0 = t0.max(near);
+        t1 = t1.min(far);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
+}
+
 /// 折线与线段的**第一处**相交。
 ///
 /// 返回断点在曲线上的参数 `t`（0–1，按折线分段位置换算，不是弧长比例 ——
@@ -260,6 +291,17 @@ mod tests {
         // 切点本身也要对得上。
         assert!((left[3] - right[0]).length() < 0.001);
         assert!((left[3] - at(&curve, 0.35)).length() < 0.01);
+    }
+
+    #[test]
+    fn a_segment_outside_the_box_misses_it() {
+        let (lo, hi) = (pos2(10.0, 10.0), pos2(20.0, 20.0));
+        // 从上往下穿过去：碰到。
+        assert!(segment_hits_aabb(pos2(15.0, 0.0), pos2(15.0, 30.0), lo, hi));
+        // 盒子上面横着走：碰不到。
+        assert!(!segment_hits_aabb(pos2(0.0, 5.0), pos2(30.0, 5.0), lo, hi));
+        // 平行于 x 轴、y 落在盒子范围内：碰到。
+        assert!(segment_hits_aabb(pos2(0.0, 15.0), pos2(30.0, 15.0), lo, hi));
     }
 
     #[test]

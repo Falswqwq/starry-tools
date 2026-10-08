@@ -17,7 +17,7 @@
 
 | 节点 | id | 一句话 |
 | --- | --- | --- |
-| [读取](nodes/read.md) | `read` | 从硬盘读一个文件：图像按图像解码，文本按文本读（输出类型自动推断） |
+| [读取](nodes/read.md) | `read` | 从硬盘读一个文件：图像按图像解码，文本按文本读，视频读成视频产物（输出类型自动推断） |
 | [文本](nodes/literal_text.md) | `literal_text` | 一段文本（字面量） |
 | [数字](nodes/literal_number.md) | `literal_number` | 一个数字（字面量） |
 | [布尔](nodes/literal_bool.md) | `literal_bool` | 一个开关（字面量） |
@@ -38,6 +38,14 @@
 | [图像变换](nodes/transform.md) | `transform_image` | 翻转（左右 / 上下）与旋转（90° / 180° / 270°） |
 | [缩放图像](nodes/upscale.md) | `upscale` | 缩放到原来的百分之 n，像素画配「邻近」插值 |
 
+### 视频
+
+启用 `video` feature（默认开）时才有。视频的编解码交给外部 `ffmpeg`（缺了会给警报）。
+
+| 节点 | id | 一句话 |
+| --- | --- | --- |
+| [视频压缩](nodes/video_compress.md) | `video_compress` | 用 ffmpeg 重编码压小：平衡 / 激进 / 自动 / 高级 |
+
 ### 通用
 
 | 节点 | id | 一句话 |
@@ -48,7 +56,7 @@
 
 | 节点 | id | 一句话 |
 | --- | --- | --- |
-| [保存到目录](nodes/save.md) | `save_output` | 把产物写到你挑的目录，输出是写下的路径 |
+| [保存到目录](nodes/save.md) | `save_output` | 把产物（图像 / 视频……）写到你挑的目录，输出是写下的路径 |
 
 ## 一篇节点文档写什么
 

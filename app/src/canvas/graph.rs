@@ -22,10 +22,12 @@ use crate::canvas::geometry::{self, Cubic};
 use crate::canvas::layout::*;
 use crate::canvas::node::*;
 use crate::canvas::view::Viewport;
-use crate::catalog::{Control, Kind, Port};
+use crate::catalog::{Control, Kind, Param, Port};
+use crate::state::dialog;
 use crate::state::models::Downloads;
 use crate::state::run::{LiveRun, Marks};
 use crate::ui::controls::*;
+use crate::ui::easing;
 use crate::ui::icons::{self, IconFn};
 use crate::ui::theme;
 use crate::ui::widgets;
@@ -52,6 +54,8 @@ pub(crate) const MODEL_PANEL_H: f32 = MODEL_PAD * 2.0
     + MODEL_SELECT_H
     + MODEL_ACTION_GAP
     + MODEL_ACTION_H;
+/// 「缺外部程序」面板的高度（流坐标）：一行带图标的提示。
+pub(crate) const TOOL_PANEL_H: f32 = 34.0;
 pub(crate) const PARAM_NOTE_GAP: f32 = 4.0;
 /// 两个参数之间留的缝。
 pub(crate) const PARAM_GAP: f32 = 8.0;
@@ -85,6 +89,10 @@ pub(crate) const PREVIEW_H: f32 = 84.0;
 
 /// 卡片底部的色板条高度（流坐标）。输出是色板时卡片才多出这么高。
 pub(crate) const PALETTE_H: f32 = 30.0;
+
+/// 进度块的高度（流坐标）。运行中的长任务（视频压缩）才多出这么高：
+/// 一行「帧 12/300 · 35%」下面一条会流动的进度条。
+pub(crate) const PROGRESS_H: f32 = 42.0;
 
 /// 预览的棋盘格边长（流坐标）。
 const CHECKER: f32 = 8.0;
@@ -122,6 +130,43 @@ struct Interaction {
     slash: Option<Slash>,
 }
 
+impl Interaction {
+    /// 画布上删掉了一只节点（下标 `removed`）之后，把记着的节点下标跟着挪一挪。
+    ///
+    /// 拖拽中的节点刚好被删掉时就松手（而不是拖到错的对象上、或直接越界）。
+    fn fixup_after_removal(&mut self, removed: usize) {
+        let shift = |node: &mut usize| {
+            if *node > removed {
+                *node -= 1;
+            }
+        };
+        match self.grabbed {
+            Some(grab) if grab == removed => self.grabbed = None,
+            Some(grab) if grab > removed => self.grabbed = Some(grab - 1),
+            _ => {}
+        }
+        if let Some(connect) = &mut self.connect {
+            if connect.from.node == removed
+                || connect.target.is_some_and(|target| target.node == removed)
+            {
+                self.connect = None;
+            } else {
+                shift(&mut connect.from.node);
+                if let Some(target) = &mut connect.target {
+                    shift(&mut target.node);
+                }
+            }
+        }
+        if let Some((index, _)) = &mut self.menu {
+            if *index == removed {
+                self.menu = None;
+            } else {
+                shift(index);
+            }
+        }
+    }
+}
+
 /// 按节点 id 索引的贴图缓存。
 #[derive(Default)]
 struct Textures {
@@ -149,6 +194,10 @@ pub struct Graph {
     /// 画布内容的版本号。改一下就加一，用来判断有没有未保存的改动。
     /// 平移 / 缩放不算 —— 那是视图状态，不落盘。
     pub revision: u64,
+    /// **语义**版本号：只有会改变静态检查结果的东西（增删节点、改参数、改连线）
+    /// 才加一。挪动节点只动几何、不动它 —— 静态检查（会读输入文件头）据此缓存，
+    /// 否则拖动时每帧都会重跑一遍检查、每帧读一次磁盘。
+    check_revision: u64,
     /// 当前选中的节点（`运行至此` 认它）。
     pub selected: Option<usize>,
     /// 交互瞬态（抓住的节点 / 端口 / 菜单 / 刀光）。
@@ -173,6 +222,8 @@ pub struct Graph {
     run_marks_hidden: bool,
     /// 需要模型的节点正在下的那些模型（按节点 id）。**不落盘**。
     downloads: Downloads,
+    /// 正在后台开的文件 / 目录选择框（结果回来了再应用到节点上）。**不落盘**。
+    picker: dialog::Picker,
 }
 
 impl Graph {
@@ -198,6 +249,8 @@ impl Graph {
                 preview: false,
                 palette: None,
                 run: None,
+                step: None,
+                requirements: Requirements::default(),
             };
             refresh_ports(&mut node);
             nodes.push(node);
@@ -215,6 +268,7 @@ impl Graph {
                 from_port: out.id.clone(),
                 to,
                 to_port: input.id.clone(),
+                id: Wire::make_id(&nodes[from].id, &out.id, &nodes[to].id, &input.id),
             });
         };
         for i in 0..count {
@@ -234,6 +288,7 @@ impl Graph {
                 zoom: 0.8,
             },
             revision: 0,
+            check_revision: 0,
             selected: None,
             interaction: Interaction::default(),
             textures: Textures::default(),
@@ -244,6 +299,7 @@ impl Graph {
             notes: HashMap::new(),
             run_marks_hidden: false,
             downloads: Downloads::default(),
+            picker: dialog::Picker::default(),
         }
     }
 
@@ -260,6 +316,8 @@ impl Graph {
             preview: false,
             palette: None,
             run: None,
+            step: None,
+            requirements: Requirements::default(),
         };
         refresh_ports(&mut node);
         // 高度用**画卡片那一套**算（同一份代码），落点才不会偏。
@@ -268,12 +326,26 @@ impl Graph {
         self.anim.entering.insert(node.id.clone(), now);
         self.nodes.push(node);
         self.interaction.grabbed = Some(self.nodes.len() - 1);
-        self.touch();
+        self.touch_content();
     }
 
     /// 记一笔「画布变过了」—— 保存之后用它判断有没有未保存的改动。
+    ///
+    /// 几何变化（挪动节点）也走它：位置要落盘，所以仍是「改动」。
     pub fn touch(&mut self) {
         self.revision += 1;
+    }
+
+    /// 记一笔**语义**改动：增删节点、改参数、改连线。除了 dirty，还让静态检查失效 ——
+    /// 那个检查会读输入文件头、跑全图拓扑，不能因为挪一下节点就重算。
+    fn touch_content(&mut self) {
+        self.revision += 1;
+        self.check_revision += 1;
+    }
+
+    /// 静态检查的缓存键（只有语义改动会变）。
+    pub fn check_revision(&self) -> u64 {
+        self.check_revision
     }
 
     /// 把画布上的东西写进一份工作流。`base` 提供 id / 名字 / 描述 / 创建时间。
@@ -299,7 +371,7 @@ impl Graph {
                 let source = &self.nodes[wire.from];
                 let target = &self.nodes[wire.to];
                 Edge {
-                    id: wire.id(&self.nodes),
+                    id: wire.id.clone(),
                     source: source.id.clone(),
                     source_port: wire.from_port.clone(),
                     target: target.id.clone(),
@@ -333,6 +405,8 @@ impl Graph {
                 preview: false,
                 palette: None,
                 run: None,
+                step: None,
+                requirements: Requirements::default(),
             };
             refresh_ports(&mut node);
             nodes.push(node);
@@ -345,11 +419,19 @@ impl Graph {
                 .edges
                 .iter()
                 .filter_map(|edge| {
+                    let from = index_of(&edge.source)?;
+                    let to = index_of(&edge.target)?;
                     Some(Wire {
-                        from: index_of(&edge.source)?,
+                        from,
                         from_port: edge.source_port.clone(),
-                        to: index_of(&edge.target)?,
+                        to,
                         to_port: edge.target_port.clone(),
+                        id: Wire::make_id(
+                            &nodes[from].id,
+                            &edge.source_port,
+                            &nodes[to].id,
+                            &edge.target_port,
+                        ),
                     })
                 })
                 .collect()
@@ -364,6 +446,7 @@ impl Graph {
             },
             // 刚打开的工作流没有未保存的改动。
             revision: 0,
+            check_revision: 0,
             selected: None,
             interaction: Interaction::default(),
             textures: Textures::default(),
@@ -374,6 +457,7 @@ impl Graph {
             notes: HashMap::new(),
             run_marks_hidden: false,
             downloads: Downloads::default(),
+            picker: dialog::Picker::default(),
         }
     }
 
@@ -449,6 +533,37 @@ impl Graph {
         ]
     }
 
+    /// 把后台选好的文件 / 目录贴到它该去的地方。
+    ///
+    /// 选择框是在后台线程上开的（见 [`crate::state::dialog`]），结果用通道送回来；
+    /// 这里每帧收一次。
+    fn apply_pick(&mut self) {
+        let mut changed = false;
+        while let Some((action, path)) = self.picker.poll() {
+            match action {
+                dialog::Action::SetParam { node_id, param_id } => {
+                    if let Some(node) = self.nodes.iter_mut().find(|node| node.id == node_id) {
+                        node.params
+                            .insert(param_id, serde_json::json!(path.to_string_lossy()));
+                        // 类型可能跟着文件变（「读取」这类），端口重算一遍。
+                        refresh_ports(node);
+                        changed = true;
+                    }
+                }
+                dialog::Action::SaveAs { source } => {
+                    // 产物可能很大（视频），拷贝不能放在界面线程上 —— 否则会瞬间冻住窗口。
+                    // 失败一直静默（和原来一致）；这里只管不卡。
+                    std::thread::spawn(move || {
+                        let _ = std::fs::copy(source, &path);
+                    });
+                }
+            }
+        }
+        if changed {
+            self.touch_content();
+        }
+    }
+
     /// 命中测试：后画的在上面，所以从后往前找。
     fn hit(&self, kinds: &[Kind], flow: Pos2) -> Option<usize> {
         (0..self.nodes.len())
@@ -468,10 +583,19 @@ impl Graph {
         let now = ui.input(|input| input.time);
         self.measure_fps(now);
         // 收一收后台下载的进度 —— 下完了这项就消失，节点随之自动恢复。
-        self.downloads.poll();
+        // 刚下完的节点重算一下「缺不缺模型」缓存（文件刚落到磁盘）。
+        for finished in self.downloads.poll() {
+            if let Some(node) = self.nodes.iter_mut().find(|node| node.id == finished) {
+                refresh_ports(node);
+            }
+        }
+        // 收一收后台文件选择的结果 —— 选好了就应用到节点上。
+        self.apply_pick();
 
         // 先把这次的缩略图准备好 —— 卡片高度、预览绘制都要用到。
         self.sync_previews(ui.ctx(), view.report, view.live);
+        // 正在跑的那个节点报的进度贴到它自己的卡片上（卡片底部那段信息区）。
+        self.sync_step(view.live);
         // 参数说明与运行提示先折好行、量好高 —— 卡片高度靠它，折行也靠它。
         self.sync_notes(ui, kinds);
 
@@ -570,7 +694,7 @@ impl Graph {
             }
         });
         if controls_changed {
-            self.touch();
+            self.touch_content();
         }
 
         // ---- 刀光在最上面 ----
@@ -770,7 +894,7 @@ impl Graph {
         match self.anim.entering.get(id) {
             Some(started) => {
                 let t = ((now - started) / ENTER_SECS).clamp(0.0, 1.0) as f32;
-                1.0 - (1.0 - t) * (1.0 - t)
+                easing::ease_out_quad(t)
             }
             None => 1.0,
         }
@@ -894,9 +1018,9 @@ impl Graph {
                         break;
                     }
                     if play.contains(p) {
-                        // 要模型但本地还没有：这个节点还不能跑 —— 点运行不生效。
-                        if kind_of(kinds, &self.nodes[i])
-                            .is_some_and(|kind| kind.model_missing(&self.nodes[i].params))
+                        // 要模型 / 外部程序但本地还没有：这个节点还不能跑 —— 点运行不生效。
+                        if self.nodes[i].requirements.model_missing
+                            || self.nodes[i].requirements.tool_missing
                         {
                             handled = true;
                             break;
@@ -918,7 +1042,19 @@ impl Graph {
                             break;
                         }
                         if save.contains(p) {
-                            self.export_output(&file);
+                            // 另存为也走后台选择器，不阻塞界面。
+                            self.picker.open(
+                                dialog::Action::SaveAs {
+                                    source: std::path::PathBuf::from(&file),
+                                },
+                                dialog::Spec {
+                                    title: "另存为".into(),
+                                    extensions: Vec::new(),
+                                    mode: dialog::Mode::Save {
+                                        file_name: file_name(&file),
+                                    },
+                                },
+                            );
                             handled = true;
                             break;
                         }
@@ -1035,10 +1171,15 @@ impl Graph {
         let b = self.view.to_flow(to);
 
         let doomed = (0..self.wires.len())
-            .filter(|&i| {
+            .filter_map(|i| {
                 let curve = self.wire_points(kinds, &self.wires[i]);
+                // 先用控制点包围盒预筛：贝塞尔落在控制点凸包里，包围盒都不碰的线
+                // 不可能被切到，采样与相交测试都省了。
+                if !curve_maybe_cut(&curve, a, b) {
+                    return None;
+                }
                 let poly = geometry::sample(&curve, geometry::steps_for(&curve));
-                geometry::first_hit(&poly, a, b).is_some()
+                geometry::first_hit(&poly, a, b).map(|(t, _)| (i, t))
             })
             .collect();
 
@@ -1059,6 +1200,9 @@ impl Graph {
         let mut cuts = Vec::new();
         for i in 0..self.wires.len() {
             let curve = self.wire_points(kinds, &self.wires[i]);
+            if !curve_maybe_cut(&curve, a, b) {
+                continue;
+            }
             let poly = geometry::sample(&curve, geometry::steps_for(&curve));
             if let Some((t, _)) = geometry::first_hit(&poly, a, b) {
                 cuts.push((i, curve, t));
@@ -1076,7 +1220,7 @@ impl Graph {
             self.wires.remove(i);
         }
         if cut_count > 0 {
-            self.touch();
+            self.touch_content();
         }
 
         slash.doomed.clear();
@@ -1096,10 +1240,11 @@ impl Graph {
         let curve = self.wire_points(kinds, wire);
         let screen: Cubic = curve.map(|p| self.view.to_screen(p));
 
-        // 被刀光扫到：先铺一层更宽的发光，再画本体，并轻轻搏动。
+        // 被刀光扫到：先铺一层更宽的发光，再画本体，并轻轻搏动；
+        // 刀口切到的那一点再闪一下白光 —— 像真的被切开。
         if let Some(slash) = &self.interaction.slash {
-            if slash.doomed.contains(&i) {
-                let pulse = 0.55 + 0.45 * (now * 6.0).sin() as f32;
+            if let Some((_, cut_t)) = slash.doomed.iter().find(|(index, _)| *index == i) {
+                let pulse = 0.55 + 0.45 * (now * easing::BREATH).sin() as f32;
                 painter.add(CubicBezierShape::from_points_stroke(
                     screen,
                     false,
@@ -1112,12 +1257,25 @@ impl Graph {
                     Color32::TRANSPARENT,
                     Stroke::new(2.4 * self.view.zoom, theme::danger_alpha(pulse)),
                 ));
+                // 刀口那一点：白光亮一下。
+                let cut = geometry::at(&screen, *cut_t);
+                let flash = (3.0 + 2.0 * pulse) * self.view.zoom;
+                painter.circle_filled(
+                    cut,
+                    flash,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+                );
+                painter.circle_filled(
+                    cut,
+                    flash * 2.4,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+                );
                 return;
             }
         }
 
         // 静态检查说这条线接不上 → 红色虚线。
-        if marks.invalid_edges.contains(&wire.id(&self.nodes)) {
+        if marks.invalid_edges.contains(&wire.id) {
             self.dashed_curve(
                 painter,
                 &curve,
@@ -1191,7 +1349,7 @@ impl Graph {
     fn draw_severing(&self, painter: &egui::Painter, now: f64) {
         for entry in &self.anim.severing {
             let progress = ((now - entry.started) / SEVER_SECS).clamp(0.0, 1.0) as f32;
-            let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+            let eased = easing::ease_out_quad(progress);
             let fade = 1.0 - ((progress - 0.5) / 0.5).max(0.0);
             let stroke = Stroke::new(2.4 * self.view.zoom, theme::danger_alpha(fade));
 
@@ -1230,7 +1388,7 @@ impl Graph {
             None => (slash.to, 1.0, 1.0),
             Some(start) => {
                 let t = ((now - start) / OVERTAKE_SECS).clamp(0.0, 1.0) as f32;
-                let eased = 1.0 - (1.0 - t).powi(3);
+                let eased = easing::ease_out_cubic(t);
                 (
                     geometry::extend(slash.from, slash.to, OVERTAKE_REACH * eased),
                     1.0 - eased.powf(1.6),
@@ -1382,10 +1540,16 @@ impl Graph {
             from_port: self.nodes[out.node].outputs[out.port].id.clone(),
             to: input.node,
             to_port: self.nodes[input.node].inputs[input.port].id.clone(),
+            id: Wire::make_id(
+                &self.nodes[out.node].id,
+                &self.nodes[out.node].outputs[out.port].id,
+                &self.nodes[input.node].id,
+                &self.nodes[input.node].inputs[input.port].id,
+            ),
         };
         self.wires.push(wire);
         self.selected = Some(input.node);
-        self.touch();
+        self.touch_content();
     }
 
     /// 节点上的右键菜单。
@@ -1491,7 +1655,10 @@ impl Graph {
         }
         self.selected = None;
         self.interaction.menu = None;
-        self.touch();
+        // 交互里记着的下标也要跟着挪 —— 否则拖拽中删掉节点会拖到错的对象，
+        // 删的恰好是最后一个还会越界 panic。
+        self.interaction.fixup_after_removal(index);
+        self.touch_content();
     }
 
     /// 复制一个节点，错开一点免得盖住原件。
@@ -1506,7 +1673,7 @@ impl Graph {
         self.nodes.push(copy);
         self.selected = Some(self.nodes.len() - 1);
         self.interaction.menu = None;
-        self.touch();
+        self.touch_content();
     }
 
     /// 粘贴一个节点：换新 id、清掉上次运行的痕迹，落在 `at`（流坐标）。
@@ -1519,7 +1686,7 @@ impl Graph {
         self.nodes.push(node);
         self.selected = Some(self.nodes.len() - 1);
         self.interaction.menu = None;
-        self.touch();
+        self.touch_content();
     }
 
     /// 外壳读一下有没有 Ctrl+S 的请求，读到就清零。
@@ -1606,6 +1773,19 @@ impl Graph {
             for result in &report.nodes {
                 self.apply_result(ctx, result);
             }
+        }
+    }
+
+    /// 把「正在跑的那个节点报的进度」贴到它自己的卡片上，其余节点清掉。
+    ///
+    /// 卡片底部的那段信息区靠它决定要不要长出来（见 [`crate::canvas::layout`]）。
+    fn sync_step(&mut self, live: Option<&LiveRun>) {
+        let step = live.and_then(|live| live.step.clone());
+        for node in &mut self.nodes {
+            node.step = match &step {
+                Some((id, step)) if *id == node.id => Some(step.clone()),
+                _ => None,
+            };
         }
     }
 
@@ -1779,7 +1959,7 @@ impl Graph {
         let pulse = if snapped {
             0.0
         } else {
-            let wave = 0.5 + 0.5 * (now * 5.0).sin() as f32;
+            let wave = 0.5 + 0.5 * (now * easing::BREATH).sin() as f32;
             // 外圈光晕
             painter.add(CubicBezierShape::from_points_stroke(
                 [a, c1, c2, b],
@@ -1849,9 +2029,17 @@ impl Graph {
         let waiting = marks.waiting.as_deref() == Some(node.id.as_str());
         // 「正在跑的那个」—— 运行中牌子的蓝色边框。
         let running = marks.running.as_deref() == Some(node.id.as_str());
+        // 这个节点自己报上来的实时进度（视频压缩这类长任务才有）。
+        let step = marks
+            .step
+            .as_ref()
+            .filter(|(id, _)| id == &node.id)
+            .map(|(_, step)| step);
         // 要模型但本地还没有：整个节点禁用，卡片上挂一个下载面板（见 `draw_node_controls`）。
-        let model_missing =
-            kind_of(kinds, node).is_some_and(|kind| kind.model_missing(&node.params));
+        // 要一个外部程序（如 ffmpeg）但本地没有：一样禁用，卡片上挂一句提示。
+        // 这两项都在 `refresh_ports` 里缓存好了 —— 绘制路径上不再碰磁盘。
+        let model_missing = node.requirements.model_missing;
+        let tool_missing = node.requirements.tool_missing;
         // 是不是流程的起点 —— 只看元数据，不靠「有没有输入端口」猜。
         let is_source = kind_of(kinds, node).is_some_and(|kind| kind.is_source);
 
@@ -1862,7 +2050,7 @@ impl Graph {
             theme::DANGER
         } else if running {
             theme::ACCENT
-        } else if model_missing {
+        } else if model_missing || tool_missing {
             theme::WARN
         } else if interactive {
             theme::PURPLE
@@ -1874,7 +2062,7 @@ impl Graph {
         // 正在等用户操作 / 正在跑：把边框加粗一档。
         let border_width = if waiting {
             3.0
-        } else if running || interactive || model_missing {
+        } else if running || interactive || model_missing || tool_missing {
             1.5
         } else {
             1.0
@@ -1939,6 +2127,7 @@ impl Graph {
 
         if running {
             // 跑到它了：右边一个转圈的箭头 + 「运行中」，一眼看出光标在哪儿。
+            // 进度（帧数 / 百分比 / 进度条）画在卡片下方的信息区，不挤在这里。
             let spinner = Rect::from_center_size(
                 egui::pos2(right_edge - 6.0 * z, cy),
                 egui::Vec2::splat(10.0 * z),
@@ -1957,6 +2146,19 @@ impl Graph {
                 egui::pos2(right_edge, cy),
                 Align2::RIGHT_CENTER,
                 "需模型",
+                FontId::monospace(9.5 * z),
+                theme::WARN,
+            );
+        } else if tool_missing {
+            // 要外部程序但本地没有：把工具名也报出来，好知道去装什么。
+            let label = match kind_of(kinds, node).and_then(|kind| kind.requires_tool.as_deref()) {
+                Some(tool) => format!("需 {tool}"),
+                None => "缺工具".to_string(),
+            };
+            painter.text(
+                egui::pos2(right_edge, cy),
+                Align2::RIGHT_CENTER,
+                label,
                 FontId::monospace(9.5 * z),
                 theme::WARN,
             );
@@ -2028,11 +2230,11 @@ impl Graph {
             }
         }
 
-        // ---- 模型下载面板的底色（紧贴参数区，控件由 `draw_node_controls` 画） ----
-        if sections.model > 0.0 {
+        // ---- 「缺东西」面板的底色（紧贴参数区，控件由 `draw_node_controls` 画） ----
+        if sections.requirement > 0.0 {
             let rect = Rect::from_min_size(
                 egui::pos2(r.left(), params_bottom),
-                egui::vec2(r.width(), sections.model * z),
+                egui::vec2(r.width(), sections.requirement * z),
             );
             painter.rect_filled(
                 rect,
@@ -2054,14 +2256,83 @@ impl Graph {
         }
 
         // ---- 参数区以下的几段 ----
-        let body_pad = if sections.model > 0.0 {
+        let body_pad = if sections.requirement > 0.0 {
             0.0
         } else if sections.total() > 0.0 {
             BODY_PAD
         } else {
             0.0
         };
-        let mut y = params_bottom + (sections.model + body_pad) * z;
+        let mut y = params_bottom + (sections.requirement + body_pad) * z;
+
+        // ---- 运行中的进度（长任务才有这一段）：帧计数 + 百分比 + 会波的进度条 ----
+        if sections.progress > 0.0 {
+            if let Some(step) = step {
+                let last = sections.warn == 0.0
+                    && sections.error == 0.0
+                    && sections.actions == 0.0
+                    && !node.preview
+                    && sections.palette == 0.0;
+                let panel = Rect::from_min_size(
+                    egui::pos2(r.left(), y),
+                    egui::vec2(r.width(), sections.progress * z),
+                );
+                painter.rect_filled(
+                    panel,
+                    CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: if last { theme::R_CARD } else { 0 },
+                        se: if last { theme::R_CARD } else { 0 },
+                    },
+                    theme::ACCENT_SOFT,
+                );
+                painter.line_segment(
+                    [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
+                    Stroke::new(1.0, theme::HAIRLINE),
+                );
+
+                let inner = Rect::from_min_max(
+                    egui::pos2(r.left() + 10.0 * z, y + 7.0 * z),
+                    egui::pos2(r.right() - 10.0 * z, y + PROGRESS_H * z - 7.0 * z),
+                );
+                let percent = match step.fraction {
+                    Some(fraction) => format!("{}%", (fraction * 100.0).round() as i32),
+                    None => "…".to_string(),
+                };
+                let left_text = match (step.frame, step.total_frames) {
+                    (Some(frame), Some(total)) => format!("帧 {frame}/{total}"),
+                    (Some(frame), None) => format!("帧 {frame}"),
+                    _ => "处理中".to_string(),
+                };
+                let right_text = match &step.text {
+                    Some(text) => format!("{percent} · {text}"),
+                    None => percent,
+                };
+                let font = FontId::monospace(9.5 * z);
+                painter.text(
+                    egui::pos2(inner.left(), inner.top()),
+                    Align2::LEFT_TOP,
+                    left_text,
+                    font.clone(),
+                    theme::INK_2,
+                );
+                painter.text(
+                    egui::pos2(inner.right(), inner.top()),
+                    Align2::RIGHT_TOP,
+                    right_text,
+                    font,
+                    theme::INK_2,
+                );
+
+                let bar = Rect::from_min_max(
+                    egui::pos2(inner.left(), inner.bottom() - 12.0 * z),
+                    egui::pos2(inner.right(), inner.bottom()),
+                );
+                draw_progress_bar(&body, bar, step.fraction, now);
+            }
+            y += sections.progress * z;
+        }
 
         if node.preview {
             if let Some(texture) = self.textures.card.get(&node.id) {
@@ -2395,7 +2666,7 @@ impl Graph {
     /// 这个端口是不是接了条被静态检查判为非法的线。
     fn port_invalid(&self, marks: &Marks, node_index: usize, port_id: &str, input: bool) -> bool {
         self.wire_at_port(node_index, port_id, input)
-            .is_some_and(|wire| marks.invalid_edges.contains(&wire.id(&self.nodes)))
+            .is_some_and(|wire| marks.invalid_edges.contains(&wire.id))
     }
 
     /// 这个端口接没接线。
@@ -2404,16 +2675,7 @@ impl Graph {
     }
 
     /// 「另存为」：把产物拷到用户挑的位置。
-    fn export_output(&self, file: &str) {
-        let name = std::path::Path::new(file)
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "output".to_string());
-        if let Some(target) = rfd::FileDialog::new().set_file_name(name).save_file() {
-            let _ = std::fs::copy(file, target);
-        }
-    }
-
+    /// 指针现在悬在哪个节点上（决定要不要露出工具按钮）。
     /// 卡片底部「产物操作行」两个按钮的矩形：`(在文件夹中显示, 另存为)`。
     fn node_action_rects(&self, kinds: &[Kind], i: usize) -> (Rect, Rect) {
         let r = self.screen_rect(kinds, i);
@@ -2424,6 +2686,43 @@ impl Graph {
         let reveal = Rect::from_min_size(egui::pos2(r.left() + pad, y), egui::vec2(s, s));
         let save = Rect::from_min_size(egui::pos2(reveal.right() + 2.0 * z, y), egui::vec2(s, s));
         (reveal, save)
+    }
+
+    /// 一个参数控件这一帧发生了什么的统一处理（画布上所有控件都走它）。
+    ///
+    /// 返回「参数是否被改了」。文件框不在控件里弹对话框，而是把请求交给
+    /// 后台选择器 [`dialog::Picker`]。
+    fn handle_control(&mut self, i: usize, param: &Param, event: Option<ControlEvent>) -> bool {
+        match event {
+            Some(ControlEvent::Changed(value)) => {
+                self.nodes[i].params.insert(param.id.clone(), value);
+                refresh_ports(&mut self.nodes[i]);
+                true
+            }
+            Some(ControlEvent::PickFile {
+                title,
+                extensions,
+                directory,
+            }) => {
+                self.picker.open(
+                    dialog::Action::SetParam {
+                        node_id: self.nodes[i].id.clone(),
+                        param_id: param.id.clone(),
+                    },
+                    dialog::Spec {
+                        title,
+                        extensions,
+                        mode: if directory {
+                            dialog::Mode::Folder
+                        } else {
+                            dialog::Mode::File
+                        },
+                    },
+                );
+                false
+            }
+            None => false,
+        }
     }
 
     /// 画一个节点的参数控件。**在它的卡片刚画完之后**调用 ——
@@ -2448,9 +2747,11 @@ impl Graph {
             .filter(|&k| kind.params[k].visible(&self.nodes[i].params))
             .collect();
         // 要模型但本地还没下载：整个节点禁用，参数全部灰下去 —— **只有那个「模型」
-        // 下拉框还留着**，因为用户正是靠它挑要下哪个模型。
-        let model_missing = kind.model_missing(&self.nodes[i].params);
-        if showing.is_empty() && !model_missing {
+        // 下拉框还留着**，因为用户正是靠它挑要下哪个模型。缺外部程序（如 ffmpeg）时
+        // 也整个禁用，但没有任何参数需要留着。
+        let model_missing = self.nodes[i].requirements.model_missing;
+        let tool_missing = self.nodes[i].requirements.tool_missing;
+        if showing.is_empty() && !model_missing && !tool_missing {
             return false;
         }
 
@@ -2473,9 +2774,9 @@ impl Graph {
             let linked = port
                 .as_ref()
                 .is_some_and(|port| self.port_linked(i, &port.id, true));
-            // 缺模型时：除「模型」参数外全部禁用。
+            // 缺模型时：除「模型」参数外全部禁用。缺外部程序时全部禁用。
             let is_model_param = kind.model_param.as_deref() == Some(param.id.as_str());
-            let disabled = linked || (model_missing && !is_model_param);
+            let disabled = linked || tool_missing || (model_missing && !is_model_param);
 
             // 开关：标签和开关同一行。
             if matches!(param.control, Control::Bool) {
@@ -2500,7 +2801,7 @@ impl Graph {
                     egui::pos2(row.right() - 30.0 * zoom, row.top()),
                     egui::vec2(30.0 * zoom, row.height()),
                 );
-                if let Some(value) = control(
+                let event = control(
                     ui,
                     &node_id,
                     param,
@@ -2508,9 +2809,8 @@ impl Graph {
                     &self.nodes[i].params,
                     zoom,
                     disabled,
-                ) {
-                    self.nodes[i].params.insert(param.id.clone(), value);
-                    refresh_ports(&mut self.nodes[i]);
+                );
+                if self.handle_control(i, param, event) {
                     changed = true;
                 }
                 continue;
@@ -2539,7 +2839,7 @@ impl Graph {
                 egui::pos2(left, card.top() + slot.control_y * zoom),
                 egui::vec2(width, height),
             );
-            if let Some(value) = control(
+            let event = control(
                 ui,
                 &node_id,
                 param,
@@ -2547,9 +2847,8 @@ impl Graph {
                 &self.nodes[i].params,
                 zoom,
                 disabled,
-            ) {
-                self.nodes[i].params.insert(param.id.clone(), value);
-                refresh_ports(&mut self.nodes[i]);
+            );
+            if self.handle_control(i, param, event) {
                 changed = true;
             }
 
@@ -2579,9 +2878,38 @@ impl Graph {
                 egui::vec2(card.width(), MODEL_PANEL_H * zoom),
             );
             self.draw_model_panel(ui, i, &kind, rect, zoom, now);
+        } else if tool_missing {
+            let top = card.top()
+                + (node_body_top(&self.nodes[i])
+                    + params_height(&kind, &self.nodes[i].params, &self.notes))
+                    * zoom;
+            let rect = Rect::from_min_size(
+                egui::pos2(card.left(), top),
+                egui::vec2(card.width(), TOOL_PANEL_H * zoom),
+            );
+            self.draw_tool_panel(ui, &kind, rect, zoom);
         }
 
         changed
+    }
+
+    /// 画「缺外部程序」那块面板：一个警示图标 + 一句提示（底色已由 `draw_node` 铺好）。
+    fn draw_tool_panel(&self, ui: &egui::Ui, kind: &Kind, rect: Rect, zoom: f32) {
+        let tool = kind.requires_tool.as_deref().unwrap_or("外部程序");
+        let painter = ui.painter().with_clip_rect(rect);
+        let icon = Rect::from_min_size(
+            egui::pos2(rect.left() + 10.0 * zoom, rect.center().y - 6.0 * zoom),
+            egui::Vec2::splat(12.0 * zoom),
+        );
+        icons::info(&painter, icon, theme::WARN);
+        let message = format!("未找到 {tool}，先装好它并放进 PATH");
+        painter.text(
+            egui::pos2(icon.right() + 6.0 * zoom, rect.center().y),
+            Align2::LEFT_CENTER,
+            message,
+            FontId::monospace(9.5 * zoom),
+            theme::WARN,
+        );
     }
 
     /// 画「模型还没下载」那块面板：模型名 + 大小 + 一句说明 + 源下拉 + 下载 / 进度 / 重试。
@@ -2783,6 +3111,20 @@ impl Graph {
     }
 }
 
+/// 一条连线是否**可能**被从 `a` 到 `b` 的刀光切到（快速预筛）。
+///
+/// 贝塞尔整条落在它的控制点凸包里，所以控制点的包围盒就是一个上界：
+/// 包围盒都不和刀光相交的线，不用采样、不用做线段相交测试。
+fn curve_maybe_cut(curve: &Cubic, a: Pos2, b: Pos2) -> bool {
+    let mut min = curve[0];
+    let mut max = curve[0];
+    for p in &curve[1..] {
+        min = egui::pos2(min.x.min(p.x), min.y.min(p.y));
+        max = egui::pos2(max.x.max(p.x), max.y.max(p.y));
+    }
+    geometry::segment_hits_aabb(a, b, min, max)
+}
+
 /// 背景点阵用的小圆贴图：一张 `SIDE×SIDE` 的白色圆，带一点抗锯齿。
 ///
 /// 按 `(图标, 尺寸)` 的思路缓存进 `ctx.data`，只建一次。
@@ -2873,15 +3215,112 @@ fn draw_palette(painter: &egui::Painter, band: Rect, palette: &[[u8; 4]], z: f32
 
 /// 区别只在「正要连上」（`pending`）时多一圈搏动的描边。要改这份动画，只改这里一处。
 fn port_halo(painter: &egui::Painter, p: Pos2, z: f32, now: f64, pending: bool) {
-    let (radius, alpha) = if pending {
-        let pulse = 0.5 + 0.5 * (now * 6.0).sin() as f32;
-        ((8.5 + pulse * 2.0) * z, 0.18)
-    } else {
-        (8.5 * z, 0.20)
-    };
-    painter.circle_filled(p, radius, theme::accent_alpha(alpha));
     if pending {
-        painter.circle_stroke(p, 7.5 * z, Stroke::new(1.5, theme::ACCENT));
+        pending_halo(painter, p, 8.5 * z, now);
+    } else {
+        painter.circle_filled(p, 8.5 * z, theme::accent_alpha(0.20));
+    }
+}
+
+/// 「活性」光晕：一圈会**伸缩**的柔光 + 一道定住的描边。看点、落点、悬停的端点都走它。
+///
+/// 半径在 `base` 到 `base * 1.24` 之间呼吸，看着就是「活的」。
+fn pending_halo(painter: &egui::Painter, center: Pos2, base: f32, now: f64) {
+    let pulse = 0.5 + 0.5 * (now * easing::BREATH).sin() as f32;
+    painter.circle_filled(
+        center,
+        base * (1.0 + pulse * 0.24),
+        theme::accent_alpha(0.18),
+    );
+    painter.circle_stroke(center, base * 0.88, Stroke::new(1.5, theme::ACCENT));
+}
+
+/// 一条「胶片」进度条：一条实心蓝条，里面一条条细白纹随进度向右流动，
+/// 前沿一道细亮线。全是纯色细线，**不用渐变、也没有圆点**。
+///
+/// 动画落在**条身**上（细纹在走），所以哪怕进度一时不动，它看着也是活的。
+/// `fraction` 是 `None` 时画**不确定态**：整块胶片在轨道上来回扫。
+/// 时间从 `now` 来，与帧率无关；跑着的时候外壳会持续申请重绘。
+fn draw_progress_bar(painter: &egui::Painter, rect: Rect, fraction: Option<f32>, now: f64) {
+    if rect.width() <= 6.0 || rect.height() <= 3.0 {
+        return;
+    }
+    let r = (rect.height() * 0.28).round() as u8;
+    let radius = CornerRadius::same(r);
+    // 轨道：浅灰底 + 一道发丝边框。略方的角，比胶囊更像一条胶片。
+    painter.rect_filled(rect, radius, theme::SURFACE_3);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme::HAIRLINE),
+        StrokeKind::Inside,
+    );
+
+    // 胶片上的细纹：间距固定，整体随 `now` 向右匀速流动（与帧率无关）。
+    const SPACING: f32 = 9.0;
+    let offset = (now as f32 * 26.0).rem_euclid(SPACING);
+
+    // 画一段胶片：实心蓝底 + 流动细纹 + 前沿细亮线。
+    let draw_strip = |painter: &egui::Painter, strip: Rect| {
+        if strip.width() <= 1.5 {
+            return;
+        }
+        // 结束那头贴着轨道右端时（进度跑满）才收圆角，否则前沿是切平的。
+        let flush = strip.right() >= rect.right() - 1.0;
+        let corners = CornerRadius {
+            nw: r,
+            sw: r,
+            ne: if flush { r } else { 0 },
+            se: if flush { r } else { 0 },
+        };
+        let clip = painter.with_clip_rect(strip);
+        clip.rect_filled(strip, corners, theme::ACCENT);
+
+        let mut x = strip.left() - SPACING + offset;
+        while x < strip.right() {
+            if x > strip.left() + 1.0 {
+                clip.line_segment(
+                    [
+                        egui::pos2(x, strip.top() + 2.5),
+                        egui::pos2(x, strip.bottom() - 2.5),
+                    ],
+                    Stroke::new(1.0, Color32::from_white_alpha(56)),
+                );
+            }
+            x += SPACING;
+        }
+
+        if strip.width() > 2.5 {
+            clip.line_segment(
+                [
+                    egui::pos2(strip.right() - 1.0, strip.top()),
+                    egui::pos2(strip.right() - 1.0, strip.bottom()),
+                ],
+                Stroke::new(2.0, Color32::WHITE),
+            );
+        }
+    };
+
+    match fraction {
+        Some(fraction) => {
+            let width = rect.width() * fraction.clamp(0.0, 1.0);
+            if width <= 1.5 {
+                return;
+            }
+            let strip = Rect::from_min_size(rect.min, egui::vec2(width, rect.height()));
+            draw_strip(painter, strip);
+        }
+        None => {
+            // 不确定态：整块胶片在轨道上来回扫，细纹照旧在它自己身上流。
+            let block_w = rect.width() * 0.3;
+            let sweep = (now * 0.5).rem_euclid(1.0) as f32;
+            let x = rect.left() - block_w + sweep * (rect.width() + block_w);
+            let strip = Rect::from_min_size(
+                egui::pos2(x, rect.top()),
+                egui::vec2(block_w, rect.height()),
+            );
+            draw_strip(painter, strip);
+        }
     }
 }
 
@@ -2975,6 +3414,8 @@ mod tests {
             preview: false,
             palette: None,
             run: None,
+            step: None,
+            requirements: Requirements::default(),
         };
         refresh_ports(&mut node);
         let before = node.outputs[0].badge.clone();
@@ -3038,6 +3479,91 @@ mod tests {
         assert_eq!(graph.revision, 1);
     }
 
+    /// 拖动节点只动几何：`touch` 不阭让静态检查失效，否则每帧都会重跑检查、读一次文件头。
+    #[test]
+    fn moving_a_node_does_not_invalidate_the_static_check() {
+        let kinds = crate::catalog::all();
+        let mut graph = Graph::demo(3, &kinds);
+        let content = graph.check_revision();
+        graph.touch(); // 拖动节点走的就是它
+        assert_eq!(graph.revision, 1);
+        assert_eq!(graph.check_revision(), content, "几何变化不该让检查失效");
+    }
+
+    /// 删节点是语义变化：静态检查该失效。
+    #[test]
+    fn deleting_a_node_invalidates_the_static_check() {
+        let kinds = crate::catalog::all();
+        let mut graph = Graph::demo(3, &kinds);
+        let before = graph.check_revision();
+        graph.delete_node(0);
+        assert!(graph.check_revision() > before, "删节点该让检查失效");
+        assert!(graph.revision > 0);
+    }
+
+    /// 拖拽中把那个节点删掉：不能留下越界的 `grabbed` 下标（否则下一帧 panic）。
+    #[test]
+    fn deleting_the_grabbed_node_releases_the_grab() {
+        let kinds = crate::catalog::all();
+        let mut graph = Graph::demo(2, &kinds);
+        let last = graph.nodes.len() - 1;
+        graph.interaction.grabbed = Some(last);
+
+        graph.delete_node(last);
+
+        assert_eq!(graph.interaction.grabbed, None, "抓着的节点没了就该松手");
+        assert_eq!(graph.nodes.len(), 1);
+    }
+
+    /// 连线的稳定 id 在创建时就该算好，且和落盘用的拼法一致。
+    #[test]
+    fn a_wires_id_is_stable_and_matches_its_ports() {
+        let mut graph = canvas(&["read", "convert_image"]);
+        graph.link(
+            PortRef {
+                node: 0,
+                port: 0,
+                input: false,
+            },
+            PortRef {
+                node: 1,
+                port: 0,
+                input: true,
+            },
+        );
+        let wire = &graph.wires[0];
+        assert_eq!(
+            wire.id,
+            Wire::make_id(
+                &graph.nodes[0].id,
+                &wire.from_port,
+                &graph.nodes[1].id,
+                &wire.to_port
+            )
+        );
+    }
+
+    /// 刀光预筛：离得远的连线不该被判定为「可能切到」。
+    #[test]
+    fn the_slash_prefilter_rejects_far_away_wires() {
+        let curve = [
+            egui::pos2(0.0, 0.0),
+            egui::pos2(10.0, 0.0),
+            egui::pos2(20.0, 0.0),
+            egui::pos2(30.0, 0.0),
+        ];
+        assert!(curve_maybe_cut(
+            &curve,
+            egui::pos2(15.0, -5.0),
+            egui::pos2(15.0, 5.0)
+        ));
+        assert!(!curve_maybe_cut(
+            &curve,
+            egui::pos2(100.0, -5.0),
+            egui::pos2(100.0, 5.0)
+        ));
+    }
+
     // ---- 连线规则 ----
 
     /// 造一张只有若干节点、没有连线的空画布，节点的端口按默认参数算好。
@@ -3060,6 +3586,8 @@ mod tests {
                 preview: false,
                 palette: None,
                 run: None,
+                step: None,
+                requirements: Requirements::default(),
             };
             refresh_ports(&mut node);
             nodes.push(node);
@@ -3072,6 +3600,7 @@ mod tests {
                 zoom: 1.0,
             },
             revision: 0,
+            check_revision: 0,
             selected: None,
             interaction: Interaction::default(),
             textures: Textures::default(),
@@ -3082,6 +3611,7 @@ mod tests {
             notes: HashMap::new(),
             run_marks_hidden: false,
             downloads: Downloads::default(),
+            picker: dialog::Picker::default(),
         }
     }
 

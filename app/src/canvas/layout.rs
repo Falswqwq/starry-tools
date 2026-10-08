@@ -13,7 +13,8 @@ use starrytools_core::model::params::Params;
 use crate::canvas::graph::{
     BODY_PAD, HEADER_H, MODEL_PANEL_H, NODE_W, NOTICE_GAP, NOTICE_ICON, NOTICE_PAD, NOTICE_STACK,
     PALETTE_H, PARAMS_BOTTOM, PARAMS_GAP, PARAM_BOOL_H, PARAM_GAP, PARAM_LABEL_GAP, PARAM_LABEL_H,
-    PARAM_NOTE_GAP, PARAM_TEXT_LINE, PORT_ROW_H, PREVIEW_H, RUN_ACTIONS_H,
+    PARAM_NOTE_GAP, PARAM_TEXT_LINE, PORT_ROW_H, PREVIEW_H, PROGRESS_H, RUN_ACTIONS_H,
+    TOOL_PANEL_H,
 };
 use crate::canvas::node::{kind_of, Node};
 use crate::catalog::{Control, Kind, Param};
@@ -42,7 +43,10 @@ pub(crate) fn notice_text_width() -> f32 {
 /// 不会再出现「高度算了一套、画的是另一套」。
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CardSections {
-    pub(crate) model: f32,
+    /// 「缺东西」面板（缺模型 / 缺外部程序），紧贴参数区。
+    pub(crate) requirement: f32,
+    /// 运行中的进度块（帧计数 + 进度条）。
+    pub(crate) progress: f32,
     pub(crate) preview: f32,
     pub(crate) palette: f32,
     pub(crate) warn: f32,
@@ -52,7 +56,13 @@ pub(crate) struct CardSections {
 
 impl CardSections {
     pub(crate) fn total(&self) -> f32 {
-        self.model + self.preview + self.palette + self.warn + self.error + self.actions
+        self.requirement
+            + self.progress
+            + self.preview
+            + self.palette
+            + self.warn
+            + self.error
+            + self.actions
     }
 }
 
@@ -64,7 +74,8 @@ pub(crate) fn card_sections(
 ) -> CardSections {
     let (warn, error, actions) = run_extra(node, notes);
     CardSections {
-        model: model_panel_height(kinds, node),
+        requirement: requirement_panel_height(kinds, node),
+        progress: if node.step.is_some() { PROGRESS_H } else { 0.0 },
         preview: if node.preview { PREVIEW_H } else { 0.0 },
         palette: if node
             .palette
@@ -88,8 +99,8 @@ pub(crate) fn height_of_node(
     notes: &HashMap<String, TextBlock>,
 ) -> f32 {
     let sections = card_sections(kinds, node, notes);
-    // 模型面板紧贴参数区，中间不留 `BODY_PAD` 那条缝；其余段与参数区之间才留。
-    let gap = if sections.model > 0.0 {
+    // 「缺东西」面板紧贴参数区，中间不留 `BODY_PAD` 那条缝；其余段与参数区之间才留。
+    let gap = if sections.requirement > 0.0 {
         0.0
     } else if sections.total() > 0.0 {
         BODY_PAD
@@ -99,11 +110,17 @@ pub(crate) fn height_of_node(
     node_body_top(node) + params_height_of(kinds, node, notes) + sections.total() + gap
 }
 
-/// 模型「下载面板」占多高（不缺模型时是 0）。面板的控件在 `draw_node_controls` 里画。
-pub(crate) fn model_panel_height(kinds: &[Kind], node: &Node) -> f32 {
-    match kind_of(kinds, node) {
-        Some(kind) if kind.model_missing(&node.params) => MODEL_PANEL_H,
-        _ => 0.0,
+/// 「缺东西」面板占多高（什么都不缺时是 0）：缺模型给下载面板，缺外部程序给一句提示。
+///
+/// 判定读的是节点上缓存的 [`Node::requirements`]（见 `refresh_ports`），
+/// 绘制路径上不碰磁盘。
+pub(crate) fn requirement_panel_height(_kinds: &[Kind], node: &Node) -> f32 {
+    if node.requirements.model_missing {
+        MODEL_PANEL_H
+    } else if node.requirements.tool_missing {
+        TOOL_PANEL_H
+    } else {
+        0.0
     }
 }
 

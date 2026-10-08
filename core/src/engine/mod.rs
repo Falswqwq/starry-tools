@@ -15,7 +15,6 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::error::AppError;
-use crate::image_io::ImageValue;
 use crate::interaction::Interaction;
 use crate::model::node_kind::{PortDef, PARAM_PORT_PREFIX};
 use crate::model::port_type::PortType;
@@ -571,6 +570,7 @@ pub fn run_with(
                 inputs: &inputs,
                 warnings: &mut warnings,
                 interaction,
+                progress,
             };
             (spec.run)(&mut args)
         };
@@ -600,6 +600,10 @@ pub fn run_with(
                                 preview = Some(url);
                             }
                         }
+                    }
+
+                    // 产物（图像或媒体）自动落到本次运行的输出目录，方便对照。
+                    if let Some((bytes, extension)) = value.product() {
                         if !spec.kind.is_source {
                             if let Some(dir) = &output_dir {
                                 let file = dir.join(output_file_name(
@@ -607,9 +611,9 @@ pub fn run_with(
                                     &spec.kind.name,
                                     &port.label,
                                     multiple_ports,
-                                    image,
+                                    extension,
                                 ));
-                                if image.save_to(&file).is_ok() {
+                                if std::fs::write(&file, bytes).is_ok() {
                                     path = Some(file.to_string_lossy().to_string());
                                 }
                             }
@@ -737,7 +741,7 @@ fn output_file_name(
     node_name: &str,
     port_label: &str,
     multiple_ports: bool,
-    image: &ImageValue,
+    extension: &str,
 ) -> String {
     // 只有多输出端口的节点才需要在文件名里带上端口名。
     let stem = if multiple_ports {
@@ -750,7 +754,7 @@ fn output_file_name(
     } else {
         format!("{:02}-{}", position + 1, file_slug(node_name))
     };
-    format!("{stem}.{}", image.format().extension())
+    format!("{stem}.{extension}")
 }
 
 fn file_slug(text: &str) -> String {

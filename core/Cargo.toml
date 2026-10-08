@@ -11,9 +11,11 @@ publish = false
 name = "starrytools_core"
 
 [features]
-default = ["onnx"]
-# ONNX 推理（背景移除）。`tract` 是纯 Rust 的，不需要额外装原生库。
+default = ["onnx", "video"]
+# ONNX 推理（背景移除）。`tract` 是纯 Rust，不需要额外装原生库。
 onnx = ["dep:tract-onnx"]
+# 视频处理（调用外部 ffmpeg 可执行文件，不引入任何 crate）。
+video = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

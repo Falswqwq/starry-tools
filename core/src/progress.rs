@@ -10,11 +10,29 @@ use std::sync::mpsc::Sender;
 
 use crate::engine::NodeRunResult;
 
+/// 一个节点运行**进行中**的进度（有的话）。
+///
+/// 只有会跑很久、又能报进度的节点（目前是视频压缩）才会发；界面据此在卡片上画
+/// 进度条与帧计数。
+#[derive(Debug, Clone, Default)]
+pub struct NodeStep {
+    /// 完成比例。`None` = 算不出来（总帧数 / 时长都没有）—— 界面画不确定态。
+    pub fraction: Option<f32>,
+    /// 已经处理的帧数。
+    pub frame: Option<u64>,
+    /// 总帧数（估不出来就是 `None`）。
+    pub total_frames: Option<u64>,
+    /// 一句附注，比如 `"24 帧/s"`。
+    pub text: Option<String>,
+}
+
 /// 引擎推给界面的一条进度。
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
     /// 开始跑某个节点了。
     Started { node_id: String },
+    /// 正在跑的那个节点报了进度。
+    Step { node_id: String, step: NodeStep },
     /// 某个节点结束了（跑完 / 失败 / 跳过），带着它的完整结果。
     ///
     /// 当初只发「状态 + 耗时」；现在连 `NodeRunResult` 一起发，界面就能逐一贴上缩略图、
@@ -40,6 +58,14 @@ impl Progress {
     pub fn started(&self, node_id: &str) {
         self.send(ProgressEvent::Started {
             node_id: node_id.to_string(),
+        });
+    }
+
+    /// 某个节点报了运行中的进度。
+    pub fn step(&self, node_id: &str, step: NodeStep) {
+        self.send(ProgressEvent::Step {
+            node_id: node_id.to_string(),
+            step,
         });
     }
 

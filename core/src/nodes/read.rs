@@ -1,7 +1,7 @@
 //! 「读取」节点 —— 从硬盘上读一个文件。
 //!
-//! 「类型」参数说这个文件是什么：**图像文件**按图像解码，**文本**当文本读进来。
-//! 输出类型跟着文件与类型自动推断（和「输入」原来那套一致）。
+//! 「类型」参数说这个文件是什么：**图像文件**按图像解码，**文本**当文本读进来，
+//! **视频文件**（启用视频功能时）读成视频产物。输出类型跟着文件与类型自动推断。
 //!
 //! 没有「数字」这一档 —— 从一个文件里读一个数太拧巴了；要给一个数字，直接用
 //! 「数字」字面量节点。
@@ -16,10 +16,17 @@ use crate::model::port_type::{ImageFormat, PortType};
 use crate::model::value::{NodeArgs, Value, ValueMap};
 use crate::registry::NodeSpec;
 
+#[cfg(feature = "video")]
+use crate::features::video::VideoFormat;
+#[cfg(feature = "video")]
+use crate::media::MediaValue;
+
 pub const KIND: &str = "read";
 
 const VALUE_TYPE_IMAGE: &str = "image";
 const VALUE_TYPE_TEXT: &str = "text";
+#[cfg(feature = "video")]
+const VALUE_TYPE_VIDEO: &str = "video";
 
 /// 文本文件对话框里认的扩展名。
 const TEXT_EXTENSIONS: &[&str] = &[
@@ -28,68 +35,98 @@ const TEXT_EXTENSIONS: &[&str] = &[
 ];
 
 pub fn spec() -> NodeSpec {
+    #[allow(unused_mut)] // 视频功能关掉时不会有 push。
+    let mut type_options = vec![
+        SelectOption::new(VALUE_TYPE_IMAGE, "图像文件"),
+        SelectOption::new(VALUE_TYPE_TEXT, "文本文件"),
+    ];
+    #[cfg(feature = "video")]
+    type_options.push(SelectOption::new(VALUE_TYPE_VIDEO, "视频文件"));
+
+    #[allow(unused_mut)] // 视频功能关掉时不会 push 视频参数。
+    let mut params = vec![
+        ParamDef::new(
+            "valueType",
+            "类型",
+            ParamSpec::Select {
+                default: VALUE_TYPE_IMAGE.into(),
+                options: type_options,
+            },
+        ),
+        ParamDef::new(
+            "path",
+            "图像文件",
+            ParamSpec::File {
+                default: String::new(),
+                dialog_title: "选择图像文件".into(),
+                extensions: ImageFormat::all_extensions(),
+                directory: false,
+            },
+        )
+        .visible_when("valueType", &[VALUE_TYPE_IMAGE]),
+        ParamDef::new(
+            "textPath",
+            "文本文件",
+            ParamSpec::File {
+                default: String::new(),
+                dialog_title: "选择文本文件".into(),
+                extensions: TEXT_EXTENSIONS.iter().map(|ext| ext.to_string()).collect(),
+                directory: false,
+            },
+        )
+        .visible_when("valueType", &[VALUE_TYPE_TEXT]),
+    ];
+    #[cfg(feature = "video")]
+    params.push(
+        ParamDef::new(
+            "videoPath",
+            "视频文件",
+            ParamSpec::File {
+                default: String::new(),
+                dialog_title: "选择视频文件".into(),
+                extensions: VideoFormat::all_extensions(),
+                directory: false,
+            },
+        )
+        .visible_when("valueType", &[VALUE_TYPE_VIDEO]),
+    );
+
+    #[allow(unused_mut)] // 视频功能关掉时不会有 push。
+    let mut notes = vec![
+        "「类型」决定怎么读：图像文件按图像解码，文本文件按 UTF-8 文本读进来。".into(),
+        "图像格式以**文件头**为准 —— 输出类型跟着它变，下游的类型检查因此是准的。".into(),
+        "工作流里只记路径，不会把文件内容一起存下来。文件挪走之后要重新选一次。".into(),
+    ];
+    #[cfg(feature = "video")]
+    notes.push("视频只按扩展名判容器格式，不会把整个文件读进内存 —— 压缩时再说。".into());
+
     NodeSpec::dynamic(
         NodeKind {
             id: KIND.into(),
             name: "读取".into(),
             category: "来源".into(),
-            description: "从硬盘上读一个文件：图像按图像解码，文本按文本读进来。\
-                          类型跟着文件自动推断。"
+            description: "从硬盘上读一个文件：图像按图像解码，文本按文本读进来，\
+                          视频读成视频产物。类型跟着文件自动推断。"
                 .into(),
             is_source: true,
             inputs: vec![],
             // 声明里放泛化的 `Any`（卡片上显示 `ANY`）；真正的类型由 `output_ports` 现算。
             outputs: vec![PortDef::new("out", "值", PortType::Any)],
-            params: vec![
-                ParamDef::new(
-                    "valueType",
-                    "类型",
-                    ParamSpec::Select {
-                        default: VALUE_TYPE_IMAGE.into(),
-                        options: vec![
-                            SelectOption::new(VALUE_TYPE_IMAGE, "图像文件"),
-                            SelectOption::new(VALUE_TYPE_TEXT, "文本文件"),
-                        ],
-                    },
-                ),
-                ParamDef::new(
-                    "path",
-                    "图像文件",
-                    ParamSpec::File {
-                        default: String::new(),
-                        dialog_title: "选择图像文件".into(),
-                        extensions: ImageFormat::all_extensions(),
-                        directory: false,
-                    },
-                )
-                .visible_when("valueType", &[VALUE_TYPE_IMAGE]),
-                ParamDef::new(
-                    "textPath",
-                    "文本文件",
-                    ParamSpec::File {
-                        default: String::new(),
-                        dialog_title: "选择文本文件".into(),
-                        extensions: TEXT_EXTENSIONS.iter().map(|ext| ext.to_string()).collect(),
-                        directory: false,
-                    },
-                )
-                .visible_when("valueType", &[VALUE_TYPE_TEXT]),
-            ],
-            notes: vec![
-                "「类型」决定怎么读：图像文件按图像解码，文本文件按 UTF-8 文本读进来。".into(),
-                "图像格式以**文件头**为准 —— 输出类型跟着它变，下游的类型检查因此是准的。".into(),
-                "工作流里只记路径，不会把文件内容一起存下来。文件挪走之后要重新选一次。".into(),
-            ],
+            params,
+            notes,
         },
         output_ports,
         run,
     )
 }
 
-/// 输出类型：图像按文件头的真实格式，文本就是 `Text`，还没选文件时是 `Any`。
+/// 输出类型：图像按文件头的真实格式，文本就是 `Text`，视频按容器格式，
+/// 还没选文件时是 `Any`。
 fn output_ports(params: &Params) -> Vec<PortDef> {
     let port_type = match params::string(params, "valueType", VALUE_TYPE_IMAGE).as_str() {
         VALUE_TYPE_TEXT => PortType::Text,
+        #[cfg(feature = "video")]
+        VALUE_TYPE_VIDEO => PortType::Video(selected_video_format(params)),
         _ => match selected_image_format(params) {
             ImageFormat::Any => PortType::Any,
             format => PortType::Image(format),
@@ -109,7 +146,24 @@ fn selected_image_format(params: &Params) -> ImageFormat {
         .unwrap_or(ImageFormat::Any)
 }
 
+/// 视频容器按扩展名猜。认不出来给 [`VideoFormat::Any`]。
+#[cfg(feature = "video")]
+fn selected_video_format(params: &Params) -> VideoFormat {
+    params::string_opt(params, "videoPath")
+        .and_then(|path| VideoFormat::from_extension(&path))
+        .unwrap_or(VideoFormat::Any)
+}
+
 fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
+    #[cfg(feature = "video")]
+    if params::string(args.params, "valueType", VALUE_TYPE_IMAGE) == VALUE_TYPE_VIDEO {
+        let path = params::string_opt(args.params, "videoPath")
+            .ok_or_else(|| NodeError::new("还没有选择视频文件"))?;
+        let format = VideoFormat::from_extension(&path).unwrap_or(VideoFormat::Mp4);
+        let value = MediaValue::open(format.name(), Path::new(&path))?;
+        return Ok(crate::model::value::one_output("out", Value::Media(value)));
+    }
+
     let value = if params::string(args.params, "valueType", VALUE_TYPE_IMAGE) == VALUE_TYPE_TEXT {
         let path = params::string_opt(args.params, "textPath")
             .ok_or_else(|| NodeError::new("还没有选择文本文件"))?;
