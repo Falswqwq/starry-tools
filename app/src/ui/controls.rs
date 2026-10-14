@@ -18,13 +18,42 @@ use crate::ui::widgets;
 /// 单个控件一行的高度（流坐标）—— 取色条也用它。
 pub(crate) const PARAM_CONTROL_H: f32 = 24.0;
 
+/// 动态端口控件：一行的高度、行间缝、底部加号的高度（流坐标）。
+pub(crate) const PORTS_ROW_H: f32 = 22.0;
+pub(crate) const PORTS_GAP: f32 = 4.0;
+pub(crate) const PORTS_ADD_H: f32 = 24.0;
+/// 行里那个开关的标称高度（和节点参数的开关一样大）。
+const SWITCH_H: f32 = 20.0;
+
+/// 动态端口控件里第 `row` 行（0 起）的中心相对控件顶部的高度。
+/// 挂在参数栏上的输出端口就落在这里 —— 绘制与端口定位共用。
+pub(crate) fn ports_row_center(row: usize) -> f32 {
+    row as f32 * (PORTS_ROW_H + PORTS_GAP) + PORTS_ROW_H * 0.5
+}
+
+/// 参数里存的动态端口**个数**。
+pub(crate) fn ports_count(params: &Params, id: &str) -> usize {
+    params
+        .get(id)
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0) as usize
+}
+
+/// 动态端口控件要占多高。绘制与估高共用它 —— 两者对不上会要么出框要么留白。
+pub(crate) fn ports_height(rows: usize) -> f32 {
+    rows as f32 * (PORTS_ROW_H + PORTS_GAP) + PORTS_ADD_H
+}
+
 /// 一个控件这一帧发生了什么。
 ///
 /// 文件框**不在这里弹对话框** —— 弹原生框会阻塞整帧，所以只把「用户想选文件」
 /// 这件事报出来，由画布拿后台选择器去开（见 [`crate::state::dialog`]）。
 pub(crate) enum ControlEvent {
-    /// 参数被改了。
+    /// 本参数被改了。
     Changed(Value),
+    /// 改了**另一个**参数（动态端口行上的阻塞开关写 `block{k}`）。
+    SetOther { param: String, value: Value },
     /// 用户点了文件 / 目录框，要开一个选择框。
     PickFile {
         title: String,
@@ -139,7 +168,159 @@ pub(crate) fn control(
         }
 
         Control::File { .. } => file_field(ui, id, rect, current, &param.control, zoom, disabled),
+
+        Control::Ports { min, max, blocking } => ports_field(
+            ui,
+            id,
+            rect,
+            &param.id,
+            params,
+            *min,
+            *max,
+            *blocking,
+            &param.label,
+            zoom,
+            disabled,
+        ),
     }
+}
+
+/// 一排动态端口：一列带序号的输出，每行一个删除叉（和前 `min` 行不给），
+/// 开了 `blocking` 时每行还带一个**阻塞开关**；底部一个加号。
+///
+/// 返回的 `Changed` 是新**个数**；行上的阻塞开关返回 `SetOther`（写 `block{序号}`）。
+/// 真正多一个 / 少一个端口由 `refresh_ports` 重算 —— 控件本身不知道端口长什么样。
+#[allow(clippy::too_many_arguments)]
+fn ports_field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    rect: Rect,
+    param_id: &str,
+    params: &Params,
+    min: usize,
+    max: usize,
+    blocking: bool,
+    label: &str,
+    zoom: f32,
+    disabled: bool,
+) -> Option<ControlEvent> {
+    let count = ports_count(params, param_id);
+    let painter = ui.painter().clone();
+    let mut event: Option<ControlEvent> = None;
+    let mut y = rect.top();
+
+    for k in 0..count {
+        let row = Rect::from_min_size(
+            egui::pos2(rect.left(), y),
+            egui::vec2(rect.width(), PORTS_ROW_H * zoom),
+        );
+        shell(
+            &painter,
+            row,
+            theme::R_CTL,
+            if disabled {
+                theme::SURFACE_2
+            } else {
+                theme::SURFACE
+            },
+        );
+        // 序号（从上到下 1、2、3……）。
+        painter.text(
+            egui::pos2(row.left() + 9.0 * zoom, row.center().y),
+            Align2::LEFT_CENTER,
+            format!("{}", k + 1),
+            FontId::monospace(11.0 * zoom),
+            theme::INK_2,
+        );
+
+        // 阻塞开关（序号 k+1 对应参数 `block{k+1}`，缺省当真）。
+        // 开关右边是删除叉，所以先给它留出位置，再往左摆一个「阻塞」标签。
+        if blocking {
+            let mut value = params
+                .get(&format!("block{}", k + 1))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let switch = Rect::from_min_size(
+                egui::pos2(
+                    row.right() - 56.0 * zoom,
+                    row.center().y - SWITCH_H * 0.5 * zoom,
+                ),
+                egui::vec2(30.0 * zoom, SWITCH_H * zoom),
+            );
+            painter.text(
+                egui::pos2(switch.left() - 6.0 * zoom, row.center().y),
+                Align2::RIGHT_CENTER,
+                "阻塞".to_string(),
+                FontId::monospace(10.0 * zoom),
+                theme::INK_3,
+            );
+            if disabled {
+                toggle_disabled(&painter, switch, value);
+            } else if widgets::switch(ui, id.with(("block", k)), switch, &mut value) {
+                event = Some(ControlEvent::SetOther {
+                    param: format!("block{}", k + 1),
+                    value: serde_json::json!(value),
+                });
+            }
+        }
+
+        // 前 `min` 个是必留的，不给删除按钮。
+        if !disabled && k >= min {
+            let hit = Rect::from_center_size(
+                egui::pos2(row.right() - 12.0 * zoom, row.center().y),
+                egui::Vec2::splat(18.0 * zoom),
+            );
+            let resp = ui.interact(hit, id.with(("del", k)), Sense::click());
+            let color = if resp.hovered() {
+                theme::DANGER
+            } else {
+                theme::INK_3
+            };
+            icons::x(&painter, widgets::icon_rect(hit, 11.0 * zoom), color);
+            if resp.clicked() {
+                event = Some(ControlEvent::Changed(serde_json::json!(
+                    count.saturating_sub(1) as f64
+                )));
+            }
+        }
+        y += (PORTS_ROW_H + PORTS_GAP) * zoom;
+    }
+
+    // 底部的加号。
+    let add = Rect::from_min_size(
+        egui::pos2(rect.left(), y),
+        egui::vec2(rect.width(), PORTS_ADD_H * zoom),
+    );
+    if disabled {
+        disabled_shell(&painter, add, theme::R_CTL);
+    } else {
+        shell(&painter, add, theme::R_CTL, theme::SURFACE_2);
+        let resp = ui.interact(add, id.with("add"), Sense::click());
+        let color = if resp.hovered() {
+            theme::ACCENT
+        } else {
+            theme::INK_3
+        };
+        let icon = Rect::from_center_size(
+            egui::pos2(add.left() + 13.0 * zoom, add.center().y),
+            egui::Vec2::splat(12.0 * zoom),
+        );
+        icons::plus(&painter, icon, color);
+        painter.text(
+            egui::pos2(icon.right() + 6.0 * zoom, add.center().y),
+            Align2::LEFT_CENTER,
+            format!("增加{label}"),
+            FontId::monospace(10.5 * zoom),
+            color,
+        );
+        if resp.clicked() {
+            event = Some(ControlEvent::Changed(serde_json::json!(
+                (count + 1).min(max) as f64
+            )));
+        }
+    }
+
+    event
 }
 
 /// 控件外壳：一块圆角底色 + 发丝边。可编辑 / 禁用两种状态只是底色不同，

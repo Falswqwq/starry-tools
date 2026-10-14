@@ -351,7 +351,7 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 16, "内置工具的数量（改动时请一并更新这条）");
+    assert_eq!(kinds.len(), 20, "内置工具的数量（改动时请一并更新这条）");
 
     let convert = kinds
         .iter()
@@ -1155,7 +1155,7 @@ fn params_get_optional_input_ports() {
 
 #[test]
 fn source_nodes_have_no_param_ports() {
-    // 字面量节点本身就是那个值，没有上游可接。
+    // 字面量节点本身就是那个值，没有上游可接数据 —— 但会有一个「空输入」用来排先后。
     for id in [
         crate::nodes::literal::KIND_TEXT,
         crate::nodes::literal::KIND_NUMBER,
@@ -1163,9 +1163,12 @@ fn source_nodes_have_no_param_ports() {
     ] {
         let spec = registry().get(id).unwrap();
         assert!(spec.kind.is_source, "{id} 该是起点节点");
+        let ports = spec.kind.inputs_for(&spec.kind.default_params());
+        assert_eq!(ports.len(), 1, "{id} 只该有那个空输入");
+        assert_eq!(ports[0].ty, PortType::Void);
         assert!(
-            spec.kind.inputs_for(&spec.kind.default_params()).is_empty(),
-            "{id} 不该有输入端口"
+            ports.iter().all(|port| !port.is_param()),
+            "{id} 不该有参数端口"
         );
     }
 }
@@ -1676,4 +1679,395 @@ fn a_blocking_node_without_an_interface_fails_cleanly() {
         "{:?}",
         cropped.error
     );
+}
+
+// ---------------------------------------------------------------------------
+// 逻辑节点与列表
+// ---------------------------------------------------------------------------
+
+/// 「顺序执行」的输出个数跟着 `outs` 参数走；它不需要数据输入，因此自动带一个空输入。
+#[test]
+fn sequence_ports_follow_its_count_param() {
+    let spec = registry().get(crate::nodes::sequence::KIND).unwrap();
+    let mut params = spec.kind.default_params();
+    assert_eq!(spec.outputs_for(&params).len(), 1, "默认就一个输出");
+
+    params.insert("outs".into(), serde_json::json!(3.0));
+    let ports = spec.outputs_for(&params);
+    assert_eq!(
+        ports.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["out1", "out2", "out3"]
+    );
+    assert!(ports[0].required, "第一个是必须输出");
+    assert!(ports[1..].iter().all(|p| !p.required), "其余的都可删");
+    assert!(ports.iter().all(|p| p.ty == PortType::Void));
+    // 输出都挂在参数栏的对应行上 —— 节点顶部不该再有输出。
+    assert_eq!(
+        ports.iter().map(|p| p.panel_row).collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(2)]
+    );
+
+    // 不需要数据输入 —— 自动一个空输入。
+    let inputs = spec.kind.inputs_for(&params);
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].id, crate::model::node_kind::VOID_INPUT_PORT);
+    assert_eq!(inputs[0].ty, PortType::Void);
+}
+
+/// 「遍历」的端口：一个循环体输出 + 可选的「结束」；默认不限制遍历数目。
+#[test]
+fn iterate_has_a_single_body_output_and_an_optional_finally() {
+    let spec = registry().get(crate::nodes::iterate::KIND).unwrap();
+    let params = spec.kind.default_params();
+    let ports = spec.outputs_for(&params);
+    assert_eq!(
+        ports.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        vec!["item", "finally"]
+    );
+    // 「元素」是必填的（不接就等于循环体什么都不做）；「结束」可选。
+    assert!(ports[0].required, "元素是必填输出");
+    assert!(!ports[1].required, "结束时可选输出");
+    assert_eq!(spec.kind.inputs_for(&params)[0].ty, PortType::any_list());
+    assert_eq!(params["max"], serde_json::json!(0.0), "默认 0 = 不限制");
+}
+
+/// 「遍历」对每个元素把下游那一支跑一遍。
+#[test]
+fn iterate_runs_the_body_once_per_element() {
+    let src = workspace("iterate-src");
+    image_fixture(&src, "png", 2, 2);
+    // 第二个文件（同一种格式，类型才对得上「缩放图像」）。
+    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
+
+    let mut dir_params = defaults(crate::nodes::read_dir::KIND);
+    dir_params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
+    let mut up_params = defaults(crate::nodes::upscale::KIND);
+    up_params.insert("percent".into(), serde_json::json!(200.0));
+
+    let mut workflow = Workflow::new("循环");
+    workflow
+        .nodes
+        .push(node("d", crate::nodes::read_dir::KIND, dir_params));
+    workflow.nodes.push(node(
+        "it",
+        crate::nodes::iterate::KIND,
+        defaults(crate::nodes::iterate::KIND),
+    ));
+    workflow
+        .nodes
+        .push(node("up", crate::nodes::upscale::KIND, up_params));
+    workflow.edges.push(edge("e1", "d", "out", "it", "list"));
+    workflow.edges.push(edge(
+        "e2",
+        "it",
+        crate::nodes::iterate::ITEM_PORT,
+        "up",
+        "image",
+    ));
+
+    let out = workspace("iterate-out");
+    let report = run(&workflow, None, &out).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+
+    let it = report.nodes.iter().find(|r| r.node_id == "it").unwrap();
+    assert!(
+        it.warnings.iter().any(|w| w.contains("遍历了 2 个元素")),
+        "{:?}",
+        it.warnings
+    );
+    let up = report.nodes.iter().find(|r| r.node_id == "up").unwrap();
+    assert_eq!(up.status, NodeStatus::Ok);
+
+    // 循环体跑了两轮 —— 自动输出目录里该有两份产物。
+    let produced: Vec<_> = std::fs::read_dir(out.join("循环"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(produced.len(), 2, "两轮该落两份");
+}
+
+/// 「最大遍历数目」限制跑几轮；0 是不限制。
+#[test]
+fn iterate_honours_the_maximum() {
+    let src = workspace("iterate-max-src");
+    image_fixture(&src, "png", 2, 2);
+    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
+
+    let mut dir_params = defaults(crate::nodes::read_dir::KIND);
+    dir_params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
+    let mut it_params = defaults(crate::nodes::iterate::KIND);
+    it_params.insert("max".into(), serde_json::json!(1.0));
+
+    let mut workflow = Workflow::new("限量");
+    workflow
+        .nodes
+        .push(node("d", crate::nodes::read_dir::KIND, dir_params));
+    workflow
+        .nodes
+        .push(node("it", crate::nodes::iterate::KIND, it_params));
+    workflow.nodes.push(node(
+        "up",
+        crate::nodes::upscale::KIND,
+        defaults(crate::nodes::upscale::KIND),
+    ));
+    workflow.edges.push(edge("e1", "d", "out", "it", "list"));
+    workflow.edges.push(edge(
+        "e2",
+        "it",
+        crate::nodes::iterate::ITEM_PORT,
+        "up",
+        "image",
+    ));
+
+    let out = workspace("iterate-max-out");
+    let report = run(&workflow, None, &out).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let it = report.nodes.iter().find(|r| r.node_id == "it").unwrap();
+    assert!(
+        it.warnings.iter().any(|w| w.contains("遍历了 1 个元素")),
+        "{:?}",
+        it.warnings
+    );
+    let produced = std::fs::read_dir(out.join("限量"))
+        .unwrap()
+        .flatten()
+        .count();
+    assert_eq!(produced, 1, "限量到 1 就只跑一轮");
+}
+
+/// 嵌套的遍历：外层收到内层循环的节点，`direct` / `reach` 要能正确划分。
+#[test]
+fn nested_loops_partition_into_direct_scopes() {
+    let mut workflow = Workflow::new("嵌套");
+    let it = defaults(crate::nodes::iterate::KIND);
+    let rn = defaults(crate::nodes::rename::KIND);
+    for (id, kind, params) in [
+        ("outer", crate::nodes::iterate::KIND, it.clone()),
+        ("x", crate::nodes::rename::KIND, rn.clone()),
+        ("inner", crate::nodes::iterate::KIND, it.clone()),
+        ("y", crate::nodes::rename::KIND, rn.clone()),
+        ("z", crate::nodes::rename::KIND, rn.clone()),
+    ] {
+        workflow.nodes.push(node(id, kind, params));
+    }
+    // outer.item → x → inner.list → inner.item → y → z
+    workflow.edges.push(edge(
+        "e1",
+        "outer",
+        crate::nodes::iterate::ITEM_PORT,
+        "x",
+        "in",
+    ));
+    workflow.edges.push(edge("e2", "x", "out", "inner", "list"));
+    workflow.edges.push(edge(
+        "e3",
+        "inner",
+        crate::nodes::iterate::ITEM_PORT,
+        "y",
+        "in",
+    ));
+    workflow.edges.push(edge("e4", "y", "out", "z", "in"));
+    // 循环体 y 还有一个**外部**依赖 w —— 该被排到内层循环之前。
+    workflow
+        .nodes
+        .push(node("w", crate::nodes::rename::KIND, rn.clone()));
+    workflow.edges.push(edge("e5", "w", "out", "y", "in"));
+
+    let sets = super::loop_sets(&workflow);
+    let outer = &sets["outer"];
+    assert_eq!(
+        sorted(&outer.direct),
+        vec!["inner", "x"],
+        "内层循环自己留在外层里"
+    );
+    assert!(outer.reach.contains("y") && outer.reach.contains("z"));
+    let inner = &sets["inner"];
+    assert_eq!(sorted(&inner.direct), vec!["y", "z"]);
+    assert_eq!(inner.reach.len(), 2, "内层不该把外层的节点算进来");
+
+    // 内层的外部依赖 w 该排到内层之前。
+    let ordering = super::loop_ordering(&workflow);
+    assert!(ordering.contains(&("w", "inner")), "{:?}", ordering);
+    // 外层自己直接作用域里的节点（x / inner）都不算「外部」。
+    assert!(
+        !ordering.iter().any(|pair| pair.1 == "outer"),
+        "{:?}",
+        ordering
+    );
+}
+
+fn sorted(set: &HashSet<String>) -> Vec<String> {
+    let mut values: Vec<String> = set.iter().cloned().collect();
+    values.sort();
+    values
+}
+
+/// 「图像分割」把 sprite 图切成一个列表（每块一张图）。
+#[test]
+fn split_image_cuts_a_sprite_sheet_into_a_list() {
+    let dir = workspace("split-src");
+    let path = dir.join("sheet.png");
+    let mut sheet = RgbaImage::from_pixel(6, 6, Rgba([0, 0, 0, 0]));
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        sheet.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+    }
+    for (x, y) in [(4, 4), (5, 4), (4, 5), (5, 5)] {
+        sheet.put_pixel(x, y, Rgba([0, 0, 255, 255]));
+    }
+    sheet.save(&path).unwrap();
+
+    let mut workflow = Workflow::new("分割");
+    workflow.nodes.push(input_node("in", &path));
+    workflow.nodes.push(node(
+        "split",
+        crate::nodes::split::KIND,
+        defaults(crate::nodes::split::KIND),
+    ));
+    workflow
+        .edges
+        .push(edge("e1", "in", "out", "split", "image"));
+
+    let report = run(&workflow, None, &workspace("split-out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let out = &report.nodes[1].outputs[0];
+    assert_eq!(
+        out.ty,
+        PortType::list_of(PortType::Image(ImageFormat::Png)),
+        "输出该是 List[Png]"
+    );
+    assert_eq!(out.summary, "列表 · 2 项");
+}
+
+/// 列表值的类型跟着元素走；不同元素类型降级成 `List[Any]`。
+#[test]
+fn a_list_value_derives_its_element_type() {
+    let same = Value::List(vec![Value::text("a"), Value::text("b")]);
+    assert_eq!(same.port_type(), PortType::list_of(PortType::Text));
+
+    let mixed = Value::List(vec![Value::text("a"), Value::Number(1.0)]);
+    assert_eq!(mixed.port_type(), PortType::list_of(PortType::Any));
+
+    assert_eq!(Value::List(vec![]).port_type(), PortType::any_list());
+}
+
+/// 「顺序执行」的输出序号决定分支先后：即使「后一个分支」的节点先加入列表，也要后跑。
+#[test]
+fn sequence_orders_branches_by_output_index() {
+    let mut seq_params = defaults(crate::nodes::sequence::KIND);
+    seq_params.insert("outs".into(), serde_json::json!(2.0));
+
+    let mut text_params = defaults(crate::nodes::literal::KIND_TEXT);
+    text_params.insert("value".into(), serde_json::json!("second"));
+
+    let mut workflow = Workflow::new("顺序");
+    // 故意让第二个分支的节点先出现 —— 拓扑序得靠排序约束把它压到后面。
+    workflow.nodes.push(node(
+        "b2",
+        crate::nodes::literal::KIND_TEXT,
+        text_params.clone(),
+    ));
+    text_params.insert("value".into(), serde_json::json!("first"));
+    workflow
+        .nodes
+        .push(node("b1", crate::nodes::literal::KIND_TEXT, text_params));
+    workflow
+        .nodes
+        .push(node("s", crate::nodes::sequence::KIND, seq_params));
+    workflow.edges.push(edge(
+        "e2",
+        "s",
+        "out2",
+        "b2",
+        crate::model::node_kind::VOID_INPUT_PORT,
+    ));
+    workflow.edges.push(edge(
+        "e1",
+        "s",
+        "out1",
+        "b1",
+        crate::model::node_kind::VOID_INPUT_PORT,
+    ));
+
+    let report = run(&workflow, None, &workspace("sequence-order")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let pos = |id: &str| report.order.iter().position(|n| n == id).unwrap();
+    assert!(pos("s") < pos("b1"), "顺序执行先跑");
+    assert!(
+        pos("b1") < pos("b2"),
+        "out1 的分支该先跑：{:?}",
+        report.order
+    );
+}
+
+/// 把 out1 的阻塞开关关掉：两段之间不再有先后约束。
+#[test]
+fn sequence_non_blocking_output_drops_the_ordering() {
+    let mut seq_params = defaults(crate::nodes::sequence::KIND);
+    seq_params.insert("outs".into(), serde_json::json!(2.0));
+    seq_params.insert("block1".into(), serde_json::json!(false));
+
+    let mut second = defaults(crate::nodes::literal::KIND_TEXT);
+    second.insert("value".into(), serde_json::json!("second"));
+    let mut first = defaults(crate::nodes::literal::KIND_TEXT);
+    first.insert("value".into(), serde_json::json!("first"));
+
+    let mut workflow = Workflow::new("非阻塞");
+    // 这里故意让 b2 在 b1 之前 —— 非阻塞时顺序就按插入序，不再被“抢”过来。
+    workflow
+        .nodes
+        .push(node("b2", crate::nodes::literal::KIND_TEXT, second));
+    workflow
+        .nodes
+        .push(node("b1", crate::nodes::literal::KIND_TEXT, first));
+    workflow
+        .nodes
+        .push(node("s", crate::nodes::sequence::KIND, seq_params));
+    workflow.edges.push(edge(
+        "e2",
+        "s",
+        "out2",
+        "b2",
+        crate::model::node_kind::VOID_INPUT_PORT,
+    ));
+    workflow.edges.push(edge(
+        "e1",
+        "s",
+        "out1",
+        "b1",
+        crate::model::node_kind::VOID_INPUT_PORT,
+    ));
+
+    let report = run(&workflow, None, &workspace("seq-nonblock")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let pos = |id: &str| report.order.iter().position(|n| n == id).unwrap();
+    assert!(
+        pos("b2") < pos("b1"),
+        "非阻塞就不该把 b1 抢到前面：{:?}",
+        report.order
+    );
+}
+
+/// 「读取目录」把目录里的图像读成一个列表；混合格式收窄到 `List[Img]`。
+#[test]
+fn read_dir_collects_a_list_of_images() {
+    let dir = workspace("read-dir-src");
+    image_fixture(&dir, "png", 2, 2);
+    image_fixture(&dir, "jpg", 3, 3);
+
+    let mut params = defaults(crate::nodes::read_dir::KIND);
+    params.insert("path".into(), serde_json::json!(dir.to_string_lossy()));
+    let mut workflow = Workflow::new("读目录");
+    workflow
+        .nodes
+        .push(node("d", crate::nodes::read_dir::KIND, params));
+
+    let report = run(&workflow, None, &workspace("read-dir-out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let out = &report.nodes[0].outputs[0];
+    assert_eq!(
+        out.ty,
+        PortType::list_of(PortType::trait_("img")),
+        "PNG + JPEG 混合应收窄为 List[Img]"
+    );
+    assert_eq!(out.summary, "列表 · 2 项");
 }

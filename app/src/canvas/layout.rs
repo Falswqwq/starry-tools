@@ -18,7 +18,9 @@ use crate::canvas::graph::{
 };
 use crate::canvas::node::{kind_of, Node};
 use crate::catalog::{Control, Kind, Param};
-use crate::ui::controls::{color_height, PARAM_CONTROL_H};
+use crate::ui::controls::{
+    color_height, ports_count, ports_height, ports_row_center, PARAM_CONTROL_H,
+};
 
 /// 一段折好行的文字：每行文本、每行高度、总高。都在流坐标下（未乘缩放）。
 #[derive(Clone)]
@@ -129,8 +131,32 @@ pub(crate) fn node_body_top(node: &Node) -> f32 {
     // 只数**声明**的输入端口：参数端口画在参数那一行，不占端口列，也就
     // 不撑高端口区 —— 否则灰底参数框会比里面的控件低一整行。
     let declared = node.inputs.iter().filter(|port| !port.is_param()).count();
-    let rows = declared.max(node.outputs.len()).max(1) as f32;
+    // 挂在参数栏上的输出也不占端口列（「顺序执行」「遍历」的输出就在那儿）。
+    let listed = node
+        .outputs
+        .iter()
+        .filter(|port| port.panel_row.is_none())
+        .count();
+    let rows = declared.max(listed).max(1) as f32;
     HEADER_H + rows * PORT_ROW_H
+}
+
+/// 某个输出端口挂在参数栏的第 `row` 行时，它相对卡片顶部的高度（流坐标）——
+/// 即「动态输出」控件那一行的中心。找不到那个控件时返回 `None`。
+pub(crate) fn panel_output_offset(
+    kind: &Kind,
+    node: &Node,
+    notes: &HashMap<String, TextBlock>,
+    row: usize,
+) -> Option<f32> {
+    let port_param = kind
+        .params
+        .iter()
+        .find(|param| matches!(param.control, Control::Ports { .. }))?;
+    let slot = param_slots(node, kind, notes)
+        .into_iter()
+        .find(|slot| slot.id == port_param.id)?;
+    Some(slot.control_y + ports_row_center(row))
 }
 
 /// 一个可见参数块在卡片里的纵向位置（**流坐标，相对卡片顶部**）。
@@ -387,6 +413,7 @@ pub(crate) fn control_height(param: &Param, params: &Params) -> f32 {
         }
         Control::Bool => PARAM_BOOL_H,
         Control::Color => color_height(),
+        Control::Ports { .. } => ports_height(ports_count(params, &param.id)),
         _ => PARAM_CONTROL_H,
     }
 }

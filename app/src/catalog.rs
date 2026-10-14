@@ -27,6 +27,8 @@ pub struct Port {
     /// 这是某个**参数**的可选输入时，记下参数的 id。
     /// 界面据此把它画在参数那一行（浅蓝的小圆点），而不是端口列里。
     pub param: Option<String>,
+    /// **输出**端口挂在参数栏的第几行（0 起）—— 有值时画在参数栏、不画在顶部端口列。
+    pub panel_row: Option<usize>,
 }
 
 impl Port {
@@ -79,6 +81,16 @@ pub enum Control {
         dialog_title: String,
         extensions: Vec<String>,
         directory: bool,
+    },
+    /// 一排**动态端口**：画成一列带序号的端口 + 每行一个删除按钮 + 底部一个加号。
+    /// 参数值就是**个数**。
+    Ports {
+        /// 前几项不能删（「顺序执行」必须留一个）。
+        min: usize,
+        /// 最多几个。
+        max: usize,
+        /// 每行是否带一个阻塞开关（「顺序执行」用）。
+        blocking: bool,
     },
 }
 
@@ -169,6 +181,7 @@ impl Param {
             ),
             Control::Color => "颜色".to_string(),
             Control::Bool => "开关".to_string(),
+            Control::Ports { .. } => "动态输出（可增删）".to_string(),
             Control::File {
                 directory,
                 extensions,
@@ -319,6 +332,7 @@ fn ports(defs: &[PortDef]) -> Vec<Port> {
             ty: def.ty,
             required: def.required,
             param: def.param.clone(),
+            panel_row: def.panel_row,
         })
         .collect()
 }
@@ -362,6 +376,13 @@ fn param(def: &ParamDef) -> Param {
         },
         ParamSpec::Color { .. } => Control::Color,
         ParamSpec::Bool { .. } => Control::Bool,
+        ParamSpec::Ports {
+            min, max, blocking, ..
+        } => Control::Ports {
+            min: (*min).max(0.0) as usize,
+            max: (*max).max(1.0) as usize,
+            blocking: *blocking,
+        },
         ParamSpec::File {
             dialog_title,
             extensions,

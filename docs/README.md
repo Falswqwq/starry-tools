@@ -18,6 +18,7 @@
 | 节点 | id | 一句话 |
 | --- | --- | --- |
 | [读取](nodes/read.md) | `read` | 从硬盘读一个文件：图像按图像解码，文本按文本读，视频读成视频产物（输出类型自动推断） |
+| [读取目录](nodes/read_dir.md) | `read_dir` | 把一个目录里的文件读成一个列表（`List[Img]` / `List[Text]`） |
 | [文本](nodes/literal_text.md) | `literal_text` | 一段文本（字面量） |
 | [数字](nodes/literal_number.md) | `literal_number` | 一个数字（字面量） |
 | [布尔](nodes/literal_bool.md) | `literal_bool` | 一个开关（字面量） |
@@ -37,6 +38,16 @@
 | [背景移除](nodes/background_removal.md) | `background_removal` | 用 AI 模型认出主体、抠掉背景（模型要先下载） |
 | [图像变换](nodes/transform.md) | `transform_image` | 翻转（左右 / 上下）与旋转（90° / 180° / 270°） |
 | [缩放图像](nodes/upscale.md) | `upscale` | 缩放到原来的百分之 n，像素画配「邻近」插值 |
+| [图像分割](nodes/split.md) | `split_image` | 按透明部分把 sprite 图切成多张（输出 `List[Png]`） |
+
+### 逻辑
+
+排控制流：给分支定先后、把列表解包。它们的边线是**暗蓝色**（像紫色节点那样，一眼认出这一类）。
+
+| 节点 | id | 一句话 |
+| --- | --- | --- |
+| [顺序执行](nodes/sequence.md) | `sequence` | 把接到各输出上的分支按序号从上到下依次执行（输出个数可增删） |
+| [遍历](nodes/iterate.md) | `iterate` | 对列表里的每个元素把下游那一支跑一遍（可设最大遍历数目） |
 
 ### 视频
 

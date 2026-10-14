@@ -52,6 +52,17 @@ pub struct TypeInfo {
     pub is_trait: bool,
     /// 写盘用的主扩展名（只有具体类型有）。
     pub extension: Option<&'static str>,
+    /// 这个类型的**列表形式** `List[它]` 的徽标与名字 —— 登记时一次性算好、泄漏成
+    /// `&'static str`（字符串就那几个）。于是 `PortType::badge()` 对列表也能零分配返回。
+    pub list_badge: &'static str,
+    pub list_label: &'static str,
+}
+
+/// 拼出某个类型的列表徽标 / 名字。只在登记时调几次，泄漏可忽略。
+fn list_forms(label: &str, badge: &str) -> (&'static str, &'static str) {
+    let list_badge = Box::leak(format!("[{badge}]").into_boxed_str());
+    let list_label = Box::leak(format!("列表 · {label}").into_boxed_str());
+    (list_badge, list_label)
 }
 
 /// 全部已登记的类型。
@@ -70,6 +81,7 @@ impl Registry {
         color: TypeColor,
         supertraits: &'static [&'static str],
     ) {
+        let (list_badge, list_label) = list_forms(label, badge);
         self.entries.insert(
             id,
             TypeInfo {
@@ -80,6 +92,8 @@ impl Registry {
                 traits: supertraits,
                 is_trait: true,
                 extension: None,
+                list_badge,
+                list_label,
             },
         );
     }
@@ -94,6 +108,7 @@ impl Registry {
         traits: &'static [&'static str],
         extension: Option<&'static str>,
     ) {
+        let (list_badge, list_label) = list_forms(label, badge);
         self.entries.insert(
             id,
             TypeInfo {
@@ -104,6 +119,8 @@ impl Registry {
                 traits,
                 is_trait: false,
                 extension,
+                list_badge,
+                list_label,
             },
         );
     }
@@ -137,6 +154,9 @@ fn builtin(registry: &mut Registry) {
     registry.register_type("text", "文本", "TXT", TypeColor::Text, &[], None);
     registry.register_type("number", "数字", "NUM", TypeColor::Number, &[], None);
     registry.register_type("bool", "布尔", "BOOL", TypeColor::Bool, &[], None);
+    // 空信号：逻辑节点（顺序执行 / 遍历的「结束」）用它当输出；任何不需要数据的节点
+    // 都可以接一个，**纯粹用来定执行先后**（见 `NodeKind::inputs_for`）。
+    registry.register_type("void", "空", "-", TypeColor::Unknown, &[], None);
 
     // 图像格式：id 就是 `ImageFormat::name()`，徽标 / 名字 / 扩展名都取自它 ——
     // 保持「图像格式表」只有一个来源。
@@ -154,12 +174,17 @@ fn builtin(registry: &mut Registry) {
 
 /// 一个端口的类型。
 ///
-/// 只存一个 id 加一个「是不是接口」的标志 —— 具体含义（徽标、名字、颜色、
-/// 实现的接口）全部去 [`types`] 里查。因此新增类型不需要改这个类型本身。
+/// 只存一个 id、一个「是不是接口」的标志，加一个「是不是列表」的标志 —— 具体含义
+/// （徽标、名字、颜色、实现的接口）全部去 [`types`] 里查。因此新增类型不需要改这个
+/// 类型本身。
+///
+/// **列表**：`list` 为真时表示 `List[元素]`，元素就是 `id` / `is_trait` 描述的那个
+/// 类型。列表只存一层（元素本身不能再是列表）—— 目前的场景用不上嵌套。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PortType {
     id: &'static str,
     is_trait: bool,
+    list: bool,
 }
 
 #[allow(non_upper_case_globals)] // `Any` / `Text` / …… 故意用类型名，读起来才像类型。
@@ -168,31 +193,46 @@ impl PortType {
     pub const Any: PortType = PortType {
         id: "any",
         is_trait: true,
+        list: false,
     };
     /// 能写盘的产物接口。
     pub const File: PortType = PortType {
         id: "file",
         is_trait: true,
+        list: false,
     };
     /// 文本。
     pub const Text: PortType = PortType {
         id: "text",
         is_trait: false,
+        list: false,
     };
     /// 数字。
     pub const Number: PortType = PortType {
         id: "number",
         is_trait: false,
+        list: false,
     };
     /// 布尔。
     pub const Bool: PortType = PortType {
         id: "bool",
         is_trait: false,
+        list: false,
+    };
+    /// 空信号 —— 逻辑节点用它定执行先后，本身不携带数据。
+    pub const Void: PortType = PortType {
+        id: "void",
+        is_trait: false,
+        list: false,
     };
 
     /// 指向一个接口（trait）。
     pub fn trait_(id: &'static str) -> Self {
-        Self { id, is_trait: true }
+        Self {
+            id,
+            is_trait: true,
+            list: false,
+        }
     }
 
     /// 指向一个具体类型。
@@ -200,7 +240,22 @@ impl PortType {
         Self {
             id,
             is_trait: false,
+            list: false,
         }
+    }
+
+    /// `List[inner]` —— 和 `inner` 同样的元素，只是包成了列表。
+    pub fn list_of(inner: PortType) -> Self {
+        Self {
+            id: inner.id,
+            is_trait: inner.is_trait,
+            list: true,
+        }
+    }
+
+    /// `List[Any]` —— 任意列表。
+    pub fn any_list() -> Self {
+        Self::list_of(Self::Any)
     }
 
     /// 图像类型：格式确定就是那个具体格式，格式未知就是「图像」这个接口。
@@ -233,6 +288,19 @@ impl PortType {
         self.is_trait
     }
 
+    /// 这是不是一个列表类型 `List[元素]`。
+    pub fn is_list(self) -> bool {
+        self.list
+    }
+
+    /// 列表的元素类型；不是列表就返回自己。
+    pub fn element(self) -> PortType {
+        PortType {
+            list: false,
+            ..self
+        }
+    }
+
     fn info(self) -> Option<&'static TypeInfo> {
         types().get(self.id)
     }
@@ -243,24 +311,39 @@ impl PortType {
         !self.is_trait
     }
 
-    /// 这个端口（或值）算不算图像：是不是「图像」接口，或实现了它。
+    /// 这个端口（或值）算不算图像：是不是「图像」接口，或实现了它。列表不算图像。
     pub fn is_image(self) -> bool {
-        self.implements("img")
+        !self.list && self.implements_trait("img")
     }
 
-    /// 是图像时，把格式取出来。接口「图像」返回 [`ImageFormat::Any`]。
+    /// 是图像时，把格式取出来。接口「图像」返回 [`ImageFormat::Any`]。列表返回 `None`。
     pub fn image_format(self) -> Option<ImageFormat> {
+        if self.list {
+            return None;
+        }
         if self.id == "img" {
             return Some(ImageFormat::Any);
         }
-        if !self.is_trait && self.implements("img") {
+        if !self.is_trait && self.implements_trait("img") {
             return ImageFormat::from_name(self.id);
         }
         None
     }
 
-    /// 这个类型实现了接口 `trait_id` 吗。`ANY` 是一切的接口。
+    /// 这个类型实现了接口 `trait_id` 吗。`ANY` 是一切的接口；**列表只认 `ANY`**
+    /// （一个 `List[Img]` 不是「图像」，也不是「文件」）。
     pub fn implements(self, trait_id: &str) -> bool {
+        if trait_id == "any" {
+            return true;
+        }
+        if self.list {
+            return false;
+        }
+        self.implements_trait(trait_id)
+    }
+
+    /// 只看元素类型 / 本身实现的接口，**不管是不是列表**。内部用。
+    fn implements_trait(self, trait_id: &str) -> bool {
         if trait_id == "any" {
             return true;
         }
@@ -273,17 +356,25 @@ impl PortType {
         info.traits.contains(&trait_id)
     }
 
-    /// 端口徽标上的短标签。
+    /// 端口徽标上的短标签。列表是 `[元素徽标]`。
     pub fn badge(self) -> &'static str {
-        self.info().map_or("?", |info| info.badge)
+        match self.info() {
+            Some(info) if self.list => info.list_badge,
+            Some(info) => info.badge,
+            None => "?",
+        }
     }
 
-    /// 界面上完整一点的名字。
+    /// 界面上完整一点的名字。`List[元素]` 读作「列表 · 元素」。
     pub fn label(self) -> &'static str {
-        self.info().map_or(self.id, |info| info.label)
+        match self.info() {
+            Some(info) if self.list => info.list_label,
+            Some(info) => info.label,
+            None => self.id,
+        }
     }
 
-    /// 徽标的语义色。
+    /// 徽标的语义色。列表沿用元素的颜色（同一个色系，一眼能看出元素是什么）。
     pub fn color(self) -> TypeColor {
         self.info().map_or(TypeColor::Unknown, |info| info.color)
     }
@@ -297,37 +388,62 @@ impl PortType {
     ///
     /// 比 [`PortType::strictly_accepts`] 宽松的地方：通配一头出现就放行；
     /// 来源是接口（格式还没定）时也先放行 —— 都等运行期再确认。
+    /// 列表只能接列表（元素按同样的规则）。
     pub fn accepts(self, source: PortType) -> bool {
-        if self.id == "any" || source.id == "any" {
+        // 通配（非列表）出现一头就放行。
+        if (self.id == "any" && !self.list) || (source.id == "any" && !source.list) {
             return true;
+        }
+        // 列表 / 非列表必须一致。
+        if self.list != source.list {
+            return false;
         }
         // 来源是个接口：格式不定，先让它接上，运行期再较真。
         if source.is_trait {
             return true;
         }
         if self.is_trait {
-            return source.implements(self.id);
+            return source.implements_trait(self.id);
         }
         // 目标是具体类型：只认它自己。
         self.id == source.id
     }
 
     /// 运行期检查：端口声明 `self`，实际拿到的值是 `source`，是否严格匹配。
+    ///
+    /// 列表与非列表必须一致；标量还要求来源是一个**具体实例**（格式未知的图像不行）；
+    /// 列表则在元素层面比 —— 于是「元素是接口」的列表（比如混合格式目录产出的
+    /// `List[Img]`）能接进 `List[Any]` / `List[Img]`。
     pub fn strictly_accepts(self, source: PortType) -> bool {
-        // 运行期的来源永远是一个具体实例。
-        if !source.is_concrete() {
+        if self.list != source.list {
             return false;
         }
-        if self.is_trait {
-            return source.implements(self.id);
+        // 标量：运行期的来源永远是一个具体实例。
+        if !self.list && !source.is_concrete() {
+            return false;
         }
-        self.id == source.id
+        let target = self.element();
+        let source = source.element();
+        if target.id == "any" {
+            return true;
+        }
+        if source.id == "any" {
+            return false;
+        }
+        if target.is_trait {
+            return source.implements_trait(target.id);
+        }
+        target.id == source.id
     }
 }
 
 impl Serialize for PortType {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.id)
+        if self.list {
+            serializer.serialize_str(&format!("list:{}", self.id))
+        } else {
+            serializer.serialize_str(self.id)
+        }
     }
 }
 
@@ -414,5 +530,58 @@ mod tests {
         }
         assert!(PortType::Image(ImageFormat::Png).extension().is_some());
         assert!(PortType::Text.extension().is_none());
+    }
+
+    /// 列表在其元素上是协变的；列表与非列表不能互接。
+    #[test]
+    fn lists_are_covariant_in_their_element() {
+        let list_png = PortType::list_of(PortType::Image(ImageFormat::Png));
+        let list_jpg = PortType::list_of(PortType::Image(ImageFormat::Jpeg));
+        // `List[Img]`：元素是「图像」接口。
+        let list_img = PortType::list_of(PortType::Image(ImageFormat::Any));
+        let list_any = PortType::any_list();
+
+        assert!(list_any.accepts(list_png));
+        assert!(list_img.accepts(list_png));
+        assert!(!list_png.accepts(list_jpg), "具体元素不兼容");
+        assert!(
+            list_png.accepts(list_any),
+            "编辑期：来源是接口（格式未定）先放行"
+        );
+
+        // 列表和单个元素不能互接。
+        let png = PortType::Image(ImageFormat::Png);
+        assert!(!png.accepts(list_png));
+        assert!(!list_png.accepts(png));
+
+        // 运行时：`List[Img]` 两种图像都收；`List[Png]` 只收 PNG。
+        assert!(list_img.strictly_accepts(list_png));
+        assert!(list_img.strictly_accepts(list_jpg));
+        assert!(list_png.strictly_accepts(list_png));
+        assert!(!list_png.strictly_accepts(list_jpg));
+        // `List[Any]` 收得下任何列表（包括元素是接口的那些）。
+        assert!(list_any.strictly_accepts(list_png));
+        assert!(list_any.strictly_accepts(list_any));
+
+        // 列表不是图像、也不是文件；只有通配收得下它。
+        assert!(!list_png.is_image());
+        assert!(!list_png.implements("file"));
+        assert!(list_png.implements("any"));
+        assert!(PortType::Any.accepts(list_png));
+
+        // 徽标带方括号，一眼看出是列表。
+        assert_eq!(list_png.badge(), "[PNG]");
+        assert_eq!(list_any.badge(), "[ANY]");
+    }
+
+    /// 空信号只能接空信号（通配除外）。
+    #[test]
+    fn void_only_connects_to_void() {
+        assert!(PortType::Void.accepts(PortType::Void));
+        assert!(PortType::Void.strictly_accepts(PortType::Void));
+        assert!(!PortType::Void.accepts(PortType::Text));
+        assert!(!PortType::Text.accepts(PortType::Void));
+        assert!(PortType::Any.accepts(PortType::Void));
+        assert_eq!(PortType::Void.badge(), "-");
     }
 }

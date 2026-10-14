@@ -150,6 +150,7 @@ impl Registry {
 fn builtin_specs() -> Vec<NodeSpec> {
     let mut specs = vec![
         nodes::read::spec(),
+        nodes::read_dir::spec(),
         nodes::literal::text_spec(),
         nodes::literal::number_spec(),
         nodes::literal::bool_spec(),
@@ -163,7 +164,10 @@ fn builtin_specs() -> Vec<NodeSpec> {
         nodes::crop::spec(),
         nodes::transform::spec(),
         nodes::upscale::spec(),
+        nodes::split::spec(),
     ];
+    // 逻辑节点排在图像之后。「顺序执行」「遍历」输出个数可变，靠 `ParamSpec::Ports` 声明。
+    specs.extend([nodes::sequence::spec(), nodes::iterate::spec()]);
     // feature 自带的节点跟在它们同类后面：「视频」排在各图像节点之后。
     #[cfg(feature = "video")]
     specs.extend(crate::features::video::specs());

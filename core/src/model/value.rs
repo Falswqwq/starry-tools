@@ -45,6 +45,10 @@ pub enum Value {
     Image(ImageValue),
     /// 非图像的产物（视频……）。与图像一样都是「能写盘的东西」。
     Media(MediaValue),
+    /// 某种类型的一个集合 —— `List[元素]`。元素类型看实际装了些什么。
+    List(Vec<Value>),
+    /// 空信号：逻辑节点用它定执行先后，不携带任何数据。
+    Void,
     /// 带着名字的值 —— 「重命名」节点的产物。里面是什么类型都行。
     Named(Box<NamedValue>),
 }
@@ -93,6 +97,8 @@ impl Value {
             Value::Bool(_) => PortType::Bool,
             Value::Image(image) => PortType::Image(image.format()),
             Value::Media(media) => media.port_type(),
+            Value::List(items) => PortType::list_of(list_element_type(items)),
+            Value::Void => PortType::Void,
         }
     }
 
@@ -135,6 +141,8 @@ impl Value {
                 Err(_) => format!("{} · {} 字节", image.format().badge(), image.byte_len()),
             },
             Value::Media(media) => media.describe(),
+            Value::List(items) => format!("列表 · {} 项", items.len()),
+            Value::Void => "空".to_string(),
         }
     }
 
@@ -149,7 +157,7 @@ impl Value {
             Value::Bool(value) => serde_json::json!(value),
             // `inner()` 已经把名字剥光了，这里只是给编译器一个交代。
             Value::Named(named) => named.inner.to_param_json()?,
-            Value::Image(_) | Value::Media(_) => return None,
+            Value::Image(_) | Value::Media(_) | Value::List(_) | Value::Void => return None,
         })
     }
 
@@ -220,6 +228,40 @@ impl Value {
             ))),
         }
     }
+
+    /// 当成列表取出来。不是列表就报错。
+    pub fn as_list(&self) -> Result<&[Value], NodeError> {
+        match self {
+            Value::Named(named) => named.inner.as_list(),
+            Value::List(items) => Ok(items),
+            other => Err(NodeError::new(format!(
+                "需要一个列表，但拿到的是{}",
+                other.port_type().label()
+            ))),
+        }
+    }
+}
+
+/// 一个列表值的元素类型。
+///
+/// 所有元素同型就用那个型；不是同一种具体类型但**全是图像**（或全是视频）时，收窄到那个
+/// 接口 —— 混合格式的目录于是产出 `List[Img]` 而不是笼统的 `List[Any]`。其余情况 `ANY`；
+/// 空列表也是 `ANY`。
+fn list_element_type(items: &[Value]) -> PortType {
+    let types: Vec<PortType> = items.iter().map(|value| value.port_type()).collect();
+    let Some(&first) = types.first() else {
+        return PortType::Any;
+    };
+    if types.iter().all(|ty| *ty == first) {
+        return first;
+    }
+    if types.iter().all(|ty| ty.is_image()) {
+        return PortType::trait_("img");
+    }
+    if types.iter().all(|ty| ty.implements("vid")) {
+        return PortType::trait_("vid");
+    }
+    PortType::Any
 }
 
 /// 把一段文本当成**色板**解析：每行一个颜色，`#rrggbb` 或 `#rrggbbaa`。

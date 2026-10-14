@@ -58,6 +58,18 @@ pub const OK: Color32 = Color32::from_rgb(0x15, 0x80, 0x3d);
 /// 默认连线。
 pub const WIRE: Color32 = Color32::from_rgb(0xc3, 0xc9, 0xd2);
 
+/// 逻辑类节点（顺序执行 / 遍历）的类别色：暗蓝。
+pub const CATEGORY_LOGIC: Color32 = Color32::from_rgb(0x1e, 0x40, 0xaf);
+
+/// 某个类别有没有自己的一套**边线色** —— 有的话节点边线走它，像紫色节点那样
+/// 「这类节点长这样」一眼认得出来。目前只有逻辑类有；其余类别返回 `None`，边线照常走状态色。
+pub fn category_color(category: &str) -> Option<Color32> {
+    match category {
+        "逻辑" => Some(CATEGORY_LOGIC),
+        _ => None,
+    }
+}
+
 pub const R_CARD: u8 = 8;
 pub const R_CTL: u8 = 6;
 
@@ -295,6 +307,14 @@ mod tests {
 
         // 徽标色与「选中 / 焦点」的主题蓝分开：一个蓝色徽标不该被误读成“选中”。
         assert_ne!(png, ACCENT);
+    }
+
+    /// 只有逻辑类有自己的边线色；其余类别返回 `None`，边线走状态色。
+    #[test]
+    fn only_logic_nodes_get_a_category_colour() {
+        assert_eq!(category_color("逻辑"), Some(CATEGORY_LOGIC));
+        assert_eq!(category_color("图像"), None);
+        assert_eq!(category_color("来源"), None);
     }
 
     /// 中文字体能不能真的解析出汉字字形。

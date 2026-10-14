@@ -26,6 +26,12 @@ pub struct PortDef {
     /// 引擎据此把接上来的值覆盖到那个参数上。见 [`NodeKind::inputs_for`]。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
+    /// 这个**输出**端口是不是画在参数栏的某一行上（而不是顶部端口列）。
+    ///
+    /// 值是它在参数栏里的**行号**（0 起）。「顺序执行」「遍历」的输出就是挂在
+    /// 那个「动态输出」参数的每一行上 —— 于是节点顶部可以一个输出也没有。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel_row: Option<usize>,
 }
 
 impl PortDef {
@@ -37,6 +43,7 @@ impl PortDef {
             required: false,
             hint: None,
             param: None,
+            panel_row: None,
         }
     }
 
@@ -49,6 +56,7 @@ impl PortDef {
             required: false,
             hint: None,
             param: Some(param_id.to_string()),
+            panel_row: None,
         }
     }
 
@@ -62,6 +70,12 @@ impl PortDef {
         self
     }
 
+    /// 把这个输出端口画在参数栏的第 `row` 行（0 起）上，而不是顶部端口列。
+    pub fn on_panel_row(mut self, row: usize) -> Self {
+        self.panel_row = Some(row);
+        self
+    }
+
     /// 这是不是某个参数的可选输入（而不是节点自己的输入端口）。
     pub fn is_param(&self) -> bool {
         self.param.is_some()
@@ -70,6 +84,9 @@ impl PortDef {
 
 /// 参数端口的 id 前缀。`param:foo` 认的就是参数 `foo`。
 pub const PARAM_PORT_PREFIX: &str = "param:";
+
+/// 不需要任何输入的节点自动获得的那个「空输入」端口 id。
+pub const VOID_INPUT_PORT: &str = "seq";
 
 /// 某个参数的可选输入端口的 id。
 pub fn param_port_id(param_id: &str) -> String {
@@ -157,6 +174,22 @@ pub enum ParamSpec {
     Color {
         default: String,
     },
+    /// 一排**动态端口**的参数：存的是**个数**，控件画成一列带序号的端口 + 每行一个删除按钮
+    /// + 底部一个加号。节点的 `outputs_for` 读它，把 `{prefix}{序号}` 一个个列出来。
+    ///
+    /// 节点**不再手写**这一排输出，而是用这个参数声明 —— 于是加/删输出的交互只写一次，
+    /// 以后任何「输出个数可变」的节点都能用（「顺序执行」「遍历」就是头两个）。
+    Ports {
+        default: f64,
+        /// 最少几个、且前几个**不能删**（比如「顺序执行」必须留一个）。
+        min: f64,
+        /// 最多几个 —— 手滑点多了不把版面撑爆。
+        max: f64,
+        /// 每一行是不是还带一个**阻塞开关**。开启时，这一行（这行序号对应的输出）会成为
+        /// 一道屏障：它上游的分支跑完，后面的才轮到。开关存在 `block{序号}` 这个参数里
+        /// （缺省当真）。「顺序执行」用。
+        blocking: bool,
+    },
 }
 
 fn is_false(value: &bool) -> bool {
@@ -181,6 +214,8 @@ impl ParamSpec {
             ParamSpec::Color { .. } => Some(PortType::Text),
             // 下拉框的合法值是一张固定的表，随便接一段文字进来只会静默出错。
             ParamSpec::Select { .. } => None,
+            // 动态输出个数是节点自己管的，不从上游喂。
+            ParamSpec::Ports { .. } => None,
         }
     }
 }
@@ -313,16 +348,20 @@ impl NodeKind {
     /// 起点节点不生成：它的参数就是内容本身，没有上游可接。
     pub fn inputs_for(&self, params: &Params) -> Vec<PortDef> {
         let mut ports = self.inputs.clone();
-        if self.is_source {
-            return ports;
-        }
-        for def in &self.params {
-            let Some(ty) = def.spec.input_type() else {
-                continue;
-            };
-            if def.visible(params) {
-                ports.push(PortDef::for_param(&def.id, &def.label, ty));
+        if !self.is_source {
+            for def in &self.params {
+                let Some(ty) = def.spec.input_type() else {
+                    continue;
+                };
+                if def.visible(params) {
+                    ports.push(PortDef::for_param(&def.id, &def.label, ty));
+                }
             }
+        }
+        // 不需要任何输入的节点（含起点节点）给一个**空输入**：
+        // 它本身不携带数据，只是把节点挂到逻辑节点的输出上、定执行先后。
+        if ports.is_empty() {
+            ports.push(PortDef::new(VOID_INPUT_PORT, "空输入", PortType::Void));
         }
         ports
     }
@@ -341,6 +380,7 @@ impl NodeKind {
                 ParamSpec::Bool { default } => serde_json::json!(default),
                 ParamSpec::File { default, .. } => serde_json::json!(default),
                 ParamSpec::Color { default, .. } => serde_json::json!(default),
+                ParamSpec::Ports { default, .. } => serde_json::json!(default),
             };
             params.insert(def.id.clone(), value);
         }

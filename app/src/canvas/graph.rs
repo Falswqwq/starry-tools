@@ -492,9 +492,23 @@ impl Graph {
 
     fn out_port(&self, kinds: &[Kind], i: usize, k: usize) -> Pos2 {
         let r = self.flow_rect(kinds, i);
+        let node = &self.nodes[i];
+        // 挂在参数栏上的输出（动态端口）：位置跟着参数那一行。
+        if let Some(row) = node.outputs.get(k).and_then(|port| port.panel_row) {
+            if let Some(kind) = kind_of(kinds, node) {
+                if let Some(offset) = panel_output_offset(kind, node, &self.notes, row) {
+                    return egui::pos2(r.right(), r.top() + offset);
+                }
+            }
+        }
+        // 常规输出：按顶部端口列里**非面板**输出的序号排。
+        let column = node.outputs[..k.min(node.outputs.len())]
+            .iter()
+            .filter(|port| port.panel_row.is_none())
+            .count();
         egui::pos2(
             r.right(),
-            r.top() + HEADER_H + PORT_ROW_H * (k as f32 + 0.5),
+            r.top() + HEADER_H + PORT_ROW_H * (column as f32 + 0.5),
         )
     }
 
@@ -2042,6 +2056,9 @@ impl Graph {
         let tool_missing = node.requirements.tool_missing;
         // 是不是流程的起点 —— 只看元数据，不靠「有没有输入端口」猜。
         let is_source = kind_of(kinds, node).is_some_and(|kind| kind.is_source);
+        // 逻辑类（顺序执行 / 遍历）：边线走暗蓝 —— 像紫色节点那样「这类节点长这样」。
+        let category_ink =
+            kind_of(kinds, node).and_then(|kind| theme::category_color(&kind.category));
 
         // 白底（投影已经在上一遍里铺好了）。
         painter.rect_filled(r, cr, theme::SURFACE);
@@ -2054,15 +2071,18 @@ impl Graph {
             theme::WARN
         } else if interactive {
             theme::PURPLE
+        } else if let Some(ink) = category_ink {
+            ink
         } else if marks.ok_nodes.contains(&node.id) {
             theme::ACCENT
         } else {
             theme::HAIRLINE
         };
-        // 正在等用户操作 / 正在跑：把边框加粗一档。
+        // 正在等用户操作 / 正在跑 / 有类别色：把边框加粗一档。
         let border_width = if waiting {
             3.0
-        } else if running || interactive || model_missing || tool_missing {
+        } else if running || interactive || category_ink.is_some() || model_missing || tool_missing
+        {
             1.5
         } else {
             1.0
@@ -2554,15 +2574,15 @@ impl Graph {
             self.view.to_screen(self.out_port(kinds, i, k))
         };
         let linked = self.port_linked(i, &port.id, input);
-        // 出错的（非法连线 / 必填未接）→ 红；参数端口是浅蓝（可选）；
-        // 其余端点一律主题蓝。
+        // 出错的（非法连线 / 必填未接）→ 红；**可选**（非必填）端口→浅蓝
+        // （参数端口、以及「顺序执行」「遍历」那些可选输出都算）；必填→主题蓝。
         let bad = self.port_invalid(marks, i, &port.id, input) || (port.required && !linked);
         let dot = if bad {
             theme::DANGER
-        } else if port.is_param() {
-            theme::ACCENT_LIGHT
-        } else {
+        } else if port.required {
             theme::ACCENT
+        } else {
+            theme::ACCENT_LIGHT
         };
         let type_ink = theme::badge_color(port.ty);
 
@@ -2591,9 +2611,8 @@ impl Graph {
             painter.circle_stroke(p, 6.0 * z * scale, Stroke::new(1.0, theme::DANGER));
         }
 
-        // 参数端口就到这里：它的徽标和标签由参数那一行自己画（见
-        // `draw_node_controls`），端口列里只出一个小圆点。
-        if port.is_param() {
+        // 参数端口 / 挂在参数栏上的输出：只出小圆点，徽标与标签由参数那一行自己画。
+        if port.is_param() || (!input && port.panel_row.is_some()) {
             return;
         }
 
@@ -2697,6 +2716,11 @@ impl Graph {
             Some(ControlEvent::Changed(value)) => {
                 self.nodes[i].params.insert(param.id.clone(), value);
                 refresh_ports(&mut self.nodes[i]);
+                true
+            }
+            // 动态端口行上的阻塞开关：改的是**另一个**参数（`block{k}`），端口本身不变。
+            Some(ControlEvent::SetOther { param, value }) => {
+                self.nodes[i].params.insert(param, value);
                 true
             }
             Some(ControlEvent::PickFile {
@@ -3755,11 +3779,9 @@ mod tests {
             assert_eq!(kind.name, name, "{id} 的名字该是「{name}」");
 
             let (inputs, outputs) = crate::catalog::ports_for(id, &kind.defaults);
-            assert!(
-                inputs.is_empty(),
-                "{id} 不该有输入端口（{} 个）",
-                inputs.len()
-            );
+            // 起点节点没有数据输入 —— 只带一个「空输入」，用来排先后。
+            assert_eq!(inputs.len(), 1, "{id} 只该有那个空输入");
+            assert_eq!(inputs[0].badge, "-", "{id} 的空输入徽标该是 -");
             assert_eq!(outputs.len(), 1, "{id} 该只有一个输出");
             // 输出端口的类型徽标让三种字面量一眼分得开。
             assert!(
@@ -3768,6 +3790,67 @@ mod tests {
                 outputs[0].badge
             );
         }
+    }
+
+    /// 动态输出节点：「顺序执行」的端口跟着 `outs` 参数走；它还带一个空输入。
+    #[test]
+    fn dynamic_output_nodes_expose_numbered_ports() {
+        let kinds = crate::catalog::all();
+        let seq = kinds
+            .iter()
+            .find(|kind| kind.id == "sequence")
+            .expect("该有「顺序执行」");
+        assert_eq!(seq.category, "逻辑");
+
+        let mut params = seq.defaults.clone();
+        params.insert("outs".into(), serde_json::json!(2.0));
+        let (inputs, outputs) = crate::catalog::ports_for("sequence", &params);
+        assert_eq!(
+            outputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["out1", "out2"]
+        );
+        assert_eq!(inputs.len(), 1, "只该有一个空输入");
+        assert_eq!(inputs[0].badge, "-");
+
+        // 「遍历」：一个循环体输出 + 可选的结束；输入是列表。
+        let iter = kinds.iter().find(|kind| kind.id == "iterate").unwrap();
+        let (inputs, outputs) = crate::catalog::ports_for("iterate", &iter.defaults);
+        assert_eq!(
+            outputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["item", "finally"]
+        );
+        assert_eq!(inputs[0].badge, "[ANY]", "列表输入徽标带方括号");
+    }
+
+    /// 动态输出挂在参数栏里，顶部端口列里不再有输出 —— 卡片高度不随输出个数涨。
+    #[test]
+    fn dynamic_outputs_live_in_the_params_panel() {
+        let kinds = crate::catalog::all();
+        let mut params = kinds
+            .iter()
+            .find(|kind| kind.id == "sequence")
+            .unwrap()
+            .defaults
+            .clone();
+        params.insert("outs".into(), serde_json::json!(3.0));
+        let (_, outputs) = crate::catalog::ports_for("sequence", &params);
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|port| port.panel_row)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)],
+            "每个输出都该挂在参数栏的对应行上"
+        );
+
+        let mut graph = canvas(&["sequence"]);
+        graph.nodes[0]
+            .params
+            .insert("outs".into(), serde_json::json!(3.0));
+        refresh_ports(&mut graph.nodes[0]);
+        assert_eq!(graph.nodes[0].outputs.len(), 3);
+        // 顶部端口列只剩那一个空输入，不受 3 个输出影响。
+        assert_eq!(node_body_top(&graph.nodes[0]), HEADER_H + PORT_ROW_H);
     }
 
     /// 普通节点里「能被上游喂」的参数自动多一个参数端口，并标好它属于哪个参数。
