@@ -9,6 +9,11 @@ publish = false
 name = "starrytools"
 path = "src/main.rs"
 
+[features]
+default = ["onnx", "video"]
+onnx = ["starrytools-core/onnx"]
+video = ["starrytools-core/video"]
+
 [dependencies]
 eframe = "0.36"
 egui = "0.36"
@@ -17,7 +22,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # 类型系统、节点定义、执行引擎、PNG 优化。界面不认识任何具体工具，
 # 只渲染这份元数据 —— 所以加新节点不用改这里的代码。
-starrytools-core = { path = "../core" }
+starrytools-core = { path = "../core", default-features = false }
 serde_json = "1"
 # 原生文件 / 目录选择框。后台线程上用它的异步接口开，界面不阻塞。
 rfd = "0.17"

@@ -3,17 +3,19 @@
 //! 卡片上的每一个字都来自 [`crate::catalog`]（也就是 core 的注册表）——
 //! 这里没有任何写死的节点名或分类。
 //!
-//! 触发按钮不在这里：它由左上角的 [`crate::ui::chrome`] 画，只翻转这里的 `open`。
+//! 触发按钮不在这里：它由左上角的 [`crate::ui::panels::chrome`] 画，只翻转这里的 `open`。
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
 };
 use egui::epaint::RectShape;
 
-use crate::catalog::{self, Kind};
+use crate::catalog::{self, ParamSummary};
 use crate::ui::icons;
+use crate::ui::motion;
 use crate::ui::theme;
 use crate::ui::widgets;
+use starrytools_core::model::node_kind::{NodeKindInfo, ParamSpec};
 
 /// 折叠时的高度；展开后的高度按内容行数算。
 const CARD_H: f32 = 66.0;
@@ -36,7 +38,7 @@ pub struct Library {
     ghost: Option<Ghost>,
     /// 浮层这一帧所在的矩形，用来判断「拖出去了没有」。
     panel_rect: Option<Rect>,
-    kinds: Vec<Kind>,
+    kinds: Vec<NodeKindInfo>,
     categories: Vec<String>,
 }
 
@@ -74,7 +76,7 @@ enum Row {
 }
 
 impl Library {
-    pub fn new(kinds: Vec<Kind>) -> Self {
+    pub fn new(kinds: Vec<NodeKindInfo>) -> Self {
         let categories = catalog::categories(&kinds);
         Self {
             open: false,
@@ -89,7 +91,7 @@ impl Library {
     }
 
     fn visible(&self, i: usize) -> bool {
-        self.category == 0 || self.kinds[i].category == self.categories[self.category]
+        self.category == 0 || self.kinds[i].kind.category == self.categories[self.category]
     }
 
     fn category_count(&self, index: usize) -> usize {
@@ -99,7 +101,7 @@ impl Library {
             let name = &self.categories[index];
             self.kinds
                 .iter()
-                .filter(|kind| &kind.category == name)
+                .filter(|kind| &kind.kind.category == name)
                 .count()
         }
     }
@@ -108,7 +110,7 @@ impl Library {
         let mut drop_out = None;
 
         // 关掉的时候还要再淡出一下，所以不能立刻停画。
-        let anim = ctx.animate_bool_with_time(egui::Id::new("lib-anim"), self.open, 0.13);
+        let anim = motion::animate(ctx, egui::Id::new("lib-anim"), self.open, motion::PANEL);
         if !self.open && anim <= 0.01 {
             self.panel_rect = None;
             self.dragging = None;
@@ -116,9 +118,9 @@ impl Library {
         }
 
         // 浮层靠左展开，不挡视线：左上角按钮的下方。
-        let pos = egui::pos2(12.0, 12.0 + 27.0 + 8.0);
+        let pos = egui::pos2(12.0, 12.0 + theme::BUTTON_H + 8.0);
         egui::Area::new(egui::Id::new("lib-panel"))
-            .fixed_pos(pos + egui::vec2(0.0, (1.0 - anim) * -4.0))
+            .fixed_pos(pos + motion::panel_offset(anim))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_opacity(anim);
@@ -232,17 +234,16 @@ impl Library {
         // 淡出放完就收掉。
         if let Some(g) = &self.ghost {
             if let Some(t0) = g.leaving {
-                if now - t0 > 0.24 {
+                if now - t0 > motion::EXIT {
                     self.ghost = None;
                 }
             }
         }
         if let Some(g) = &self.ghost {
-            let fade_in = ((now - g.shown) / 0.14).clamp(0.0, 1.0);
-            let fade_out = g
-                .leaving
-                .map_or(1.0, |t0| 1.0 - ((now - t0) / 0.24).clamp(0.0, 1.0));
-            let alpha = (fade_in.min(fade_out)) as f32;
+            let alpha = motion::presence(now, g.shown, g.leaving);
+            if alpha < 1.0 || g.leaving.is_some() {
+                ctx.request_repaint();
+            }
             let (kind, pos) = (g.kind, g.pos);
             self.ghost_view(ctx, kind, pos, alpha);
         }
@@ -286,7 +287,8 @@ impl Library {
                         ui.spacing_mut().item_spacing.y = 4.0;
                         for index in 0..self.categories.len() {
                             let on = self.category == index;
-                            let label = self.categories[index].clone();
+                            let category = &self.categories[index];
+                            let label = theme::category_label(category);
                             let count = self.category_count(index);
                             let (rect, resp) =
                                 ui.allocate_exact_size(egui::vec2(width, 22.0), Sense::click());
@@ -304,11 +306,11 @@ impl Library {
                                 );
                             }
                             let ink = if on {
-                                theme::ACCENT
+                                theme::category_color(category).unwrap_or(theme::ACCENT)
                             } else if resp.hovered() {
                                 theme::INK
                             } else {
-                                theme::INK_2
+                                theme::category_color(category).unwrap_or(theme::INK_2)
                             };
                             ui.painter().text(
                                 egui::pos2(rect.left() + 8.0, rect.center().y),
@@ -335,12 +337,12 @@ impl Library {
     }
 
     /// 展开卡片时列出来的内容。
-    fn details(&self, kind: &Kind) -> Vec<Row> {
+    fn details(&self, kind: &NodeKindInfo) -> Vec<Row> {
         let mut rows = Vec::new();
 
-        if !kind.notes.is_empty() {
+        if !kind.kind.notes.is_empty() {
             rows.push(Row::Section("注意事项".to_string()));
-            for note in &kind.notes {
+            for note in &kind.kind.notes {
                 rows.push(Row::Text {
                     text: format!("· {note}"),
                     color: theme::INK_2,
@@ -348,9 +350,9 @@ impl Library {
                 });
             }
         }
-        if !kind.params.is_empty() {
+        if !kind.kind.params.is_empty() {
             rows.push(Row::Section("参数".to_string()));
-            for param in &kind.params {
+            for param in &kind.kind.params {
                 let text = if param.label.is_empty() {
                     param.summary()
                 } else {
@@ -368,7 +370,7 @@ impl Library {
                         indent: 0.0,
                     });
                 }
-                if let crate::catalog::Control::Select { options } = &param.control {
+                if let ParamSpec::Select { options, .. } = &param.spec {
                     let text = options
                         .iter()
                         .map(|option| match &option.hint {
@@ -385,20 +387,20 @@ impl Library {
                 }
             }
         }
-        if !kind.inputs.is_empty() || !kind.outputs.is_empty() {
+        if !kind.kind.inputs.is_empty() || !kind.kind.outputs.is_empty() {
             rows.push(Row::Section("端口".to_string()));
-            for port in &kind.inputs {
+            for port in &kind.kind.inputs {
                 rows.push(Row::Port {
-                    badge: port.badge.clone(),
+                    badge: port.badge().to_string(),
                     color: theme::badge_color(port.ty),
                     text: format!("输入 · {}", port.label),
                     flag: port.required.then(|| "必填".to_string()),
                     hint: None,
                 });
             }
-            for port in &kind.outputs {
+            for port in &kind.kind.outputs {
                 rows.push(Row::Port {
-                    badge: port.badge.clone(),
+                    badge: port.badge().to_string(),
                     color: theme::badge_color(port.ty),
                     text: format!("输出 · {}", port.label),
                     flag: None,
@@ -413,7 +415,12 @@ impl Library {
     /// 画一张卡片。返回 `Some(屏幕位置)` 表示它刚被拖出浮层并松手。
     fn card(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, i: usize) -> Option<Pos2> {
         let expanded = self.expanded == Some(i);
-        let t = ctx.animate_bool_with_time(egui::Id::new(("lib-card", i)), expanded, 0.2);
+        let t = motion::animate(
+            ctx,
+            egui::Id::new(("lib-card", i)),
+            expanded,
+            motion::EXPAND,
+        );
 
         // 内容要按宽度折行，所以先用同一个 painter 量一遍高，再拿这个总高去定卡片高度。
         let card_w = ui.available_width() - 20.0;
@@ -432,8 +439,8 @@ impl Library {
         let height = CARD_H + t * (expanded_h - CARD_H);
 
         let kind = &self.kinds[i];
-        let title = kind.name.clone();
-        let brief = kind.description.clone();
+        let title = kind.kind.name.clone();
+        let brief = kind.kind.description.clone();
         let dragging = self.dragging == Some(i);
 
         let (full, resp) = ui.allocate_exact_size(
@@ -450,11 +457,11 @@ impl Library {
         if expanded {
             painter.add(
                 RectShape::filled(
-                    rect.translate(egui::vec2(0.0, 1.0)),
+                    rect.translate(egui::vec2(0.0, theme::SHADOW_OFFSET_Y)),
                     cr,
-                    Color32::from_rgba_premultiplied(0x10, 0x18, 0x28, 0x1e),
+                    theme::SHADOW_RAISED,
                 )
-                .with_blur_width(14.0),
+                .with_blur_width(theme::RAISED_SHADOW_BLUR),
             );
         } else {
             widgets::card_shadow(&painter, rect, theme::R_CARD);
@@ -464,6 +471,10 @@ impl Library {
             theme::ACCENT
         } else if expanded {
             theme::ACCENT_LINE
+        } else if kind.interactive {
+            theme::PURPLE
+        } else if let Some(color) = theme::category_color(&kind.kind.category) {
+            color
         } else if hot {
             theme::HAIRLINE_STRONG
         } else {
@@ -472,7 +483,11 @@ impl Library {
         painter.rect_stroke(rect, cr, Stroke::new(1.0, border), StrokeKind::Inside);
 
         // 内容（拖出去时退开）
-        let content_alpha = if dragging { 0.15 } else { 1.0 };
+        let content_alpha = if dragging {
+            theme::DRAG_CONTENT_ALPHA
+        } else {
+            1.0
+        };
         let name_ink = theme::INK.gamma_multiply(content_alpha);
         let desc_ink = theme::INK_3.gamma_multiply(content_alpha);
 
@@ -598,7 +613,14 @@ impl Library {
     }
 
     /// 顶行的类型徽标：`[入] → [出]`，没有输入就写「起点」。
-    fn draw_badges(&self, painter: &egui::Painter, kind: &Kind, mut x: f32, cy: f32, alpha: f32) {
+    fn draw_badges(
+        &self,
+        painter: &egui::Painter,
+        kind: &NodeKindInfo,
+        mut x: f32,
+        cy: f32,
+        alpha: f32,
+    ) {
         let font = FontId::monospace(8.5);
         let chip = |text: &str, color: Color32, x: &mut f32| {
             let g = painter.layout_no_wrap(text.to_string(), font.clone(), color);
@@ -622,12 +644,12 @@ impl Library {
             *x += w + 3.0;
         };
 
-        if kind.inputs.is_empty() {
+        if kind.kind.inputs.is_empty() {
             chip("起点", theme::ACCENT.gamma_multiply(alpha), &mut x);
         } else {
-            for port in &kind.inputs {
+            for port in &kind.kind.inputs {
                 chip(
-                    &port.badge,
+                    port.badge(),
                     theme::badge_color(port.ty).gamma_multiply(alpha),
                     &mut x,
                 );
@@ -640,9 +662,9 @@ impl Library {
             theme::INK_3.gamma_multiply(alpha),
         );
         x += 13.0;
-        for port in &kind.outputs {
+        for port in &kind.kind.outputs {
             chip(
-                &port.badge,
+                port.badge(),
                 theme::badge_color(port.ty).gamma_multiply(alpha),
                 &mut x,
             );
@@ -761,12 +783,13 @@ impl Library {
     /// 吸附在指针上的胶囊：节点名 + 类型徽标。`alpha` 用来淡入淡出。
     fn ghost_view(&self, ctx: &egui::Context, i: usize, p: Pos2, alpha: f32) {
         let kind = &self.kinds[i];
-        let name = kind.name.clone();
+        let name = kind.kind.name.clone();
         let badges: Vec<(String, Color32)> = kind
+            .kind
             .inputs
             .iter()
-            .chain(kind.outputs.iter())
-            .map(|port| (port.badge.clone(), theme::badge_color(port.ty)))
+            .chain(kind.kind.outputs.iter())
+            .map(|port| (port.badge().to_string(), theme::badge_color(port.ty)))
             .collect();
 
         egui::Area::new(egui::Id::new("lib-ghost"))

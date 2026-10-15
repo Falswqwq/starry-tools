@@ -75,24 +75,62 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
         .ok_or_else(|| NodeError::new("还没有选择保存目录"))?;
     let overwrite = params::boolean(args.params, PARAM_OVERWRITE, true);
 
+    let file_name = file_name_for(value.product_origin(), name_hint.as_ref(), extension)?;
     let directory = PathBuf::from(directory);
     std::fs::create_dir_all(&directory)
         .map_err(|err| NodeError::new(format!("无法创建目录 {}：{err}", directory.display())))?;
 
-    let file_name = file_name_for(value.product_origin(), name_hint.as_ref(), extension);
     let mut target = directory.join(&file_name);
-    // 不允许覆盖时，重名就另起一个名字 —— 宁可多一个文件，也不动人家已有的东西。
-    if !overwrite && target.exists() {
-        let renamed = unique_name(&directory, &file_name);
-        args.warn(format!("{file_name} 已存在，改存为 {renamed}"));
-        target = directory.join(renamed);
-    }
-
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| NodeError::new(format!("无法创建目录 {}：{err}", parent.display())))?;
-    }
-    std::fs::write(&target, bytes)
+    let mut file = if overwrite {
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(NodeError::new("不能覆盖符号链接或非普通文件"));
+            }
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&target)?
+    } else {
+        let path = Path::new(&file_name);
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&file_name);
+        let suffix = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| format!(".{ext}"))
+            .unwrap_or_default();
+        let mut created = None;
+        for index in 1..=10_000 {
+            let candidate = if index == 1 {
+                file_name.clone()
+            } else {
+                format!("{stem} ({index}){suffix}")
+            };
+            crate::engine::validate_file_name(&candidate)?;
+            target = directory.join(&candidate);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+            {
+                Ok(file) => {
+                    if index > 1 {
+                        args.warn(format!("{file_name} 已存在，改存为 {candidate}"));
+                    }
+                    created = Some(file);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        created.ok_or_else(|| NodeError::new("找不到可用的保存文件名"))?
+    };
+    std::io::Write::write_all(&mut file, bytes)
         .map_err(|err| NodeError::new(format!("写入 {} 失败：{err}", target.display())))?;
 
     let mut outputs = ValueMap::new();
@@ -109,36 +147,62 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
 /// 2. 否则沿用来源文件名，但扩展名一律按产物**实际**的类型写 ——
 ///    上游可能换过格式，来源的扩展名这时候是过期的；
 /// 3. 再从文件读来的都没有，就叫 `output`。
-fn file_name_for(origin: Option<&Path>, hint: Option<&OutputName>, extension: &str) -> String {
-    if let Some(hint) = hint {
-        return hint.file_name(extension);
-    }
-    let stem = origin
-        .and_then(|path| path.file_stem())
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("output");
-    format!("{stem}.{extension}")
+fn file_name_for(
+    origin: Option<&Path>,
+    hint: Option<&OutputName>,
+    extension: &str,
+) -> Result<String, NodeError> {
+    let name = if let Some(hint) = hint {
+        crate::engine::validate_file_name(&hint.stem)?;
+        hint.file_name(extension)
+    } else {
+        let stem = origin
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("output");
+        crate::engine::validate_file_name(stem)?;
+        format!("{stem}.{extension}")
+    };
+    crate::engine::validate_file_name(&name)?;
+    Ok(name)
 }
 
-/// 找一个还没被占用的名字：`名字 (2).png`、`名字 (3).png`……
-fn unique_name(directory: &Path, file_name: &str) -> String {
-    let path = Path::new(file_name);
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("output");
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("png");
-    for index in 2..10_000 {
-        let candidate = format!("{stem} ({index}).{extension}");
-        if !directory.join(&candidate).exists() {
-            return candidate;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_names_are_validated_even_without_a_rename_node() {
+        for stem in [
+            "../escape",
+            "..\\escape",
+            "C:escape",
+            "NUL",
+            "COM1.png",
+            "tail.",
+            "tail ",
+        ] {
+            for auto_extension in [true, false] {
+                let hint = OutputName {
+                    stem: stem.into(),
+                    auto_extension,
+                };
+                assert!(file_name_for(None, Some(&hint), "png").is_err(), "{stem}");
+            }
         }
+        assert!(file_name_for(Some(Path::new("NUL.png")), None, "png").is_err());
+        assert!(file_name_for(None, None, "../escape").is_err());
+        assert_eq!(
+            file_name_for(
+                None,
+                Some(&OutputName {
+                    stem: "hero".into(),
+                    auto_extension: false
+                }),
+                "png"
+            )
+            .unwrap(),
+            "hero"
+        );
     }
-    format!(
-        "{stem} ({}).{extension}",
-        crate::model::workflow::now_millis()
-    )
 }

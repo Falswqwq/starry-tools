@@ -186,6 +186,20 @@ pub fn first_hit(poly: &[Pos2], a: Pos2, b: Pos2) -> Option<(f32, Pos2)> {
     None
 }
 
+/// 一条连线是否**可能**被从 `a` 到 `b` 的刀光切到（快速预筛）。
+///
+/// 贝塞尔整条落在它的控制点凸包里，所以控制点的包围盒就是一个上界：
+/// 包围盒都不和刀光相交的线，不用采样、不用做线段相交测试。
+pub(crate) fn curve_maybe_cut(curve: &Cubic, a: Pos2, b: Pos2) -> bool {
+    let mut min = curve[0];
+    let mut max = curve[0];
+    for p in &curve[1..] {
+        min = Pos2::new(min.x.min(p.x), min.y.min(p.y));
+        max = Pos2::new(max.x.max(p.x), max.y.max(p.y));
+    }
+    segment_hits_aabb(a, b, min, max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

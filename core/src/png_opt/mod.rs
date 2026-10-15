@@ -357,7 +357,7 @@ impl Analysis {
         let mut seen: HashMap<[u8; 4], ()> = HashMap::new();
         let mut too_many = false;
 
-        for pixel in raw.chunks_exact(4) {
+        for pixel in raw.as_chunks::<4>().0.iter() {
             let color = [pixel[0], pixel[1], pixel[2], pixel[3]];
             if color[3] != 255 {
                 has_alpha = true;
@@ -393,7 +393,12 @@ impl Analysis {
         let gray_depth = (is_gray && !has_alpha).then(|| {
             let values: Vec<u8> = match &palette {
                 Some(palette) => palette.colors.iter().map(|color| color[0]).collect(),
-                None => raw.chunks_exact(4).map(|pixel| pixel[0]).collect(),
+                None => raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pixel| pixel[0])
+                    .collect(),
             };
             gray_bit_depth(&values)
         });
@@ -415,7 +420,7 @@ impl Analysis {
 
         let mut has_alpha = false;
         let mut is_gray = true;
-        for pixel in raw.chunks_exact(4) {
+        for pixel in raw.as_chunks::<4>().0.iter() {
             if pixel[3] != u16::MAX {
                 has_alpha = true;
             }
@@ -553,7 +558,9 @@ impl Analysis {
                 .rgba8
                 .as_ref()
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
                         .collect()
                 })
@@ -561,13 +568,21 @@ impl Analysis {
             Shape::Luma => self
                 .rgba8
                 .as_ref()
-                .map(|raw| raw.chunks_exact(4).map(|pixel| pixel[0]).collect())
+                .map(|raw| {
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|pixel| pixel[0])
+                        .collect()
+                })
                 .unwrap_or_default(),
             Shape::LumaAlpha => self
                 .rgba8
                 .as_ref()
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .flat_map(|pixel| [pixel[0], pixel[3]])
                         .collect()
                 })
@@ -577,7 +592,9 @@ impl Analysis {
                     .rgba8
                     .as_ref()
                     .map(|raw| {
-                        raw.chunks_exact(4)
+                        raw.as_chunks::<4>()
+                            .0
+                            .iter()
                             .map(|pixel| scale_gray(pixel[0], bits))
                             .collect()
                     })
@@ -590,7 +607,9 @@ impl Analysis {
                     .rgba8
                     .as_ref()
                     .map(|raw| {
-                        raw.chunks_exact(4)
+                        raw.as_chunks::<4>()
+                            .0
+                            .iter()
                             .map(|pixel| {
                                 let color = [pixel[0], pixel[1], pixel[2], pixel[3]];
                                 palette
@@ -611,7 +630,9 @@ impl Analysis {
                 .rgba16
                 .as_ref()
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
                         .flat_map(u16::to_be_bytes)
                         .collect()
@@ -621,7 +642,9 @@ impl Analysis {
                 .rgba16
                 .as_ref()
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|pixel| pixel[0])
                         .flat_map(u16::to_be_bytes)
                         .collect()
@@ -631,7 +654,9 @@ impl Analysis {
                 .rgba16
                 .as_ref()
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .flat_map(|pixel| [pixel[0], pixel[3]])
                         .flat_map(u16::to_be_bytes)
                         .collect()

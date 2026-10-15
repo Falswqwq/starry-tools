@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::registry::NodeSpec;
-use crate::types::{Registry, TypeColor};
+use crate::registry::{CategoryInfo, RegistrationError, RegistryBuilder, ToolSpec};
+use crate::types::{PortType, TypeColor};
 
 mod compress;
 mod ffmpeg;
@@ -27,6 +27,13 @@ pub enum VideoFormat {
 }
 
 impl VideoFormat {
+    pub fn port_type(self) -> PortType {
+        match self {
+            Self::Any => PortType::trait_("vid"),
+            concrete => PortType::concrete(concrete.name()),
+        }
+    }
+
     pub const CONCRETE: [VideoFormat; 5] = [
         VideoFormat::Mp4,
         VideoFormat::Mkv,
@@ -112,30 +119,23 @@ impl VideoFormat {
     }
 }
 
-/// 视频格式在类型系统里实现的接口。
-const VIDEO_TRAITS: &[&str] = &["vid", "file"];
-
-/// 向类型登记表补上视频的接口与具体格式。
-pub fn register(registry: &mut Registry) {
-    registry.register_trait("vid", "视频", "VID", TypeColor::Video, &["file"]);
+/// 此 feature 自带类别、颜色、工具探测、类型和节点，不污染核心的封闭枚举。
+pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
+    let color = TypeColor::rgb(0x0d, 0x94, 0x88);
+    registry.register_category(CategoryInfo::new("视频", "视频", Some(color)))?;
+    registry.register_tool(ToolSpec::new("ffmpeg", ffmpeg::available))?;
+    let types = registry.types_mut();
+    types.register_trait("vid", "视频", "VID", color, &["file"])?;
     for format in VideoFormat::CONCRETE {
-        registry.register_type(
+        types.register_type(
             format.name(),
             format.label(),
             format.badge(),
-            TypeColor::Video,
-            VIDEO_TRAITS,
+            color,
+            &["vid", "file"],
             Some(format.extension()),
-        );
+        )?;
     }
-}
-
-/// 这个模块提供的节点。
-pub fn specs() -> Vec<NodeSpec> {
-    vec![compress::spec()]
-}
-
-/// 界面想知道「这台机器能不能跑视频」时问它。
-pub fn tool_available() -> bool {
-    ffmpeg::available()
+    registry.register_node(compress::spec())?;
+    Ok(())
 }

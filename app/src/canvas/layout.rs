@@ -17,10 +17,10 @@ use crate::canvas::graph::{
     TOOL_PANEL_H,
 };
 use crate::canvas::node::{kind_of, Node};
-use crate::catalog::{Control, Kind, Param};
 use crate::ui::controls::{
     color_height, ports_count, ports_height, ports_row_center, PARAM_CONTROL_H,
 };
+use starrytools_core::model::node_kind::{NodeKindInfo, ParamDef, ParamSpec};
 
 /// 一段折好行的文字：每行文本、每行高度、总高。都在流坐标下（未乘缩放）。
 #[derive(Clone)]
@@ -70,7 +70,7 @@ impl CardSections {
 
 /// 按当前状态把卡片参数区以下各段的高度算出来。
 pub(crate) fn card_sections(
-    kinds: &[Kind],
+    kinds: &[NodeKindInfo],
     node: &Node,
     notes: &HashMap<String, TextBlock>,
 ) -> CardSections {
@@ -96,7 +96,7 @@ pub(crate) fn card_sections(
 
 /// 一个节点的完整高度（流坐标）。
 pub(crate) fn height_of_node(
-    kinds: &[Kind],
+    kinds: &[NodeKindInfo],
     node: &Node,
     notes: &HashMap<String, TextBlock>,
 ) -> f32 {
@@ -116,7 +116,7 @@ pub(crate) fn height_of_node(
 ///
 /// 判定读的是节点上缓存的 [`Node::requirements`]（见 `refresh_ports`），
 /// 绘制路径上不碰磁盘。
-pub(crate) fn requirement_panel_height(_kinds: &[Kind], node: &Node) -> f32 {
+pub(crate) fn requirement_panel_height(_kinds: &[NodeKindInfo], node: &Node) -> f32 {
     if node.requirements.model_missing {
         MODEL_PANEL_H
     } else if node.requirements.tool_missing {
@@ -144,15 +144,16 @@ pub(crate) fn node_body_top(node: &Node) -> f32 {
 /// 某个输出端口挂在参数栏的第 `row` 行时，它相对卡片顶部的高度（流坐标）——
 /// 即「动态输出」控件那一行的中心。找不到那个控件时返回 `None`。
 pub(crate) fn panel_output_offset(
-    kind: &Kind,
+    kind: &NodeKindInfo,
     node: &Node,
     notes: &HashMap<String, TextBlock>,
     row: usize,
 ) -> Option<f32> {
     let port_param = kind
+        .kind
         .params
         .iter()
-        .find(|param| matches!(param.control, Control::Ports { .. }))?;
+        .find(|param| matches!(param.spec, ParamSpec::Ports { .. }))?;
     let slot = param_slots(node, kind, notes)
         .into_iter()
         .find(|slot| slot.id == port_param.id)?;
@@ -180,17 +181,17 @@ pub(crate) struct ParamSlot {
 /// 都读这一份 —— 圆点于是永远落在它那个参数的控件旁边，不会再出现两套并行排版对不上的问题。
 pub(crate) fn param_slots(
     node: &Node,
-    kind: &Kind,
+    kind: &NodeKindInfo,
     notes: &HashMap<String, TextBlock>,
 ) -> Vec<ParamSlot> {
     let mut y = node_body_top(node) + PARAMS_GAP;
     let mut slots = Vec::new();
-    for param in &kind.params {
+    for param in &kind.kind.params {
         if !param.visible(&node.params) {
             continue;
         }
         // 开关：标签和开关同一行，圆点对在这一行正中。
-        if matches!(param.control, Control::Bool) {
+        if matches!(param.spec, ParamSpec::Bool { .. }) {
             slots.push(ParamSlot {
                 id: param.id.clone(),
                 label_y: None,
@@ -271,11 +272,16 @@ pub(crate) fn run_extra(node: &Node, notes: &HashMap<String, TextBlock>) -> (f32
 
 /// 参数区占多高。被 `visible_when` 藏掉的不占地方。
 pub(crate) fn params_height(
-    kind: &Kind,
+    kind: &NodeKindInfo,
     params: &Params,
     notes: &HashMap<String, TextBlock>,
 ) -> f32 {
-    let showing: Vec<&Param> = kind.params.iter().filter(|p| p.visible(params)).collect();
+    let showing: Vec<&ParamDef> = kind
+        .kind
+        .params
+        .iter()
+        .filter(|p| p.visible(params))
+        .collect();
     if showing.is_empty() {
         return 0.0;
     }
@@ -403,29 +409,29 @@ pub(crate) fn estimate_wrapped_height(text: &str, width: f32) -> f32 {
 }
 
 /// 这个参数的控件占多高（流坐标）。
-pub(crate) fn control_height(param: &Param, params: &Params) -> f32 {
-    match &param.control {
-        Control::Text {
+pub(crate) fn control_height(param: &ParamDef, params: &Params) -> f32 {
+    match &param.spec {
+        ParamSpec::Text {
             multiline: true, ..
         } => {
             let text = params.get(&param.id).and_then(Value::as_str).unwrap_or("");
             multiline_height(text)
         }
-        Control::Bool => PARAM_BOOL_H,
-        Control::Color => color_height(),
-        Control::Ports { .. } => ports_height(ports_count(params, &param.id)),
+        ParamSpec::Bool { .. } => PARAM_BOOL_H,
+        ParamSpec::Color { .. } => color_height(),
+        ParamSpec::Ports { .. } => ports_height(ports_count(params, param)),
         _ => PARAM_CONTROL_H,
     }
 }
 
 /// 一个参数（标签 + 控件 + 说明）一共占多高。
 pub(crate) fn param_block_height(
-    param: &Param,
+    param: &ParamDef,
     params: &Params,
     notes: &HashMap<String, TextBlock>,
 ) -> f32 {
     let control = control_height(param, params);
-    if matches!(param.control, Control::Bool) {
+    if matches!(param.spec, ParamSpec::Bool { .. }) {
         return control.max(PARAM_LABEL_H);
     }
     // 没有标签就不占标签那一行（「来源」里的节点只有一个值，不写名字更简洁）。
@@ -441,12 +447,12 @@ pub(crate) fn param_block_height(
 
 /// 参数有没有名字。空名字表示这条参数不画标签行 —— 「来源」里那些「只有一个值」的参数
 /// （字面量的值、输入框）就用它，省掉一行「值」。
-pub(crate) fn has_label(param: &Param) -> bool {
+pub(crate) fn has_label(param: &ParamDef) -> bool {
     !param.label.is_empty()
 }
 
 pub(crate) fn params_height_of(
-    kinds: &[Kind],
+    kinds: &[NodeKindInfo],
     node: &Node,
     notes: &HashMap<String, TextBlock>,
 ) -> f32 {

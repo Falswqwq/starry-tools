@@ -9,7 +9,7 @@ use starrytools_core::model::params::Params;
 use starrytools_core::progress::NodeStep;
 
 use crate::canvas::geometry::Cubic;
-use crate::catalog::{Kind, Port};
+use starrytools_core::model::node_kind::{NodeKindInfo, PortDef};
 
 #[derive(Clone)]
 pub(crate) struct Node {
@@ -19,8 +19,8 @@ pub(crate) struct Node {
     /// 节点类型 id。参数声明按这个 id 到注册表里查。
     pub kind: String,
     pub title: String,
-    pub inputs: Vec<Port>,
-    pub outputs: Vec<Port>,
+    pub inputs: Vec<PortDef>,
+    pub outputs: Vec<PortDef>,
     /// 这个节点实例自己的参数值。
     pub params: Params,
     /// 跑完之后有没有缩略图可看。有的活卡片底下多留一条预览区（**不落盘**，是视图状态）。
@@ -31,9 +31,30 @@ pub(crate) struct Node {
     pub run: Option<NodeRun>,
     /// 运行**进行中**的实时进度（视频压缩这类长任务才有）。**不落盘**。
     pub step: Option<NodeStep>,
-    /// 当前「缺模型 / 缺外部程序」吗。这两项都要碰磁盘 / 探一次工具，缓存下来，
-    /// 免得每帧被反复问（见 [`refresh_ports`]）。
+    /// 当前依赖快照；模型状态在参数/下载完成时刷新，工具状态随探测 revision 刷新。
     pub requirements: Requirements,
+}
+
+impl Node {
+    /// 新建和存档恢复共用初始化；运行痕迹始终是瞬态，端口按实例参数重建。
+    pub(crate) fn new(id: String, pos: Pos2, kind: String, title: String, params: Params) -> Self {
+        let mut node = Self {
+            id,
+            pos,
+            kind,
+            title,
+            params,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            preview: false,
+            palette: None,
+            run: None,
+            step: None,
+            requirements: Requirements::default(),
+        };
+        refresh_ports(&mut node);
+        node
+    }
 }
 
 /// 一个节点当前缺不缺「跑起来必需的外部依赖」。
@@ -41,6 +62,8 @@ pub(crate) struct Node {
 pub struct Requirements {
     /// 要一个得下载的模型，而本地还没有。
     pub model_missing: bool,
+    /// 外部程序正在后台探测；不当作缺失来显示错误。
+    pub tool_checking: bool,
     /// 要一个外部程序（如 `ffmpeg`），而本机没有。
     pub tool_missing: bool,
 }
@@ -130,7 +153,7 @@ pub(crate) enum MenuAction {
 }
 
 /// 按端口 id 找下标。认不出来就退回第一个 —— 老存档里可能存着已经删掉的端口。
-pub(crate) fn port_index(ports: &[Port], id: &str) -> usize {
+pub(crate) fn port_index(ports: &[PortDef], id: &str) -> usize {
     ports.iter().position(|port| port.id == id).unwrap_or(0)
 }
 
@@ -139,10 +162,9 @@ pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// 按当前参数重算一个节点的端口。
+/// 按当前参数重建廉价的声明端口及依赖快照。
 ///
-/// 参数一改就调 —— 端口类型可能跟着参数走（「输入」选的文件、「图像格式转换」的目标格式、
-/// 「图像压缩」的模式）。
+/// 动态输出由后台 Check 解析后经 Graph::sync_resolved_ports 覆盖。
 pub(crate) fn refresh_ports(node: &mut Node) {
     let (inputs, outputs) = crate::catalog::ports_for(&node.kind, &node.params);
     node.inputs = inputs;
@@ -154,6 +176,6 @@ pub(crate) fn refresh_ports(node: &mut Node) {
 ///
 /// 故意写成不挂在 `self` 上的自由函数：这样「读类型声明」和「改节点参数」
 /// 是两个互不相干的借用，不用为了避开借用检查去克隆参数。
-pub(crate) fn kind_of<'a>(kinds: &'a [Kind], node: &Node) -> Option<&'a Kind> {
-    kinds.iter().find(|kind| kind.id == node.kind)
+pub(crate) fn kind_of<'a>(kinds: &'a [NodeKindInfo], node: &Node) -> Option<&'a NodeKindInfo> {
+    kinds.iter().find(|kind| kind.kind.id == node.kind)
 }

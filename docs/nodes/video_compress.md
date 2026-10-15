@@ -6,7 +6,9 @@
 
 > 需要本机装有 `ffmpeg` 与 `ffprobe`（都在 `PATH` 里）。找不到时，节点会像「背景移除」
 > 缺模型那样**整个禁用并挂一句提示**（边框变警示色、右上角写「需 ffmpeg」），运行也会直接报错。
-> 视频功能由核心的 `video` cargo feature 开关，默认开启。
+> 视频功能由 `video` cargo feature 开关，默认开启；app 将同名 feature 转发给 core，
+> 关闭时视频类别、类型、工具探测和节点均不注册。两程序在后台探测，界面只读状态快照；
+> Windows 调用统一使用 `CREATE_NO_WINDOW`，不应每次探测 / 转码闪出控制台。
 
 ## 端口
 

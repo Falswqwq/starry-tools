@@ -11,7 +11,9 @@
 
 ## 节点
 
-分类来自节点自己声明的 `category`，节点库左栏就是按它分栏的。
+分类 ID 来自节点的 `category`；显示名和边线色来自注册表的 `CategoryInfo`，节点库据此分栏。
+来源 / 图像 / 逻辑 / 通用 / 产出以及可选的视频类别都有专色，见[配色与样式](theme.md)。
+默认 feature 为 `onnx` 与 `video`；关闭时对应节点不注册，详见[开发](development.md#feature-组合)。
 
 ### 来源
 
@@ -35,7 +37,7 @@
 | [边框/边距](nodes/border.md) | `border_image` | 沿非透明像素边界描边（透明的洞也描）；整张不透明时就加边距 |
 | [色彩分析](nodes/palette.md) | `color_analysis` | 抽色板：按主色归类，或数每种颜色多少像素（输出是一段 hex 文本） |
 | [颜色剔除](nodes/remove_color.md) | `remove_color` | 把跟目标色相近的像素抠成透明 |
-| [背景移除](nodes/background_removal.md) | `background_removal` | 用 AI 模型认出主体、抠掉背景（模型要先下载） |
+| [背景移除](nodes/background_removal.md) | `background_removal` | 用 AI 模型抠背景（仅 onnx feature，模型按需下载） |
 | [图像变换](nodes/transform.md) | `transform_image` | 翻转（左右 / 上下）与旋转（90° / 180° / 270°） |
 | [缩放图像](nodes/upscale.md) | `upscale` | 缩放到原来的百分之 n，像素画配「邻近」插值 |
 | [图像分割](nodes/split.md) | `split_image` | 按透明部分把 sprite 图切成多张（输出 `List[Png]`） |

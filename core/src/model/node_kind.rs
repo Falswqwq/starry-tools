@@ -5,6 +5,7 @@
 //! 所以加一个新工具只需要在 `nodes/` 里加一个文件。
 
 use serde::Serialize;
+use std::sync::Arc;
 
 use super::params::Params;
 use super::port_type::PortType;
@@ -74,6 +75,11 @@ impl PortDef {
     pub fn on_panel_row(mut self, row: usize) -> Self {
         self.panel_row = Some(row);
         self
+    }
+
+    /// 短徽标直接取自类型登记表，不在 UI 镜像一份字段。
+    pub fn badge(&self) -> &'static str {
+        self.ty.badge()
     }
 
     /// 这是不是某个参数的可选输入（而不是节点自己的输入端口）。
@@ -186,9 +192,12 @@ pub enum ParamSpec {
         /// 最多几个 —— 手滑点多了不把版面撑爆。
         max: f64,
         /// 每一行是不是还带一个**阻塞开关**。开启时，这一行（这行序号对应的输出）会成为
-        /// 一道屏障：它上游的分支跑完，后面的才轮到。开关存在 `block{序号}` 这个参数里
-        /// （缺省当真）。「顺序执行」用。
+        /// 一道屏障：它上游的分支跑完，后面的才轮到。开关存在
+        /// `{blocking_prefix}{序号}` 这个参数里（缺省当真）。「顺序执行」用。
         blocking: bool,
+        /// 行上阻塞开关的参数前缀，与 Sequence 的控制流声明保持一致。
+        #[serde(skip_serializing_if = "String::is_empty")]
+        blocking_prefix: String,
     },
 }
 
@@ -334,7 +343,7 @@ pub struct NodeKind {
 ///
 /// 绝大多数节点的端口类型是写死的，直接返回 [`NodeKind::outputs`]；像「输入」
 /// （按所选文件的格式）、「图像格式转换」（按目标格式）这种才要现算。
-pub type ResolveOutputsFn = fn(&Params) -> Vec<PortDef>;
+pub type ResolveOutputsFn = Arc<dyn Fn(&Params) -> Vec<PortDef> + Send + Sync>;
 
 impl NodeKind {
     /// 这个节点在给定参数下的**全部**输入端口。
@@ -406,5 +415,7 @@ pub struct NodeKindInfo {
     /// 界面据此：程序不在本地就把整个节点禁用，并在卡片上挂一句提示。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_flow: Option<crate::registry::ControlFlow>,
     pub defaults: Params,
 }

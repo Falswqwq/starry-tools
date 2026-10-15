@@ -2,7 +2,7 @@
 //!
 //! 直接把 `rfd::FileDialog`（同步版）放在界面线程上会卡住整帧：对话框开着的时候窗口
 //! 完全不再重绘，合成器 / 窗口管理器就会认为应用「未响应」（尤其是 Wayland）。
-//! 所以放到后台线程上跑 `rfd::AsyncFileDialog`（它自己会到主线程去开原生框），
+//! 沿用 rfd 的异步接口在工作线程等待，不推断其他平台内部的主线程派发行为；
 //! 选完用一条通道把结果送回来，界面每帧收一次。
 
 use std::path::PathBuf;
@@ -46,8 +46,13 @@ impl Picker {
             return;
         }
         let (tx, rx) = mpsc::channel();
+        let ctx = super::ui_context();
         std::thread::spawn(move || {
-            let _ = tx.send(run_dialog(spec));
+            let result = std::panic::catch_unwind(|| run_dialog(spec)).ok().flatten();
+            let _ = tx.send(result);
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
         });
         self.pending = Some((action, rx));
     }
@@ -86,5 +91,45 @@ fn run_dialog(spec: Spec) -> Option<PathBuf> {
         Mode::File => {
             pollster::block_on(dialog.pick_file()).map(|handle| handle.path().to_path_buf())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action() -> Action {
+        Action::SetParam {
+            node_id: "node".into(),
+            param_id: "file".into(),
+        }
+    }
+
+    #[test]
+    fn completed_dialog_delivers_once() {
+        let (tx, rx) = mpsc::channel();
+        let mut picker = Picker {
+            pending: Some((action(), rx)),
+        };
+        tx.send(Some(PathBuf::from("picked.png"))).unwrap();
+        assert_eq!(picker.poll().unwrap().1, PathBuf::from("picked.png"));
+        assert!(picker.poll().is_none());
+        assert!(picker.pending.is_none());
+    }
+
+    #[test]
+    fn cancelled_or_disconnected_dialog_releases_pending() {
+        let (tx, rx) = mpsc::channel();
+        let mut picker = Picker {
+            pending: Some((action(), rx)),
+        };
+        tx.send(None).unwrap();
+        assert!(picker.poll().is_none());
+        assert!(picker.pending.is_none());
+        let (tx, rx) = mpsc::channel();
+        picker.pending = Some((action(), rx));
+        drop(tx);
+        assert!(picker.poll().is_none());
+        assert!(picker.pending.is_none());
     }
 }

@@ -38,7 +38,7 @@ ureq = { version = "3", default-features = false, features = [
     "gzip",
 ] }
 # 纯 Rust 的 ONNX 运行时 —— 背景移除要跑 u2net 模型。不需要这个功能的话，
-# 可以用 `--no-default-features` 把它整个去掉（节点会给出提示而不是报错）。
+# 可以用 `--no-default-features` 把它整个去掉（同时移除背景移除节点注册）。
 tract-onnx = { version = "0.23", optional = true }
 image = { version = "0.25", default-features = false, features = [
     "png",

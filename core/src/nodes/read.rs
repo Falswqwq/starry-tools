@@ -126,7 +126,7 @@ fn output_ports(params: &Params) -> Vec<PortDef> {
     let port_type = match params::string(params, "valueType", VALUE_TYPE_IMAGE).as_str() {
         VALUE_TYPE_TEXT => PortType::Text,
         #[cfg(feature = "video")]
-        VALUE_TYPE_VIDEO => PortType::Video(selected_video_format(params)),
+        VALUE_TYPE_VIDEO => selected_video_format(params).port_type(),
         _ => match selected_image_format(params) {
             ImageFormat::Any => PortType::Any,
             format => PortType::Image(format),

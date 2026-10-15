@@ -9,8 +9,8 @@ use starrytools_core::model::workflow::{NodeInstance, Position, Workflow, Workfl
 use starrytools_core::paths;
 use starrytools_core::storage::Storage;
 
-use crate::catalog::Kind;
 use crate::canvas::graph::Graph;
+use starrytools_core::model::node_kind::NodeKindInfo;
 
 pub struct Workspace {
     storage: Storage,
@@ -27,7 +27,7 @@ pub struct Workspace {
 
 impl Workspace {
     /// 打开工作区，并起一份带「输入」节点的新工作流。
-    pub fn open(kinds: &[Kind]) -> Self {
+    pub fn open(kinds: &[NodeKindInfo]) -> Self {
         let root = data_root();
         let output_root = root.join("outputs");
         let _ = std::fs::create_dir_all(&output_root);
@@ -78,7 +78,7 @@ impl Workspace {
     }
 
     /// 起一份新的空工作流（照旧自带一个「输入」节点）。
-    pub fn new_workflow(&mut self, kinds: &[Kind]) {
+    pub fn new_workflow(&mut self, kinds: &[NodeKindInfo]) {
         self.current = fresh(kinds);
         self.notice = None;
     }
@@ -146,12 +146,12 @@ pub fn data_root() -> PathBuf {
 }
 
 /// 一份新的空工作流：只有一个「起点」节点（所有工作流都从它开始）。
-fn fresh(kinds: &[Kind]) -> Workflow {
+fn fresh(kinds: &[NodeKindInfo]) -> Workflow {
     let mut workflow = Workflow::new("未命名工作流");
-    if let Some(read) = kinds.iter().find(|kind| kind.is_source) {
+    if let Some(read) = kinds.iter().find(|kind| kind.kind.is_source) {
         workflow.nodes.push(NodeInstance {
             id: uuid::Uuid::new_v4().to_string(),
-            kind: read.id.clone(),
+            kind: read.kind.id.clone(),
             position: Position { x: 120.0, y: 180.0 },
             params: read.defaults.clone(),
         });
@@ -183,7 +183,7 @@ mod tests {
         // 默认参数要从元数据里取，不能在这儿再拄一份。
         assert_eq!(
             workflow.nodes[0].params,
-            kinds.iter().find(|k| k.id == "read").unwrap().defaults
+            kinds.iter().find(|k| k.kind.id == "read").unwrap().defaults
         );
     }
 }

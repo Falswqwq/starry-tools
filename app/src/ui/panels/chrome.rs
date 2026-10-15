@@ -8,7 +8,8 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Str
 use crate::state::settings::{Settings, FPS_MAX, FPS_MIN};
 use crate::state::workspace::Workspace;
 use crate::ui::icons;
-use crate::ui::library::Library;
+use crate::ui::motion;
+use crate::ui::panels::library::Library;
 use crate::ui::theme;
 use crate::ui::widgets::{self, Size, Variant};
 
@@ -33,6 +34,7 @@ pub struct Chrome {
     settings_dirty: bool,
     /// 正在确认删除哪一个存档。
     confirming: Option<String>,
+    summaries: Option<Vec<starrytools_core::model::workflow::WorkflowSummary>>,
 }
 
 const MARGIN: f32 = 12.0;
@@ -40,6 +42,11 @@ const NAME_W: f32 = 176.0;
 const PANEL_GAP: f32 = 8.0;
 
 impl Chrome {
+    pub fn invalidate_workflows(&mut self) {
+        self.summaries = None;
+        self.confirming = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn ui(
         &mut self,
@@ -49,6 +56,8 @@ impl Chrome {
         settings: &mut Settings,
         dirty: bool,
         running: bool,
+        runnable: bool,
+        checking: bool,
         errors: usize,
         first_bad: Option<&str>,
         nodes: usize,
@@ -65,10 +74,11 @@ impl Chrome {
                 ui.horizontal_centered(|ui| {
                     // 展开时，「节点库」这三个字会被一个淡入 + 翻转的下箭头盖住 ——
                     // 不另开一个箭头，按钮宽度也不会因此改变。
-                    let open_t = ctx.animate_bool_with_time(
+                    let open_t = motion::animate(
+                        ctx,
                         egui::Id::new("library-caret"),
                         library.open,
-                        0.24,
+                        motion::OVERLAY,
                     );
                     let caret = move |painter: &egui::Painter, rect: Rect, color: Color32| {
                         // 旋转跟着图标的淡入走（后半段），不跟文字重叠。
@@ -168,10 +178,13 @@ impl Chrome {
                         Some(&icons::folder_open),
                         Variant::Solid,
                         Size::Icon,
-                        true,
+                        !running,
                     );
                     if load.clicked() {
                         self.browsing = !self.browsing;
+                        if self.browsing {
+                            self.invalidate_workflows();
+                        }
                         self.describing = false;
                         self.settings_open = false;
                         library.open = false;
@@ -199,7 +212,7 @@ impl Chrome {
                     }
 
                     if running {
-                        let phase = (ctx.input(|i| i.time) as f32 * 1.2) % 1.0;
+                        let phase = (ctx.input(|i| i.time) as f32 * motion::SPINNER_HZ) % 1.0;
                         let spinner = move |painter: &egui::Painter, rect: Rect, color: Color32| {
                             icons::loader(painter, rect, color, phase)
                         };
@@ -214,11 +227,11 @@ impl Chrome {
                     } else {
                         let run = widgets::button(
                             ui,
-                            "运行",
+                            if checking { "检查中" } else { "运行" },
                             Some(&icons::play),
                             Variant::Primary,
                             Size::Md,
-                            errors == 0,
+                            runnable && !checking,
                         );
                         if run.clicked() {
                             action = Some(Action::Run);
@@ -232,10 +245,11 @@ impl Chrome {
             .inner;
 
         // ---- 说明面板 ----
-        let desc_anim = ctx.animate_bool_with_time(
+        let desc_anim = motion::animate(
+            ctx,
             egui::Id::new("desc-anim"),
             self.describing,
-            0.13,
+            motion::PANEL,
         );
         if desc_anim > 0.01 {
             let pos = egui::pos2(desc_rect.left(), desc_rect.bottom() + PANEL_GAP);
@@ -296,10 +310,11 @@ impl Chrome {
 
         // ---- 设置面板 ----
         let mut settings_changed = false;
-        let settings_anim = ctx.animate_bool_with_time(
+        let settings_anim = motion::animate(
+            ctx,
             egui::Id::new("settings-anim"),
             self.settings_open,
-            0.13,
+            motion::PANEL,
         );
         if settings_anim > 0.01 {
             let pos = egui::pos2(gear_rect.left(), gear_rect.bottom() + PANEL_GAP);
@@ -330,7 +345,7 @@ impl Chrome {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     let (row, _) = ui.allocate_exact_size(
-                                        egui::vec2(200.0, 24.0),
+                                        egui::vec2(200.0, theme::CONTROL_H),
                                         Sense::hover(),
                                     );
                                     if let Some(next) = widgets::slider(
@@ -351,15 +366,17 @@ impl Chrome {
                         });
                         ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("拖动画布、动画都按这个上限节流；调低更省电。")
-                                .color(theme::INK_3)
-                                .size(9.5),
+                            egui::RichText::new(
+                                "完整帧率上限（含输入与动画）；调低省电，但响应可能变慢。",
+                            )
+                            .color(theme::INK_3)
+                            .size(9.5),
                         );
 
                         ui.add_space(12.0);
 
                         let (row, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 24.0),
+                            egui::vec2(ui.available_width(), theme::CONTROL_H),
                             Sense::hover(),
                         );
                         ui.painter().text(
@@ -389,15 +406,20 @@ impl Chrome {
         }
 
         // ---- 加载面板 ----
-        let load_anim = ctx.animate_bool_with_time(
+        let load_anim = motion::animate(
+            ctx,
             egui::Id::new("load-anim"),
             self.browsing,
-            0.13,
+            motion::PANEL,
         );
         if load_anim > 0.01 {
             let width = 360.0;
             let pos = egui::pos2(load_rect.right() - width, load_rect.bottom() + PANEL_GAP);
-            let summaries = workspace.list();
+            if self.summaries.is_none() {
+                self.summaries = Some(workspace.list());
+            }
+            let summaries = self.summaries.as_ref().expect("已加载列表");
+            let mut removed = false;
             let open_id = workspace.id().to_string();
             let mut close = false;
 
@@ -466,7 +488,7 @@ impl Chrome {
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     ui.add_space(6.0);
-                                    for summary in &summaries {
+                                    for summary in summaries {
                                         if let Some(next) = loader_row(
                                             ui,
                                             summary,
@@ -485,6 +507,7 @@ impl Chrome {
                                                 LoaderAction::Delete(id) => {
                                                     if workspace.remove(&id) {
                                                         self.confirming = None;
+                                                        removed = true;
                                                     }
                                                 }
                                             }
@@ -513,11 +536,14 @@ impl Chrome {
                             .sense(Sense::click()),
                         );
                         if link.clicked() {
-                            let _ = open::that(workspace.workflow_dir());
+                            let _ = open::that_detached(workspace.workflow_dir());
                         }
                     });
                 ui.allocate_rect(foot.response.rect, Sense::hover());
             });
+            if removed {
+                self.invalidate_workflows();
+            }
             if close {
                 self.browsing = false;
             }
@@ -565,7 +591,7 @@ fn panel(
     contents: impl FnOnce(&mut egui::Ui),
 ) {
     egui::Area::new(egui::Id::new(id))
-        .fixed_pos(pos + egui::vec2(0.0, (1.0 - anim) * -4.0))
+        .fixed_pos(pos + motion::panel_offset(anim))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(anim);
@@ -754,5 +780,24 @@ fn format_time(millis: i64) -> String {
         format!("{} 小时前", minutes / 60)
     } else {
         format!("{} 天前", minutes / (60 * 24))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_invalidation_also_clears_stale_delete_confirmation() {
+        let mut chrome = Chrome {
+            summaries: Some(Vec::new()),
+            confirming: Some("previous-workflow".into()),
+            ..Default::default()
+        };
+        chrome.invalidate_workflows();
+        assert!(chrome.summaries.is_none());
+        assert!(chrome.confirming.is_none());
+        chrome.invalidate_workflows();
+        assert!(chrome.summaries.is_none());
     }
 }

@@ -6,8 +6,8 @@ use starrytools_core::engine::{NodeStatus, RunReport};
 
 use crate::state::run::Runner;
 use crate::ui::icons;
-use crate::ui::theme;
 use crate::ui::widgets::{self, Size, Variant};
+use crate::ui::{motion, theme};
 
 /// 交给调用方的动作（选中某个节点要在画布上做）。
 pub enum Action {
@@ -72,7 +72,13 @@ impl Report {
             });
 
         // ---- 运行记录（向上弹出） ----
-        if !self.open {
+        let anim = motion::animate(
+            ctx,
+            egui::Id::new("report-presence"),
+            self.open,
+            motion::PANEL,
+        );
+        if anim <= 0.01 {
             return action;
         }
         let Some(report) = runner.report() else {
@@ -86,10 +92,11 @@ impl Report {
         egui::Area::new(egui::Id::new("run-log"))
             .anchor(
                 egui::Align2::CENTER_BOTTOM,
-                egui::vec2(0.0, -(MARGIN + 30.0 + 10.0)),
+                egui::vec2(0.0, -(MARGIN + 30.0 + 10.0)) - motion::panel_offset(anim),
             )
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
+                ui.set_opacity(anim);
                 widgets::panel_frame().show(ui, |ui| {
                     ui.set_width(WIDTH);
                     // 顶栏
@@ -140,7 +147,7 @@ impl Report {
                                             )
                                             .clicked()
                                             {
-                                                let _ = open::that(dir);
+                                                let _ = open::that_detached(dir);
                                             }
                                         }
                                     },
@@ -323,15 +330,8 @@ impl Report {
 
         // 圆点。运行中时闪 —— 和端点 / 待连线的搏动一个频率。
         let dot_alpha = if status.busy {
-            let pulse = 0.35
-                + 0.65
-                    * ((ui.input(|i| i.time) * crate::ui::easing::BREATH).sin() as f32 * 0.5 + 0.5);
-            Color32::from_rgba_unmultiplied(
-                status.dot.r(),
-                status.dot.g(),
-                status.dot.b(),
-                (pulse * 255.0) as u8,
-            )
+            let pulse = motion::pulse(ui.input(|i| i.time));
+            theme::alpha(status.dot, pulse)
         } else {
             status.dot
         };

@@ -12,16 +12,35 @@ use serde_json::Value as Json;
 
 use crate::error::NodeError;
 
-/// 这台机器上有可用的 ffmpeg 吗（结果缓存一次）。
+fn command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
+/// 转码和探测缺一不可（结果缓存一次）。
 pub fn available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
-        Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+        tools_available(|program| {
+            command(program)
+                .arg("-version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+        })
     })
+}
+
+fn tools_available(mut probe: impl FnMut(&str) -> bool) -> bool {
+    let ffmpeg = probe("ffmpeg");
+    let ffprobe = probe("ffprobe");
+    ffmpeg && ffprobe
 }
 
 /// 输入视频的探测结果。
@@ -46,7 +65,7 @@ impl Probe {
 
 /// 用 `ffprobe` 读输入的参数。
 pub fn probe(path: &Path) -> Result<Probe, NodeError> {
-    let output = Command::new("ffprobe")
+    let output = command("ffprobe")
         .args([
             "-v",
             "quiet",
@@ -135,7 +154,8 @@ fn parse_rational(text: &str) -> Option<f64> {
     let (num, den) = text.split_once('/')?;
     let num: f64 = num.parse().ok()?;
     let den: f64 = den.parse().ok()?;
-    (den != 0.0).then(|| num / den)
+    let ratio = num / den;
+    (ratio.is_finite() && ratio >= 0.0).then_some(ratio)
 }
 
 /// ffmpeg `-progress` 报的一帧进度。
@@ -158,7 +178,7 @@ pub fn encode(
     args: &[String],
     mut on_frame: impl FnMut(FrameReport),
 ) -> Result<(), NodeError> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = command("ffmpeg")
         .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats"])
         .args(["-progress", "pipe:1"])
         .arg("-i")
@@ -173,9 +193,20 @@ pub fn encode(
     // stderr 在另一个线程上收，免得两边管道互相堵死。
     let stderr = child.stderr.take().expect("stderr 是 piped 的");
     let drain = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = BufReader::new(stderr).read_to_string(&mut text);
-        text
+        // 持续排空管道，但仅保留有界的错误尾部。
+        let mut reader = BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut buffer = [0u8; 8192];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > 64 * 1024 {
+                tail.drain(..tail.len() - 64 * 1024);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
     });
 
     let stdout = child.stdout.take().expect("stdout 是 piped 的");
@@ -209,10 +240,13 @@ pub fn encode(
         }
     }
 
-    let status = child
-        .wait()
-        .map_err(|err| NodeError::new(format!("等待 ffmpeg 失败：{err}")))?;
+    let status = child.wait();
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     let stderr = drain.join().unwrap_or_default();
+    let status = status.map_err(|err| NodeError::new(format!("等待 ffmpeg 失败：{err}")))?;
     if !status.success() {
         let tail: String = stderr
             .lines()
@@ -237,7 +271,7 @@ pub fn animation_likeness(path: &Path) -> Option<f64> {
     const SIZE: usize = 48;
     const MAX_FRAMES: usize = 4;
 
-    let output = Command::new("ffmpeg")
+    let output = command("ffmpeg")
         .args(["-v", "quiet", "-i"])
         .arg(path)
         .args([
@@ -291,8 +325,37 @@ pub fn temp_file(extension: &str, bytes: &[u8]) -> Result<PathBuf, NodeError> {
         uuid::Uuid::new_v4(),
         extension
     );
+    crate::engine::validate_file_name(&name)?;
     let path = std::env::temp_dir().join(name);
-    std::fs::write(&path, bytes)
-        .map_err(|err| NodeError::new(format!("无法写入临时文件：{err}")))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = std::io::Write::write_all(&mut file, bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(NodeError::new(format!("无法写入临时文件：{error}")));
+    }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn availability_requires_both_executables() {
+        assert!(!tools_available(|tool| tool == "ffmpeg"));
+        assert!(!tools_available(|tool| tool == "ffprobe"));
+        assert!(tools_available(|_| true));
+    }
+
+    #[test]
+    fn invalid_frame_rates_and_temp_paths_are_rejected() {
+        for value in ["0/0", "1/0", "NaN/1", "inf/1", "-1/1"] {
+            assert!(parse_rational(value).is_none());
+        }
+        assert_eq!(parse_rational("30000/1001"), Some(30000.0 / 1001.0));
+        assert!(temp_file("../outside", b"data").is_err());
+    }
 }

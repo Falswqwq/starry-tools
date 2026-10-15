@@ -8,7 +8,7 @@
 //! * [`engine`] —— 静态检查（`resolve`）与真正执行（`run`）；
 //! * [`interaction`] —— 会停下来等用户操作的「阻塞节点」与界面之间的对话；
 //! * [`progress`] —— 运行中逐个节点推给界面的进度（把「正在跑的」实时高亮）；
-//! * [`bg_model`] / [`rembg`] —— 背景移除：模型清单与下载、以及 ONNX 推理；
+//! * [`bg_model`] / `rembg`（`onnx` feature）—— 模型清单与下载、以及 ONNX 推理；
 //! * [`png_opt`] / [`png_quant`] —— PNG 的无损与有损优化。
 //!
 //! 这一层**不依赖任何 GUI 框架**。界面只是在它之上画；
@@ -29,8 +29,10 @@ pub mod png_opt;
 pub mod png_quant;
 pub mod progress;
 pub mod registry;
+#[cfg(feature = "onnx")]
 pub mod rembg;
 pub mod storage;
 pub mod types;
 
 pub use error::AppError;
+pub use registry::{install, RegistryBuilder};

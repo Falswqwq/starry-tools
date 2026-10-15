@@ -66,6 +66,12 @@ pub fn spec() -> NodeSpec {
         },
         run,
     )
+    .control_flow(crate::registry::ControlFlow::Loop {
+        list_input: "list".into(),
+        item_output: ITEM_PORT.into(),
+        finally_output: FINALLY_PORT.into(),
+        max_param: "max".into(),
+    })
 }
 
 /// 引擎其实不用这个函数的返回值来跑循环体 —— 它自己按元素逐个跑。这里给的是一份

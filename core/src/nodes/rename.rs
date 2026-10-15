@@ -71,15 +71,15 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let name = params::string(args.params, PARAM_NAME, "");
     let auto_extension = params::boolean(args.params, PARAM_AUTO_EXTENSION, true);
 
-    let value = match name.trim() {
-        "" => {
-            args.warn("文件名是空的，下游会沿用原来的名字");
-            value.with_name_hint(None)
-        }
-        stem => value.with_name_hint(Some(OutputName {
-            stem: stem.to_string(),
+    let value = if name.trim().is_empty() {
+        args.warn("文件名是空的，下游会沿用原来的名字");
+        value.with_name_hint(None)
+    } else {
+        crate::engine::validate_file_name(&name)?;
+        value.with_name_hint(Some(OutputName {
+            stem: name.to_string(),
             auto_extension,
-        })),
+        }))
     };
 
     let mut outputs = ValueMap::new();

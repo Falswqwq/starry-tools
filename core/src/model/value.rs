@@ -242,26 +242,10 @@ impl Value {
     }
 }
 
-/// 一个列表值的元素类型。
-///
-/// 所有元素同型就用那个型；不是同一种具体类型但**全是图像**（或全是视频）时，收窄到那个
-/// 接口 —— 混合格式的目录于是产出 `List[Img]` 而不是笼统的 `List[Any]`。其余情况 `ANY`；
-/// 空列表也是 `ANY`。
+/// 根据注册的接口关系推导最具体的共同元素类型。
 fn list_element_type(items: &[Value]) -> PortType {
-    let types: Vec<PortType> = items.iter().map(|value| value.port_type()).collect();
-    let Some(&first) = types.first() else {
-        return PortType::Any;
-    };
-    if types.iter().all(|ty| *ty == first) {
-        return first;
-    }
-    if types.iter().all(|ty| ty.is_image()) {
-        return PortType::trait_("img");
-    }
-    if types.iter().all(|ty| ty.implements("vid")) {
-        return PortType::trait_("vid");
-    }
-    PortType::Any
+    let types: Vec<PortType> = items.iter().map(Value::port_type).collect();
+    crate::types::types().common_type(&types)
 }
 
 /// 把一段文本当成**色板**解析：每行一个颜色，`#rrggbb` 或 `#rrggbbaa`。

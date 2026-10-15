@@ -351,7 +351,23 @@ fn kind_metadata_is_a_stable_contract() {
     // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
     let json = serde_json::to_value(registry().kinds()).unwrap();
     let kinds = json.as_array().unwrap();
-    assert_eq!(kinds.len(), 20, "内置工具的数量（改动时请一并更新这条）");
+    let expected_count =
+        18 + usize::from(cfg!(feature = "onnx")) + usize::from(cfg!(feature = "video"));
+    assert_eq!(
+        kinds.len(),
+        expected_count,
+        "内置工具的数量（改动时请一并更新这条）"
+    );
+    for (id, enabled) in [
+        ("background_removal", cfg!(feature = "onnx")),
+        ("video_compress", cfg!(feature = "video")),
+    ] {
+        assert_eq!(
+            kinds.iter().any(|kind| kind["id"] == id),
+            enabled,
+            "{id} 的存在与否必须匹配其 feature",
+        );
+    }
 
     let convert = kinds
         .iter()
@@ -1266,7 +1282,7 @@ fn progress_streams_node_by_node() {
     ));
     workflow.edges.push(edge("e1", "in", "out", "up", "image"));
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
     let progress = Progress::new(tx);
     let report = run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
@@ -1306,7 +1322,7 @@ fn progress_carries_each_nodes_result_as_it_finishes() {
     ));
     workflow.edges.push(edge("e1", "in", "out", "up", "image"));
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
     let progress = Progress::new(tx);
     run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
 
@@ -1779,9 +1795,10 @@ fn iterate_runs_the_body_once_per_element() {
     assert_eq!(up.status, NodeStatus::Ok);
 
     // 循环体跑了两轮 —— 自动输出目录里该有两份产物。
-    let produced: Vec<_> = std::fs::read_dir(out.join("循环"))
+    let produced: Vec<_> = std::fs::read_dir(report.output_dir.as_ref().unwrap())
         .unwrap()
         .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
         .collect();
     assert_eq!(produced.len(), 2, "两轮该落两份");
 }
@@ -1828,9 +1845,10 @@ fn iterate_honours_the_maximum() {
         "{:?}",
         it.warnings
     );
-    let produced = std::fs::read_dir(out.join("限量"))
+    let produced = std::fs::read_dir(report.output_dir.as_ref().unwrap())
         .unwrap()
         .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
         .count();
     assert_eq!(produced, 1, "限量到 1 就只跑一轮");
 }
@@ -1873,7 +1891,7 @@ fn nested_loops_partition_into_direct_scopes() {
         .push(node("w", crate::nodes::rename::KIND, rn.clone()));
     workflow.edges.push(edge("e5", "w", "out", "y", "in"));
 
-    let sets = super::loop_sets(&workflow);
+    let sets = super::loop_sets(registry(), &workflow);
     let outer = &sets["outer"];
     assert_eq!(
         sorted(&outer.direct),
@@ -1886,14 +1904,776 @@ fn nested_loops_partition_into_direct_scopes() {
     assert_eq!(inner.reach.len(), 2, "内层不该把外层的节点算进来");
 
     // 内层的外部依赖 w 该排到内层之前。
-    let ordering = super::loop_ordering(&workflow);
+    let ordering = super::loop_ordering(registry(), &workflow);
     assert!(ordering.contains(&("w", "inner")), "{:?}", ordering);
-    // 外层自己直接作用域里的节点（x / inner）都不算「外部」。
     assert!(
-        !ordering.iter().any(|pair| pair.1 == "outer"),
-        "{:?}",
-        ordering
+        ordering.contains(&("w", "outer")),
+        "嵌套体用到的外部依赖必须在外层之前"
     );
+    assert!(!ordering.contains(&("x", "outer")));
+}
+
+fn loop_fixture(src: &Path) -> Workflow {
+    let mut workflow = Workflow::new("loop regression");
+    let mut params = defaults(crate::nodes::read_dir::KIND);
+    params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
+    workflow
+        .nodes
+        .push(node("source", crate::nodes::read_dir::KIND, params));
+    workflow.nodes.push(node(
+        "loop",
+        crate::nodes::iterate::KIND,
+        defaults(crate::nodes::iterate::KIND),
+    ));
+    workflow.nodes.push(node(
+        "body",
+        crate::nodes::upscale::KIND,
+        defaults(crate::nodes::upscale::KIND),
+    ));
+    workflow
+        .edges
+        .push(edge("list", "source", "out", "loop", "list"));
+    workflow
+        .edges
+        .push(edge("item", "loop", "item", "body", "image"));
+    workflow
+}
+
+#[test]
+fn empty_loop_runs_zero_iterations_and_still_signals_finally() {
+    use crate::registry::RegistryBuilder;
+    let mut builder = RegistryBuilder::with_builtins().unwrap();
+    builder
+        .register_node(test_spec(
+            "empty_source",
+            vec![],
+            vec![PortDef::new("out", "list", PortType::any_list())],
+            |_| Ok(ValueMap::from([("out".into(), Value::List(vec![]))])),
+        ))
+        .unwrap();
+    let registry = builder.freeze().unwrap();
+    let mut workflow = loop_fixture(&workspace("empty-loop"));
+    workflow.nodes[0] = node("source", "empty_source", Params::new());
+    workflow.nodes.push(node(
+        "done",
+        crate::nodes::literal::KIND_TEXT,
+        defaults(crate::nodes::literal::KIND_TEXT),
+    ));
+    workflow.edges.push(edge(
+        "done",
+        "loop",
+        "finally",
+        "done",
+        crate::model::node_kind::VOID_INPUT_PORT,
+    ));
+    for target in [None, Some("body"), Some("done")] {
+        let report = run_with_registry(
+            &registry,
+            &workflow,
+            target,
+            &workspace("empty-loop-out"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
+        assert!(!report.nodes.iter().any(|result| result.node_id == "body"));
+        let loop_result = report
+            .nodes
+            .iter()
+            .find(|result| result.node_id == "loop")
+            .unwrap();
+        assert_eq!(loop_result.status, NodeStatus::Ok);
+        assert_eq!(loop_result.warnings, vec!["遍历了 0 个元素"]);
+        assert_eq!(
+            report.nodes.iter().any(|result| result.node_id == "done"),
+            target != Some("body"),
+        );
+    }
+}
+
+#[test]
+fn nested_empty_loops_do_not_execute_bodies_or_reuse_previous_items() {
+    use crate::registry::RegistryBuilder;
+    let mut builder = RegistryBuilder::with_builtins().unwrap();
+    builder
+        .register_node(test_spec(
+            "nested_empty_source",
+            vec![],
+            vec![PortDef::new("out", "list", PortType::any_list())],
+            |_| {
+                Ok(ValueMap::from([(
+                    "out".into(),
+                    Value::List(vec![
+                        Value::List(vec![]),
+                        Value::List(vec![Value::text("only item")]),
+                        Value::List(vec![]),
+                    ]),
+                )]))
+            },
+        ))
+        .unwrap();
+    let registry = builder.freeze().unwrap();
+    let mut workflow = Workflow::new("nested empty loops");
+    workflow.nodes = vec![
+        node("source", "nested_empty_source", Params::new()),
+        node(
+            "outer",
+            crate::nodes::iterate::KIND,
+            defaults(crate::nodes::iterate::KIND),
+        ),
+        node(
+            "inner",
+            crate::nodes::iterate::KIND,
+            defaults(crate::nodes::iterate::KIND),
+        ),
+        node(
+            "body",
+            crate::nodes::rename::KIND,
+            defaults(crate::nodes::rename::KIND),
+        ),
+        node(
+            "inner_done",
+            crate::nodes::literal::KIND_TEXT,
+            defaults(crate::nodes::literal::KIND_TEXT),
+        ),
+        node(
+            "outer_done",
+            crate::nodes::literal::KIND_TEXT,
+            defaults(crate::nodes::literal::KIND_TEXT),
+        ),
+    ];
+    workflow.edges = vec![
+        edge("list", "source", "out", "outer", "list"),
+        edge("nested", "outer", "item", "inner", "list"),
+        edge("item", "inner", "item", "body", "in"),
+        edge(
+            "inner_done",
+            "inner",
+            "finally",
+            "inner_done",
+            crate::model::node_kind::VOID_INPUT_PORT,
+        ),
+        edge(
+            "outer_done",
+            "outer",
+            "finally",
+            "outer_done",
+            crate::model::node_kind::VOID_INPUT_PORT,
+        ),
+    ];
+    let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
+    let progress = Progress::new(tx);
+    let report = run_with_registry(
+        &registry,
+        &workflow,
+        None,
+        &workspace("nested-empty-out"),
+        None,
+        Some(&progress),
+    )
+    .unwrap();
+    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
+    let inner = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "inner")
+        .unwrap();
+    assert_eq!(
+        inner.warnings,
+        vec!["遍历了 0 个元素", "遍历了 1 个元素", "遍历了 0 个元素"]
+    );
+    let body = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "body")
+        .unwrap();
+    assert_eq!(body.status, NodeStatus::Ok);
+    assert_eq!(body.outputs[0].summary, "only item");
+    let finished: Vec<_> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            crate::progress::ProgressEvent::Finished { result } => Some(result),
+            _ => None,
+        })
+        .collect();
+    for (id, count) in [
+        ("body", 1),
+        ("inner", 3),
+        ("inner_done", 3),
+        ("outer_done", 1),
+    ] {
+        assert_eq!(
+            finished
+                .iter()
+                .filter(|result| result.node_id == id)
+                .count(),
+            count,
+            "{id}"
+        );
+    }
+    for id in ["inner_done", "outer_done"] {
+        assert_eq!(
+            report
+                .nodes
+                .iter()
+                .find(|result| result.node_id == id)
+                .unwrap()
+                .status,
+            NodeStatus::Ok
+        );
+    }
+}
+
+#[test]
+fn connected_loop_limit_overrides_the_saved_parameter() {
+    let src = workspace("wired-max");
+    image_fixture(&src, "png", 2, 2);
+    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
+    let mut workflow = loop_fixture(&src);
+    let mut params = defaults(crate::nodes::literal::KIND_NUMBER);
+    params.insert("value".into(), serde_json::json!(1));
+    workflow
+        .nodes
+        .push(node("limit", crate::nodes::literal::KIND_NUMBER, params));
+    workflow
+        .edges
+        .push(edge("max", "limit", "out", "loop", "param:max"));
+    let report = run(&workflow, None, &workspace("wired-max-out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    assert!(report
+        .nodes
+        .iter()
+        .find(|r| r.node_id == "loop")
+        .unwrap()
+        .warnings
+        .iter()
+        .any(|w| w.contains("遍历了 1 个元素")));
+}
+
+#[test]
+fn loop_merge_keeps_execution_errors_above_skips_and_successes() {
+    use crate::registry::RegistryBuilder;
+    for order in [[1.0, 2.0, 3.0], [2.0, 1.0, 3.0]] {
+        let mut builder = RegistryBuilder::with_builtins().unwrap();
+        builder
+            .register_node(test_spec(
+                "merge_source",
+                vec![],
+                vec![PortDef::new("out", "list", PortType::any_list())],
+                move |_| {
+                    Ok(ValueMap::from([(
+                        "out".into(),
+                        Value::List(order.into_iter().map(Value::Number).collect()),
+                    )]))
+                },
+            ))
+            .unwrap();
+        builder
+            .register_node(test_spec(
+                "merge_gate",
+                vec![PortDef::new("in", "in", PortType::Number).required()],
+                vec![PortDef::new("out", "out", PortType::Number)],
+                |args| {
+                    let value = args.input("in")?.as_number()?;
+                    if value == 2.0 {
+                        Ok(ValueMap::new())
+                    } else {
+                        Ok(ValueMap::from([("out".into(), Value::Number(value))]))
+                    }
+                },
+            ))
+            .unwrap();
+        builder
+            .register_node(test_spec(
+                "merge_body",
+                vec![PortDef::new("in", "in", PortType::Number).required()],
+                vec![PortDef::new("out", "out", PortType::Number)],
+                |args| {
+                    let value = args.input("in")?.as_number()?;
+                    args.warnings.push(format!("executed {value}"));
+                    if value == 1.0 {
+                        Err(crate::error::NodeError::new("actual execution failure"))
+                    } else {
+                        Ok(ValueMap::from([("out".into(), Value::Number(value))]))
+                    }
+                },
+            ))
+            .unwrap();
+        let registry = builder.freeze().unwrap();
+        let mut workflow = Workflow::new("merge error priority");
+        workflow.nodes = vec![
+            node("source", "merge_source", Params::new()),
+            node(
+                "loop",
+                crate::nodes::iterate::KIND,
+                defaults(crate::nodes::iterate::KIND),
+            ),
+            node("gate", "merge_gate", Params::new()),
+            node("body", "merge_body", Params::new()),
+        ];
+        workflow.edges = vec![
+            edge("list", "source", "out", "loop", "list"),
+            edge("item", "loop", "item", "gate", "in"),
+            edge("body", "gate", "out", "body", "in"),
+        ];
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
+        let progress = Progress::new(tx);
+        let report = run_with_registry(
+            &registry,
+            &workflow,
+            None,
+            &workspace("merge-priority-out"),
+            None,
+            Some(&progress),
+        )
+        .unwrap();
+        assert!(!report.ok);
+        let body = report
+            .nodes
+            .iter()
+            .find(|result| result.node_id == "body")
+            .unwrap();
+        assert_eq!(body.status, NodeStatus::Failed);
+        assert_eq!(body.error.as_deref(), Some("actual execution failure"));
+        assert_eq!(body.warnings, vec!["executed 1", "executed 3"]);
+        assert_eq!(body.outputs[0].summary, "3");
+        let statuses: Vec<_> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                crate::progress::ProgressEvent::Finished { result } if result.node_id == "body" => {
+                    Some(result.status)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            if order[0] == 1.0 {
+                vec![NodeStatus::Failed, NodeStatus::Skipped, NodeStatus::Ok]
+            } else {
+                vec![NodeStatus::Skipped, NodeStatus::Failed, NodeStatus::Ok]
+            }
+        );
+    }
+}
+
+#[test]
+fn loop_failures_do_not_block_later_iterations() {
+    let src = workspace("iteration-reset");
+    image_fixture(&src, "jpg", 2, 2);
+    image_fixture(&src, "png", 2, 2);
+    let mut workflow = loop_fixture(&src);
+    workflow.nodes.push(node(
+        "after",
+        crate::nodes::rename::KIND,
+        defaults(crate::nodes::rename::KIND),
+    ));
+    workflow
+        .edges
+        .push(edge("after", "body", "image", "after", "in"));
+    let root = workspace("iteration-reset-out");
+    let report = run(&workflow, None, &root).unwrap();
+    assert!(
+        !report.ok,
+        "earlier failure must remain in the aggregate report"
+    );
+    let after = report.nodes.iter().find(|r| r.node_id == "after").unwrap();
+    assert!(
+        !after.outputs.is_empty(),
+        "second iteration must recover: {:?}",
+        report.nodes
+    );
+    let product = after.outputs[0].path.as_ref().unwrap();
+    assert!(Path::new(product).exists());
+    workflow
+        .nodes
+        .retain(|node| node.id == "source" || node.id == "loop");
+    workflow.edges.retain(|edge| edge.target == "loop");
+    assert!(run(&workflow, None, &root).unwrap().ok);
+    assert!(
+        !Path::new(product).exists(),
+        "failed runs must still persist artifact ownership"
+    );
+}
+
+#[test]
+fn partial_loop_run_never_executes_sibling_or_finally_branches() {
+    let src = workspace("partial-loop");
+    image_fixture(&src, "png", 2, 2);
+    let mut workflow = loop_fixture(&src);
+    workflow.nodes.push(node(
+        "sibling",
+        crate::nodes::rename::KIND,
+        defaults(crate::nodes::rename::KIND),
+    ));
+    workflow.nodes.push(node(
+        "done",
+        crate::nodes::rename::KIND,
+        defaults(crate::nodes::rename::KIND),
+    ));
+    workflow
+        .edges
+        .push(edge("sibling", "loop", "item", "sibling", "in"));
+    workflow
+        .edges
+        .push(edge("done", "loop", "finally", "done", "in"));
+    let report = run(&workflow, Some("body"), &workspace("partial-loop-out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    assert!(report
+        .nodes
+        .iter()
+        .all(|r| report.order.contains(&r.node_id)));
+    assert!(!report
+        .nodes
+        .iter()
+        .any(|r| r.node_id == "sibling" || r.node_id == "done"));
+    let report = run(&workflow, Some("done"), &workspace("partial-finally-out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    for id in ["body", "sibling", "done"] {
+        assert!(
+            report.nodes.iter().any(|r| r.node_id == id),
+            "finally must wait for its complete body"
+        );
+    }
+}
+
+#[test]
+fn unsafe_rename_stems_fail_before_saving() {
+    for name in [
+        "../escape",
+        "..\\escape",
+        "C:escape",
+        "/absolute",
+        "CON",
+        "nul.txt",
+        "COM1.png",
+        "LPT9",
+        "trailing.",
+        "trailing ",
+    ] {
+        let dir = workspace("unsafe-rename");
+        let (_, report) = rename_pipeline(&dir, name, true);
+        assert_eq!(
+            report
+                .nodes
+                .iter()
+                .find(|r| r.node_id == "rn")
+                .unwrap()
+                .status,
+            NodeStatus::Failed,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn product_manifest_preserves_user_files_and_isolates_workflow_ids() {
+    let src = workspace("manifest-source");
+    image_fixture(&src, "png", 2, 2);
+    let mut workflow = loop_fixture(&src);
+    let root = workspace("manifest-root");
+    let first = run(&workflow, None, &root).unwrap();
+    let dir = PathBuf::from(first.output_dir.unwrap());
+    let product = first
+        .nodes
+        .iter()
+        .find(|r| r.node_id == "body")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    std::fs::write(dir.join("01-user.txt"), b"user").unwrap();
+    std::fs::write(dir.join("100-user.png"), b"user").unwrap();
+    workflow.nodes.retain(|n| n.id != "body");
+    workflow.edges.retain(|e| e.target != "body");
+    let second = run(&workflow, None, &root).unwrap();
+    assert!(second.ok);
+    assert!(!Path::new(&product).exists());
+    assert_eq!(std::fs::read(dir.join("01-user.txt")).unwrap(), b"user");
+    assert_eq!(std::fs::read(dir.join("100-user.png")).unwrap(), b"user");
+    let mut other = workflow.clone();
+    other.id = "another-id".into();
+    let other = run(&other, None, &root).unwrap();
+    assert_ne!(second.output_dir, other.output_dir);
+}
+
+fn test_spec(
+    id: &str,
+    inputs: Vec<PortDef>,
+    outputs: Vec<PortDef>,
+    run: impl Fn(&mut NodeArgs<'_>) -> Result<ValueMap, crate::error::NodeError> + Send + Sync + 'static,
+) -> crate::registry::NodeSpec {
+    let mut kind = registry()
+        .get(crate::nodes::rename::KIND)
+        .unwrap()
+        .kind
+        .clone();
+    kind.id = id.into();
+    kind.name = id.into();
+    kind.inputs = inputs;
+    kind.outputs = outputs;
+    kind.params.clear();
+    crate::registry::NodeSpec::fixed(kind, run)
+}
+
+#[test]
+fn custom_control_metadata_supports_nested_loops_and_external_dependencies() {
+    use crate::registry::{ControlFlow, NodeSpec, RegistryBuilder};
+    use std::sync::{Arc, Mutex};
+    let mut builder = RegistryBuilder::with_builtins().unwrap();
+    builder
+        .register_node(test_spec(
+            "nested_source",
+            vec![],
+            vec![PortDef::new("out", "list", PortType::any_list())],
+            |_| {
+                Ok(ValueMap::from([(
+                    "out".into(),
+                    Value::List(vec![
+                        Value::List(vec![Value::Number(1.0), Value::Number(2.0)]),
+                        Value::List(vec![Value::Number(3.0)]),
+                    ]),
+                )]))
+            },
+        ))
+        .unwrap();
+    let mut kind = registry()
+        .get(crate::nodes::iterate::KIND)
+        .unwrap()
+        .kind
+        .clone();
+    kind.id = "custom_loop".into();
+    kind.inputs = vec![PortDef::new("batch", "batch", PortType::any_list()).required()];
+    kind.outputs = vec![
+        PortDef::new("current", "current", PortType::Any),
+        PortDef::new("done", "done", PortType::Void),
+    ];
+    kind.params[0].id = "ceiling".into();
+    builder
+        .register_node(
+            NodeSpec::fixed(kind, |_| panic!("loop callback must not run")).control_flow(
+                ControlFlow::Loop {
+                    list_input: "batch".into(),
+                    item_output: "current".into(),
+                    finally_output: "done".into(),
+                    max_param: "ceiling".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&seen);
+    builder
+        .register_node(test_spec(
+            "record",
+            vec![
+                PortDef::new("in", "in", PortType::Number).required(),
+                PortDef::new("external", "external", PortType::Number).required(),
+            ],
+            vec![],
+            move |args| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(args.input("in")?.as_number()? + args.input("external")?.as_number()?);
+                Ok(ValueMap::new())
+            },
+        ))
+        .unwrap();
+    let registry = builder.freeze().unwrap();
+    let mut workflow = Workflow::new("custom nested");
+    workflow.nodes = vec![
+        node("source", "nested_source", Params::new()),
+        node("outer", "custom_loop", Params::new()),
+        node("inner", "custom_loop", Params::new()),
+        node("body", "record", Params::new()),
+        node(
+            "external",
+            crate::nodes::literal::KIND_NUMBER,
+            Params::from_iter([("value".into(), serde_json::json!(10))]),
+        ),
+    ];
+    workflow.edges = vec![
+        edge("a", "source", "out", "outer", "batch"),
+        edge("b", "outer", "current", "inner", "batch"),
+        edge("c", "inner", "current", "body", "in"),
+        edge("d", "external", "out", "body", "external"),
+    ];
+    let report = run_with_registry(
+        &registry,
+        &workflow,
+        None,
+        &workspace("custom-nested"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
+    assert_eq!(*seen.lock().unwrap(), vec![11.0, 12.0, 13.0]);
+    seen.lock().unwrap().clear();
+    workflow.nodes.push(node(
+        "limit",
+        crate::nodes::literal::KIND_NUMBER,
+        Params::from_iter([("value".into(), serde_json::json!(1))]),
+    ));
+    workflow
+        .edges
+        .push(edge("limit", "limit", "out", "inner", "param:ceiling"));
+    let report = run_with_registry(
+        &registry,
+        &workflow,
+        Some("body"),
+        &workspace("custom-nested-partial"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
+    assert_eq!(*seen.lock().unwrap(), vec![11.0, 13.0]);
+}
+
+#[test]
+fn loop_parameter_inputs_share_runtime_type_and_failure_checks() {
+    use crate::registry::RegistryBuilder;
+    for fail in [false, true] {
+        let src = workspace("bad-loop-max");
+        image_fixture(&src, "png", 2, 2);
+        let mut builder = RegistryBuilder::with_builtins().unwrap();
+        builder
+            .register_node(test_spec(
+                "bad_limit",
+                vec![],
+                vec![PortDef::new("out", "limit", PortType::Any)],
+                move |_| {
+                    if fail {
+                        Err(crate::error::NodeError::new("failed limit"))
+                    } else {
+                        Ok(ValueMap::from([(
+                            "out".into(),
+                            Value::text("not a number"),
+                        )]))
+                    }
+                },
+            ))
+            .unwrap();
+        let registry = builder.freeze().unwrap();
+        let mut workflow = loop_fixture(&src);
+        workflow
+            .nodes
+            .push(node("limit", "bad_limit", Params::new()));
+        workflow
+            .edges
+            .push(edge("limit", "limit", "out", "loop", "param:max"));
+        let report = run_with_registry(
+            &registry,
+            &workflow,
+            None,
+            &workspace("bad-loop-max-out"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!report.ok);
+        assert_eq!(
+            report
+                .nodes
+                .iter()
+                .find(|r| r.node_id == "loop")
+                .unwrap()
+                .status,
+            if fail {
+                NodeStatus::Skipped
+            } else {
+                NodeStatus::Failed
+            }
+        );
+        assert_eq!(
+            report
+                .nodes
+                .iter()
+                .find(|r| r.node_id == "body")
+                .unwrap()
+                .status,
+            NodeStatus::Skipped
+        );
+    }
+}
+
+#[test]
+fn sequence_ordering_uses_custom_prefixes() {
+    use crate::registry::{ControlFlow, RegistryBuilder};
+    let mut builder = RegistryBuilder::with_builtins().unwrap();
+    builder
+        .register_node(
+            test_spec(
+                "custom_sequence",
+                vec![],
+                vec![
+                    PortDef::new("step1", "one", PortType::Void),
+                    PortDef::new("step2", "two", PortType::Void),
+                ],
+                |_| {
+                    Ok(ValueMap::from([
+                        ("step1".into(), Value::Void),
+                        ("step2".into(), Value::Void),
+                    ]))
+                },
+            )
+            .control_flow(ControlFlow::Sequence {
+                output_prefix: "step".into(),
+                blocking_prefix: "wait".into(),
+            }),
+        )
+        .unwrap();
+    let registry = builder.freeze().unwrap();
+    let mut workflow = Workflow::new("custom sequence");
+    workflow.nodes = vec![
+        node("b", crate::nodes::literal::KIND_TEXT, Params::new()),
+        node("a", crate::nodes::literal::KIND_TEXT, Params::new()),
+        node("seq", "custom_sequence", Params::new()),
+    ];
+    workflow.edges = vec![
+        edge(
+            "b",
+            "seq",
+            "step2",
+            "b",
+            crate::model::node_kind::VOID_INPUT_PORT,
+        ),
+        edge(
+            "a",
+            "seq",
+            "step1",
+            "a",
+            crate::model::node_kind::VOID_INPUT_PORT,
+        ),
+    ];
+    let report = run_with_registry(
+        &registry,
+        &workflow,
+        None,
+        &workspace("custom-sequence"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    assert_eq!(report.order, vec!["seq", "a", "b"]);
+    workflow.nodes[2]
+        .params
+        .insert("wait1".into(), serde_json::json!(false));
+    let report = run_with_registry(
+        &registry,
+        &workflow,
+        None,
+        &workspace("custom-sequence-free"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.order, vec!["seq", "b", "a"]);
 }
 
 fn sorted(set: &HashSet<String>) -> Vec<String> {

@@ -2,6 +2,11 @@
 //!
 //! 屏幕上除了画布只有浮动控件 —— 没有左右边栏，一切都浮在画布上。
 
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod canvas;
 mod catalog;
 mod state;
@@ -11,19 +16,19 @@ use eframe::egui;
 use egui::CornerRadius;
 
 use crate::canvas::graph::{self, Graph};
-use crate::catalog::Kind;
 use crate::state::run;
 use crate::state::settings;
 use crate::state::workspace::Workspace;
-use crate::ui::chrome;
-use crate::ui::library::Library;
-use crate::ui::prompt;
-use crate::ui::report;
+use crate::ui::panels::chrome;
+use crate::ui::panels::library::Library;
+use crate::ui::panels::prompt;
+use crate::ui::panels::report;
 use crate::ui::theme;
+use starrytools_core::model::node_kind::NodeKindInfo;
 use starrytools_core::model::workflow::Workflow;
 
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("StarryTools")
             .with_inner_size([1440.0, 920.0])
@@ -31,6 +36,9 @@ fn main() -> eframe::Result {
             .with_icon(app_icon()),
         ..Default::default()
     };
+    // 软件 pacer 是唯一限帧时钟；不叠加 FIFO vsync，避免 60fps 被量化成 30fps。
+    // 保持 eframe 的默认 renderer；不支持非 vsync 的平台由 wgpu 自动回退。
+    options.wgpu_options.surface.present_mode = eframe::egui_wgpu::wgpu::PresentMode::AutoNoVsync;
     eframe::run_native(
         "StarryTools",
         options,
@@ -54,7 +62,7 @@ fn app_icon() -> egui::IconData {
 
 struct App {
     /// 全部内置工具，启动时从 core 的注册表读一次。
-    kinds: Vec<Kind>,
+    kinds: Vec<NodeKindInfo>,
     graph: Graph,
     workspace: Workspace,
     library: Library,
@@ -69,6 +77,7 @@ struct App {
     prompt: prompt::Prompt,
     /// 应用级设置（帧率上限、是否显示 fps）。
     settings: settings::Settings,
+    pacer: state::pacing::FramePacer,
     /// 顶部弹出的一条提示（保存 / 加载失败之类）以及它出现的时刻。
     toast: Option<(String, f64)>,
     /// `to_workflow` 的结果，按画布的**语义**版本号缓存 —— 拖动节点时不必每帧重建。
@@ -78,9 +87,11 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
-        // 界面不认识任何具体工具：下面这一行就是它了解全部节点的全部途径。
+        state::bind_ui(&cc.egui_ctx);
+        // 界面只消费注册表；工具/模型的首次探测与字体安装并行。
         let kinds = catalog::all();
+        state::models::prewarm(&kinds, &cc.egui_ctx);
+        theme::apply(&cc.egui_ctx);
         let mut workspace = Workspace::open(&kinds);
         let graph = Graph::from_workflow(workspace.workflow(), &kinds);
         workspace.mark_saved(&graph);
@@ -96,6 +107,7 @@ impl App {
             report: report::Report::default(),
             prompt: prompt::Prompt::default(),
             settings: settings::Settings::load(),
+            pacer: state::pacing::FramePacer::default(),
             toast: None,
             workflow_cache: None,
         }
@@ -108,23 +120,29 @@ impl App {
         self.graph = graph;
         // 换了整张图，语义版本从头开始 —— 缓存的旧工作流不能再认。
         self.workflow_cache = None;
+        self.check.invalidate();
+        self.runner.detach();
+        self.prompt = prompt::Prompt::default();
+        self.chrome.invalidate_workflows();
     }
 
-    fn apply(&mut self, action: chrome::Action) {
+    fn apply(&mut self, action: chrome::Action, ctx: &egui::Context) {
         match action {
             chrome::Action::Save => {
                 self.workspace.save(&self.graph);
+                self.chrome.invalidate_workflows();
             }
-            chrome::Action::New => {
+            chrome::Action::New if !self.runner.is_running() => {
                 self.workspace.new_workflow(&self.kinds);
                 self.adopt();
             }
-            chrome::Action::Load(id) => {
+            chrome::Action::Load(id) if !self.runner.is_running() => {
                 if self.workspace.load(&id).is_some() {
                     self.adopt();
                 }
             }
-            chrome::Action::Run => self.start_run(None),
+            chrome::Action::New | chrome::Action::Load(_) => {}
+            chrome::Action::Run => self.start_run(None, ctx),
             chrome::Action::Select(id) => self.select(&id),
         }
     }
@@ -134,19 +152,27 @@ impl App {
     }
 
     /// 开跑。`only` 是「运行至此」的那个节点，`None` 就是跑整张图。
-    fn start_run(&mut self, only: Option<String>) {
+    fn start_run(&mut self, only: Option<String>, ctx: &egui::Context) {
+        // 包括画布的「运行至此」入口：检查尚未返回或本帧刚编辑时都不能运行旧快照。
+        if self.runner.is_running() || !self.check.runnable(self.graph.check_revision()) {
+            return;
+        }
         // 新的一次运行：先把上一次留下的缩略图 / 色板 / 状态清掉，
         // 接下来缩略图会随着每个节点跑完一张张出现。
         self.graph.reset_run_marks();
         let workflow = self.graph.to_workflow(self.workspace.workflow());
         let output_root = self.workspace.output_root.clone();
-        self.runner.start(workflow, only, output_root);
+        self.runner.start(workflow, only, output_root, ctx);
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        state::bind_ui(&ctx);
+        self.pacer
+            .pace(ctx.cumulative_frame_nr(), self.settings.clamped_fps());
+        self.runner.poll();
 
         let rect = ui.max_rect();
         ui.painter()
@@ -160,9 +186,13 @@ impl eframe::App for App {
             let workflow = self.graph.to_workflow(self.workspace.workflow());
             self.workflow_cache = Some((content, workflow));
         }
-        let (mut marks, runnable, errors, first_bad) = {
+        let (mut marks, errors, first_bad) = {
             let workflow = &self.workflow_cache.as_ref().expect("刚放进去").1;
-            let resolved = self.check.get(content, workflow);
+            let resolved = self.check.get(content, workflow, &ctx);
+            // unchecked 快照无节点；Check 已按 generation/revision 丢弃过期结果。
+            if !resolved.nodes.is_empty() {
+                self.graph.sync_resolved_ports(content, resolved);
+            }
             let bad = resolved
                 .issues
                 .iter()
@@ -173,7 +203,6 @@ impl eframe::App for App {
                 .and_then(|issue| issue.node_id.clone());
             (
                 run::Marks::build(resolved, self.runner.report()),
-                resolved.runnable,
                 self.check.errors(),
                 bad,
             )
@@ -208,16 +237,20 @@ impl eframe::App for App {
             show_fps: self.settings.show_fps,
         };
         if let Some(node_id) = self.graph.ui(ui, rect, &self.kinds, &marks, view) {
-            self.start_run(Some(node_id));
+            self.start_run(Some(node_id), &ctx);
         }
         // Ctrl+S：画布把请求挂出来，这里执行落盘。
         if self.graph.take_save_request() {
             self.workspace.save(&self.graph);
+            self.chrome.invalidate_workflows();
         }
 
         // ---- 左上 / 右上：浮动控件 ----
         let dirty = self.workspace.is_dirty(&self.graph);
         let running = self.runner.is_running();
+        let revision = self.graph.check_revision();
+        let runnable = self.check.runnable(revision);
+        let checking = self.check.pending() || revision != content;
         let nodes = self.graph.nodes.len();
         let edges = self.graph.wires.len();
         if let Some(action) = self.chrome.ui(
@@ -227,12 +260,14 @@ impl eframe::App for App {
             &mut self.settings,
             dirty,
             running,
+            runnable,
+            checking,
             errors,
             first_bad.as_deref(),
             nodes,
             edges,
         ) {
-            self.apply(action);
+            self.apply(action, &ctx);
         }
 
         // ---- 节点库浮层 ----
@@ -264,10 +299,10 @@ impl eframe::App for App {
         let toast_alive = self
             .toast
             .as_ref()
-            .is_some_and(|(_, shown_at)| now - shown_at < TOAST_SECS);
+            .is_some_and(|(_, shown_at)| now - shown_at < ui::motion::TOAST);
         if let Some((message, shown_at)) = &self.toast {
             if toast_alive {
-                draw_toast(&ctx, message, ((now - shown_at) / TOAST_SECS) as f32);
+                draw_toast(&ctx, message, now - shown_at);
             }
         }
         if !toast_alive {
@@ -282,28 +317,23 @@ impl eframe::App for App {
         }
 
         // ---- 需要时继续重绘 ----
-        // （动画本身会自己请求重绘；这里只补上「时间在走」的那种：运行中、刀光未散。）
-        //
-        // 用 `request_repaint_after` 而不是 `request_repaint`：空闲时根本不会重绘，
-        // 而动画期间也只钉在用户设的帧率上限上。
-        //
-        // **不**在帧里 `sleep` —— 那会推后输入事件的处理，而且当上限与刷新率相等时
-        // 极易错过下一个 vsync、反而掉帧。输入事件本来就会触发一帧（这是响应性），
-        // 这里节流的是**自发的**动画重绘。
-        if running || self.graph.is_animating() || toast_alive {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f32(
-                1.0 / self.settings.clamped_fps(),
-            ));
+        // 输入、内部动画和后台唤醒都由帧开头的 pacer 统一限速。
+        // 不再追加整帧的 repaint_after，否则渲染时间/vsync 会叠加到等待预算里。
+        // 本帧画布修改/换图后必须再绘一帧，才能向检查 worker 提交最新快照。
+        if self.runner.is_running()
+            || self.graph.is_animating()
+            || toast_alive
+            || self.graph.check_revision() != content
+            || self.workflow_cache.is_none()
+        {
+            ctx.request_repaint();
         }
     }
 }
 
-/// 顶部提示停留的秒数。
-const TOAST_SECS: f64 = 4.0;
-
-/// 顶部中间弹出的一条提示（保存 / 加载失败之类）。最后半秒淡出。
-fn draw_toast(ctx: &egui::Context, message: &str, progress: f32) {
-    let fade = ((1.0 - progress) / 0.15).min(1.0);
+/// 顶部中间弹出的一条提示（保存 / 加载失败之类）。
+fn draw_toast(ctx: &egui::Context, message: &str, elapsed: f64) {
+    let fade = ui::motion::toast_alpha(elapsed);
     egui::Area::new(egui::Id::new("toast"))
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
         .order(egui::Order::Foreground)

@@ -44,6 +44,7 @@ pub fn spec() -> NodeSpec {
                     min: 1.0,
                     max: MAX_OUTPUTS as f64,
                     blocking: true,
+                    blocking_prefix: "block".into(),
                 },
             )
             .described("接在这个输出上的分支会先跑。按加号增加一个输出，从上到下依次执行。")],
@@ -61,6 +62,10 @@ pub fn spec() -> NodeSpec {
         output_ports,
         run,
     )
+    .control_flow(crate::registry::ControlFlow::Sequence {
+        output_prefix: "out".into(),
+        blocking_prefix: "block".into(),
+    })
 }
 
 /// 按参数里的个数现算这一排输出端口：`out1`（必须）+ `out2` .. `outN`（可选）。

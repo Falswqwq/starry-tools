@@ -1,12 +1,12 @@
-//! 界面外观：主题、通用控件、参数控件、图标，以及几个浮动面板。
+//! 主题令牌、通用控件和浮动面板。
 
-pub(crate) mod chrome;
-pub(crate) mod controls;
-pub(crate) mod easing;
 pub(crate) mod icons;
-pub(crate) mod library;
-pub(crate) mod prompt;
-pub(crate) mod report;
-pub(crate) mod svgpath;
+pub(crate) mod motion;
+pub(crate) mod panels;
 pub(crate) mod theme;
 pub(crate) mod widgets;
+
+// 画布使用的公共模块入口；实现按职责归组，不复制契约或控件。
+pub(crate) use icons::svgpath;
+pub(crate) use motion as easing;
+pub(crate) use widgets::controls;

@@ -4,8 +4,7 @@
 //! 面板里能挑**下载源**（原始源 / 镜像源），点一下就在后台线程下到
 //! `<数据目录>/models/`；下完节点自动恢复。
 //!
-//! 节点的「缺不缺模型」由 [`crate::catalog::Kind::model_missing`] 看磁盘上有没有文件
-//! 来判断（每帧都看一次 —— 就是一次 `stat`，节点没几个）。这里只管**正在下**的那些。
+//! 节点的依赖状态由 `catalog::requirements` 缓存；下载结束后画布刷新对应节点。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +12,18 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 
 use starrytools_core::bg_model::{self, Model};
+
+/// 每个工具仅提交一次后台探测；UI 始终读取 Pending/Available/Missing 快照。
+pub fn prewarm(
+    kinds: &[starrytools_core::model::node_kind::NodeKindInfo],
+    ctx: &eframe::egui::Context,
+) {
+    for info in kinds {
+        if let Some(tool) = &info.requires_tool {
+            crate::catalog::tool_status(tool, Some(ctx.clone()));
+        }
+    }
+}
 
 /// 后台线程推回来的一件事。
 enum Event {
@@ -53,6 +64,14 @@ pub struct Downloads {
     sources: HashMap<String, usize>,
 }
 
+impl Drop for Downloads {
+    fn drop(&mut self) {
+        for task in self.tasks.values() {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Downloads {
     /// 某个节点是不是正下着。
     pub fn busy(&self, node_id: &str) -> bool {
@@ -61,7 +80,7 @@ impl Downloads {
 
     /// 还有下载在进行吗 —— 有的话界面要持续重绘，进度条才会动。
     pub fn any(&self) -> bool {
-        !self.tasks.is_empty()
+        self.tasks.values().any(|task| task.failed.is_none())
     }
 
     /// 某个节点当前的下载任务。
@@ -96,12 +115,23 @@ impl Downloads {
         let (tx, rx) = mpsc::channel();
 
         let worker_cancel = cancel.clone();
+        let ctx = super::ui_context();
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
-            let result = bg_model::download(model, url, &worker_cancel, &move |received, total| {
-                let _ = progress_tx.send(Event::Progress(received, total));
-            });
+            let progress_ctx = ctx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bg_model::download(model, url, &worker_cancel, &move |received, total| {
+                    let _ = progress_tx.send(Event::Progress(received, total));
+                    if let Some(ctx) = &progress_ctx {
+                        ctx.request_repaint();
+                    }
+                })
+            }))
+            .unwrap_or_else(|_| Err("下载线程异常退出".to_string()));
             let _ = tx.send(Event::Done(result.map(|_| ())));
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
         });
 
         self.tasks.insert(
@@ -131,7 +161,9 @@ impl Downloads {
     pub fn poll(&mut self) -> Vec<String> {
         let mut done: Vec<String> = Vec::new();
         for (id, task) in &mut self.tasks {
-            loop {
+            // 避免网络进度比绘制快时，一帧无界排空通道。
+            let mut exhausted = true;
+            for _ in 0..256 {
                 match task.rx.try_recv() {
                     Ok(Event::Progress(received, total)) => {
                         task.received = received;
@@ -141,19 +173,30 @@ impl Downloads {
                     }
                     Ok(Event::Done(Ok(()))) => {
                         done.push(id.clone());
+                        exhausted = false;
                         break;
                     }
                     Ok(Event::Done(Err(err))) => {
                         task.failed = Some(err);
+                        exhausted = false;
                         break;
                     }
-                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Empty) => {
+                        exhausted = false;
+                        break;
+                    }
                     Err(TryRecvError::Disconnected) => {
                         if task.failed.is_none() {
                             task.failed = Some("下载线程异常退出".to_string());
                         }
+                        exhausted = false;
                         break;
                     }
+                }
+            }
+            if exhausted {
+                if let Some(ctx) = super::ui_context() {
+                    ctx.request_repaint();
                 }
             }
         }
@@ -161,5 +204,64 @@ impl Downloads {
             self.tasks.remove(id);
         }
         done
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn download(rx: Receiver<Event>) -> Download {
+        Download {
+            received: 0,
+            total: None,
+            failed: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx,
+        }
+    }
+
+    #[test]
+    fn failed_download_does_not_keep_animation_running() {
+        let (tx, rx) = mpsc::channel();
+        let mut downloads = Downloads::default();
+        downloads.tasks.insert("node".into(), download(rx));
+        tx.send(Event::Done(Err("failed".into()))).unwrap();
+        downloads.poll();
+        assert!(!downloads.any());
+        assert_eq!(
+            downloads.get("node").unwrap().failed.as_deref(),
+            Some("failed")
+        );
+    }
+
+    #[test]
+    fn progress_is_bounded_and_completion_is_not_lost() {
+        let (tx, rx) = mpsc::channel();
+        let mut downloads = Downloads::default();
+        downloads.tasks.insert("node".into(), download(rx));
+        for received in 1..=300 {
+            tx.send(Event::Progress(received, Some(300))).unwrap();
+        }
+        tx.send(Event::Done(Ok(()))).unwrap();
+        assert!(downloads.poll().is_empty());
+        assert_eq!(downloads.get("node").unwrap().received, 256);
+        assert_eq!(downloads.poll(), vec!["node".to_string()]);
+        assert!(!downloads.busy("node"));
+    }
+
+    #[test]
+    fn drop_cancels_download_and_disconnection_reports_failure() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let task = download(rx);
+        let cancel = task.cancel.clone();
+        let mut downloads = Downloads::default();
+        downloads.tasks.insert("node".into(), task);
+        downloads.poll();
+        assert!(downloads.get("node").unwrap().failed.is_some());
+        assert!(!downloads.any());
+        drop(downloads);
+        assert!(cancel.load(Ordering::Relaxed));
     }
 }

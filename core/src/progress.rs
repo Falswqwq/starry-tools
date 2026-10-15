@@ -6,7 +6,10 @@
 //!
 //! 和 [`crate::interaction`] 一样，这也是一条单方向的通道 —— 界面只管收。
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
+
+/// 每一级后台进度通道最多保留的事件数；满时仅后台线程背压。
+pub const PROGRESS_CAPACITY: usize = 512;
 
 use crate::engine::NodeRunResult;
 
@@ -42,11 +45,11 @@ pub enum ProgressEvent {
 
 /// 运行线程这一端：往界面推进度。
 pub struct Progress {
-    sender: Sender<ProgressEvent>,
+    sender: SyncSender<ProgressEvent>,
 }
 
 impl Progress {
-    pub fn new(sender: Sender<ProgressEvent>) -> Self {
+    pub fn new(sender: SyncSender<ProgressEvent>) -> Self {
         Self { sender }
     }
 

@@ -1,160 +1,113 @@
-//! 节点清单 —— 直接读 core 的注册表。
-//!
-//! 这里**不认识任何具体工具**：节点的名字、分类、描述、注意事项、端口类型、
-//! 参数控件、默认值全部来自 `starrytools_core::registry()`。所以加一个新工具
-//! 只需要在 `core/src/nodes/` 里加一个文件并在 `registry.rs` 登记一行，
-//! 这个界面会自动长出对应的卡片、节点和参数控件。
+//! 直接消费 core 的节点、参数和端口契约；这里只保留 UI 专属行为。
 
 use serde_json::Value;
 use starrytools_core::bg_model;
-use starrytools_core::model::node_kind::{ParamDef, ParamSpec, PortDef};
+use starrytools_core::model::node_kind::{NodeKindInfo, ParamDef, ParamSpec, PortDef};
 use starrytools_core::model::params::Params;
-use starrytools_core::model::port_type::PortType;
-use starrytools_core::registry::{registry, tool_available};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// 一个端口在界面上需要知道的东西。
-#[derive(Clone)]
-pub struct Port {
-    /// 端口 id，落盘时用（存档里的 `sourcePort` / `targetPort` 认的就是它）。
-    pub id: String,
-    pub label: String,
-    /// 短标签，卡片上的 `IMG → PNG` 用它。
-    pub badge: String,
-    /// 真实类型。**连线合不合法就靠它**（`PortType::accepts`）；
-    /// 徽标的颜色也只看它（见 [`crate::ui::theme::badge_color`]）。
-    pub ty: PortType,
-    pub required: bool,
-    /// 这是某个**参数**的可选输入时，记下参数的 id。
-    /// 界面据此把它画在参数那一行（浅蓝的小圆点），而不是端口列里。
-    pub param: Option<String>,
-    /// **输出**端口挂在参数栏的第几行（0 起）—— 有值时画在参数栏、不画在顶部端口列。
-    pub panel_row: Option<usize>,
+use starrytools_core::registry::registry;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolStatus {
+    Pending,
+    Available,
+    Missing,
 }
 
-impl Port {
-    /// 是不是某个参数的可选输入。
-    pub fn is_param(&self) -> bool {
-        self.param.is_some()
-    }
+type ToolProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Default)]
+struct ToolChecks {
+    states: Mutex<HashMap<String, ToolStatus>>,
+    revision: AtomicU64,
 }
 
-/// 下拉框里的一个选项。
-#[derive(Clone)]
-pub struct Choice {
-    pub value: String,
-    pub label: String,
-    pub hint: Option<String>,
-}
-
-/// 参数控件。
-///
-/// 照着 core 的 [`ParamSpec`] 镜像一份 —— 那边是落盘与传输的形状，
-/// 这边是「画成什么控件」的形状。多这一层是为了让界面代码不直接依赖
-/// 后端的序列化细节。
-#[derive(Clone)]
-pub enum Control {
-    /// 拖数字。
-    Number {
-        min: f64,
-        max: f64,
-        integer: bool,
-        unit: Option<String>,
-    },
-    /// 滑杆。取值和 `Number` 完全一样，只是拖起来更顺手。
-    Slider {
-        min: f64,
-        max: f64,
-        integer: bool,
-        unit: Option<String>,
-    },
-    Text {
-        multiline: bool,
-        placeholder: Option<String>,
-    },
-    Select {
-        options: Vec<Choice>,
-    },
-    /// 通用取色器：收起时是一条色条，点开选颜色。
-    Color,
-    Bool,
-    File {
-        dialog_title: String,
-        extensions: Vec<String>,
-        directory: bool,
-    },
-    /// 一排**动态端口**：画成一列带序号的端口 + 每行一个删除按钮 + 底部一个加号。
-    /// 参数值就是**个数**。
-    Ports {
-        /// 前几项不能删（「顺序执行」必须留一个）。
-        min: usize,
-        /// 最多几个。
-        max: usize,
-        /// 每行是否带一个阻塞开关（「顺序执行」用）。
-        blocking: bool,
-    },
-}
-
-/// 参数在什么条件下才显示。
-#[derive(Clone)]
-pub struct VisibleWhen {
-    pub param: String,
-    pub any_of: Vec<String>,
-    /// 还要**同时**满足的条件。
-    pub all_of: Vec<VisibleWhen>,
-}
-
-impl VisibleWhen {
-    /// 这一条成立吗。
-    ///
-    /// 参数值一律按字符串比 —— core 那边也是这么写的（开关就是 `"true"` / `"false"`）。
-    pub fn matches(&self, params: &Params) -> bool {
-        let one = |when: &VisibleWhen| {
-            params
-                .get(&when.param)
-                .map(as_text)
-                .is_some_and(|value| when.any_of.contains(&value))
+impl ToolChecks {
+    fn request(
+        self: &Arc<Self>,
+        id: &str,
+        probe: Option<ToolProbe>,
+        ctx: Option<eframe::egui::Context>,
+    ) -> ToolStatus {
+        let mut states = self.states.lock().expect("tool snapshots");
+        if let Some(status) = states.get(id) {
+            return *status;
+        }
+        let Some(probe) = probe else {
+            states.insert(id.to_owned(), ToolStatus::Missing);
+            return ToolStatus::Missing;
         };
-        one(self) && self.all_of.iter().all(one)
+        states.insert(id.to_owned(), ToolStatus::Pending);
+        drop(states);
+        let checks = self.clone();
+        let id = id.to_owned();
+        std::thread::spawn(move || {
+            // Never hold the snapshot lock while a process/OnceLock is running.
+            let available =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe())).unwrap_or(false);
+            let status = if available {
+                ToolStatus::Available
+            } else {
+                ToolStatus::Missing
+            };
+            checks
+                .states
+                .lock()
+                .expect("tool snapshots")
+                .insert(id, status);
+            checks.revision.fetch_add(1, Ordering::Release);
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+        ToolStatus::Pending
     }
 }
 
-/// 把一个参数值取成字符串。
-fn as_text(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
+fn tool_checks() -> &'static Arc<ToolChecks> {
+    static CHECKS: OnceLock<Arc<ToolChecks>> = OnceLock::new();
+    CHECKS.get_or_init(|| Arc::new(ToolChecks::default()))
 }
 
-/// 一个参数在界面上需要知道的东西。
-#[derive(Clone)]
-pub struct Param {
-    pub id: String,
-    pub label: String,
-    pub description: Option<String>,
-    pub control: Control,
-    pub visible_when: Option<VisibleWhen>,
+pub(crate) fn tool_status(id: &str, ctx: Option<eframe::egui::Context>) -> ToolStatus {
+    tool_checks().request(id, registry().tool(id).map(|tool| tool.probe.clone()), ctx)
 }
 
-impl Param {
-    /// 现在该不该显示这个参数。
-    pub fn visible(&self, params: &Params) -> bool {
-        self.visible_when
-            .as_ref()
-            .is_none_or(|when| when.matches(params))
-    }
+pub(crate) fn tool_revision() -> u64 {
+    tool_checks().revision.load(Ordering::Acquire)
+}
 
-    /// 节点库卡片展开时那一行说明。那边不画控件，只描述一下。
-    pub fn summary(&self) -> String {
-        match &self.control {
-            Control::Number {
+pub(crate) fn refresh_tool_requirement(
+    kind_id: &str,
+    requirement: &mut crate::canvas::node::Requirements,
+) {
+    let status = registry()
+        .get(kind_id)
+        .and_then(|spec| spec.requires_tool.as_deref())
+        .map(|tool| tool_status(tool, crate::state::ui_context()));
+    requirement.tool_missing = status == Some(ToolStatus::Missing);
+    requirement.tool_checking = status == Some(ToolStatus::Pending);
+}
+
+/// 节点库展开卡片的控件摘要，不属于可序列化的参数契约。
+pub trait ParamSummary {
+    fn summary(&self) -> String;
+}
+
+impl ParamSummary for ParamDef {
+    fn summary(&self) -> String {
+        match &self.spec {
+            ParamSpec::Number {
                 min,
                 max,
                 unit,
                 integer,
                 ..
             }
-            | Control::Slider {
+            | ParamSpec::Slider {
                 min,
                 max,
                 unit,
@@ -164,14 +117,10 @@ impl Param {
                 let kind = if *integer { "整数" } else { "数值" };
                 format!("{kind} {min}–{max}{}", unit.as_deref().unwrap_or(""))
             }
-            Control::Text { multiline, .. } => {
-                if *multiline {
-                    "多行文本".to_string()
-                } else {
-                    "文本".to_string()
-                }
+            ParamSpec::Text { multiline, .. } => {
+                if *multiline { "多行文本" } else { "文本" }.to_string()
             }
-            Control::Select { options } => format!(
+            ParamSpec::Select { options, .. } => format!(
                 "下拉：{}",
                 options
                     .iter()
@@ -179,10 +128,10 @@ impl Param {
                     .collect::<Vec<_>>()
                     .join(" / ")
             ),
-            Control::Color => "颜色".to_string(),
-            Control::Bool => "开关".to_string(),
-            Control::Ports { .. } => "动态输出（可增删）".to_string(),
-            Control::File {
+            ParamSpec::Color { .. } => "颜色".to_string(),
+            ParamSpec::Bool { .. } => "开关".to_string(),
+            ParamSpec::Ports { .. } => "动态输出（可增删）".to_string(),
+            ParamSpec::File {
                 directory,
                 extensions,
                 ..
@@ -199,33 +148,12 @@ impl Param {
     }
 }
 
-/// 一个工具在界面上需要知道的东西。
-#[derive(Clone)]
-pub struct Kind {
-    pub id: String,
-    pub name: String,
-    pub category: String,
-    pub description: String,
-    /// 这是不是流程的起点（没有输入端口、工作流从它开始）。
-    pub is_source: bool,
-    /// 展开卡片时列在「注意事项」里的那几句话。
-    pub notes: Vec<String>,
-    pub inputs: Vec<Port>,
-    pub outputs: Vec<Port>,
-    pub params: Vec<Param>,
-    /// 用默认参数时会不会拦住运行（紫色节点）。节点库卡片据此标注。
-    pub interactive: bool,
-    /// 这个节点要一个**得下载的模型**才能跑时，那个「模型」参数的 id（见 [`Kind::model`]）。
-    pub model_param: Option<String>,
-    /// 这个节点要一个**外部程序**（如 `ffmpeg`）才能跑时，它的名字（见 [`Kind::tool_missing`]）。
-    pub requires_tool: Option<String>,
-    /// 新建节点时用的初始参数，免得在界面里再抄一遍默认值。
-    pub defaults: Params,
+pub trait KindRequirements {
+    fn model(&self, params: &Params) -> Option<&'static bg_model::Model>;
 }
 
-impl Kind {
-    /// 这个节点当前选中的模型。没有「模型」参数、或参数指向一个不认识的 id 时返回 `None`。
-    pub fn model(&self, params: &Params) -> Option<&'static bg_model::Model> {
+impl KindRequirements for NodeKindInfo {
+    fn model(&self, params: &Params) -> Option<&'static bg_model::Model> {
         let param = self.model_param.as_deref()?;
         let id = params
             .get(param)
@@ -235,187 +163,129 @@ impl Kind {
     }
 }
 
-/// 全部内置工具，顺序就是 `registry.rs` 里的登记顺序。
-pub fn all() -> Vec<Kind> {
-    registry()
-        .kinds()
-        .into_iter()
-        .map(|info| {
-            let kind = info.kind;
-            Kind {
-                id: kind.id.clone(),
-                name: kind.name.clone(),
-                category: kind.category.clone(),
-                description: kind.description.clone(),
-                is_source: kind.is_source,
-                notes: kind.notes.clone(),
-                inputs: ports(&kind.inputs),
-                outputs: ports(&kind.outputs),
-                params: kind.params.iter().map(param).collect(),
-                interactive: info.interactive,
-                model_param: info.model_param,
-                requires_tool: info.requires_tool,
-                defaults: info.defaults,
-            }
-        })
-        .collect()
+pub fn all() -> Vec<NodeKindInfo> {
+    registry().kinds()
 }
 
-/// 某个节点在**当前参数**下的输入输出端口。
-///
-/// 端口类型是可以跟着参数走的：「图像格式转换」选了 JPEG，输出就从 `Image(Png)`
-/// 变成 `Image(Jpeg)`；「图像压缩」换了模式也一样；「输入」节点则要真读了文件头
-/// 才知道。所以**不能在建节点的时候抄一份就完事** —— 参数一改就得重算。
-///
-/// 类型 id 不认得时返回空端口（老存档里的未知节点）。
-pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<Port>, Vec<Port>) {
+/// UI 仅计算廉价的声明端口；动态输出由后台 Check 的 ResolvedNode 快照覆盖。
+pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<PortDef>, Vec<PortDef>) {
     match registry().get(kind_id) {
-        Some(spec) => (
-            // 含**参数端口**（每个能被上游喂的参数各一个）。界面会把它们
-            // 从端口列里挑出来，画到各自的参数行上。
-            ports(&spec.kind.inputs_for(params)),
-            ports(&spec.outputs_for(params)),
-        ),
+        Some(spec) => (spec.kind.inputs_for(params), spec.kind.outputs.clone()),
         None => (Vec::new(), Vec::new()),
     }
 }
 
-/// 某个节点在当前参数下「缺模型 / 缺外部程序」吗。
-///
-/// 两项都要碰磁盘（看模型文件在不在）/ 探一次工具，所以界面把它缓存在节点上，
-/// 只在**参数变化**或**模型下载完成**时重算 —— 不要在每帧的绘制路径里直接调。
+/// 只在参数变化或下载完成后重算，不在绘制路径重复探测磁盘/工具。
 pub fn requirements(kind_id: &str, params: &Params) -> crate::canvas::node::Requirements {
     let mut missing = crate::canvas::node::Requirements::default();
     let Some(spec) = registry().get(kind_id) else {
         return missing;
     };
-    if let Some(param) = spec.model_param {
+    if let Some(param) = spec.model_param.as_deref() {
         let id = params
             .get(param)
             .and_then(Value::as_str)
             .unwrap_or_else(|| bg_model::default_model().id);
-        // 参数指向一个不认识的 id 也算「缺」——那样才拦得住运行。
         missing.model_missing =
             bg_model::find(id).is_none_or(|model| !bg_model::is_downloaded(model.id));
     }
-    if let Some(tool) = spec.requires_tool {
-        missing.tool_missing = !tool_available(tool);
-    }
+    refresh_tool_requirement(kind_id, &mut missing);
     missing
 }
 
-/// 某个节点实例在**当前参数**下会不会拦住运行（紫色节点）。
-///
-/// 和端口一样，这件事跟着参数走 —— 「图像裁切」切到形状模式才变紫。
 pub fn is_interactive(kind_id: &str, params: &Params) -> bool {
     registry().is_interactive(kind_id, params)
 }
 
-/// 分类列表：按出现顺序排，前面加一个「全部」。不写死分类名 ——
-/// core 里新加一个分类，这里自动就有了。
-pub fn categories(kinds: &[Kind]) -> Vec<String> {
+/// 返回类别 ID；显示名称由 `registry().category(id).label` 获取。
+pub fn categories(kinds: &[NodeKindInfo]) -> Vec<String> {
     let mut out = vec!["全部".to_string()];
-    for kind in kinds {
-        if !out.contains(&kind.category) {
-            out.push(kind.category.clone());
+    for info in kinds {
+        if !out.contains(&info.kind.category) {
+            out.push(info.kind.category.clone());
         }
     }
     out
 }
 
-fn ports(defs: &[PortDef]) -> Vec<Port> {
-    defs.iter()
-        .map(|def| Port {
-            id: def.id.clone(),
-            label: def.label.clone(),
-            badge: def.ty.badge().to_string(),
-            ty: def.ty,
-            required: def.required,
-            param: def.param.clone(),
-            panel_row: def.panel_row,
-        })
-        .collect()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
-fn param(def: &ParamDef) -> Param {
-    let control = match &def.spec {
-        ParamSpec::Number {
-            min,
-            max,
-            integer,
-            unit,
-            ..
-        } => Control::Number {
-            min: *min,
-            max: *max,
-            integer: *integer,
-            unit: unit.clone(),
-        },
-        ParamSpec::Slider {
-            min,
-            max,
-            integer,
-            unit,
-            ..
-        } => Control::Slider {
-            min: *min,
-            max: *max,
-            integer: *integer,
-            unit: unit.clone(),
-        },
-        ParamSpec::Text {
-            multiline,
-            placeholder,
-            ..
-        } => Control::Text {
-            multiline: *multiline,
-            placeholder: placeholder.clone(),
-        },
-        ParamSpec::Select { options, .. } => Control::Select {
-            options: options.iter().map(choice).collect(),
-        },
-        ParamSpec::Color { .. } => Control::Color,
-        ParamSpec::Bool { .. } => Control::Bool,
-        ParamSpec::Ports {
-            min, max, blocking, ..
-        } => Control::Ports {
-            min: (*min).max(0.0) as usize,
-            max: (*max).max(1.0) as usize,
-            blocking: *blocking,
-        },
-        ParamSpec::File {
-            dialog_title,
-            extensions,
-            directory,
-            ..
-        } => Control::File {
-            dialog_title: dialog_title.clone(),
-            extensions: extensions.clone(),
-            directory: *directory,
-        },
-    };
-
-    Param {
-        id: def.id.clone(),
-        label: def.label.clone(),
-        description: def.description.clone(),
-        control,
-        visible_when: def.visible_when.as_ref().map(visible_when),
+    #[test]
+    fn slow_probe_does_not_block_snapshots_or_spawn_twice_and_wakes_ui() {
+        let checks = Arc::new(ToolChecks::default());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicU64::new(0));
+        let probe_calls = calls.clone();
+        let probe: ToolProbe = Arc::new(move || {
+            probe_calls.fetch_add(1, Ordering::Relaxed);
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            true
+        });
+        let ctx = eframe::egui::Context::default();
+        let input = eframe::egui::RawInput::default();
+        for _ in 0..2 {
+            let _ = ctx.run_logic(&input, |_| {});
+        }
+        let (wake_tx, wake_rx) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake_tx.send(());
+        });
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let ui_checks = checks.clone();
+        std::thread::spawn(move || {
+            let first = ui_checks.request("slow", Some(probe.clone()), Some(ctx.clone()));
+            let repeat = ui_checks.request("slow", Some(probe), Some(ctx));
+            let unknown = ui_checks.request("unknown", None, None);
+            snapshot_tx.send((first, repeat, unknown)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let snapshots = snapshot_rx.recv_timeout(Duration::from_secs(2));
+        // Release even on failure, so a regression cannot strand the worker.
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            snapshots.unwrap(),
+            (
+                ToolStatus::Pending,
+                ToolStatus::Pending,
+                ToolStatus::Missing
+            )
+        );
+        wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(checks.revision.load(Ordering::Acquire), 1);
+        assert_eq!(checks.request("slow", None, None), ToolStatus::Available);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
-}
 
-fn choice(option: &starrytools_core::model::node_kind::SelectOption) -> Choice {
-    Choice {
-        value: option.value.clone(),
-        label: option.label.clone(),
-        hint: option.hint.clone(),
-    }
-}
-
-fn visible_when(when: &starrytools_core::model::node_kind::VisibleWhen) -> VisibleWhen {
-    VisibleWhen {
-        param: when.param.clone(),
-        any_of: when.any_of.clone(),
-        all_of: when.all_of.iter().map(visible_when).collect(),
+    #[test]
+    fn failed_probe_finishes_as_missing_without_retry() {
+        let checks = Arc::new(ToolChecks::default());
+        assert_eq!(
+            checks.request("missing", Some(Arc::new(|| false)), None),
+            ToolStatus::Pending
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while checks.revision.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(checks.revision.load(Ordering::Acquire), 1);
+        assert_eq!(
+            checks.request(
+                "missing",
+                Some(Arc::new(|| panic!("no second probe"))),
+                None
+            ),
+            ToolStatus::Missing
+        );
+        assert_eq!(
+            tool_status("not-a-registered-tool", None),
+            ToolStatus::Missing
+        );
     }
 }

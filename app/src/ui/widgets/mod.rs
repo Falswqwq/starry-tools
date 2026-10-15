@@ -6,7 +6,9 @@ use eframe::egui::{
 };
 use egui::epaint::RectShape;
 
-use crate::ui::theme;
+use crate::ui::{motion, theme};
+
+pub(crate) mod controls;
 
 /// 一个图标绘制闭包：往 `rect` 里用 `color` 画。
 /// 用 `&dyn` 是为了能传拼接了相位的 loader（普通图标传函数引用就行）。
@@ -41,8 +43,8 @@ pub enum Size {
 impl Size {
     fn square(self) -> Option<f32> {
         match self {
-            Size::Icon => Some(29.0),
-            Size::IconSm => Some(21.0),
+            Size::Icon => Some(theme::BUTTON_H),
+            Size::IconSm => Some(theme::ICON_SM_H),
             _ => None,
         }
     }
@@ -50,17 +52,16 @@ impl Size {
     fn height(self) -> f32 {
         match self {
             // 顶栏一排按钮取同一个高度，芯片和图标按钮才能对齐。
-            Size::Md => 29.0,
-            Size::Sm => 25.0,
-            Size::Icon => 29.0,
-            Size::IconSm => 21.0,
+            Size::Md | Size::Icon => theme::BUTTON_H,
+            Size::Sm => theme::BUTTON_SM_H,
+            Size::IconSm => theme::ICON_SM_H,
         }
     }
 
     fn pad_x(self) -> f32 {
         match self {
-            Size::Md => 11.0,
-            Size::Sm => 9.0,
+            Size::Md => theme::BUTTON_PAD_X,
+            Size::Sm => theme::BUTTON_SM_PAD_X,
             _ => 0.0,
         }
     }
@@ -86,11 +87,11 @@ pub fn panel_frame() -> egui::Frame {
 pub fn card_shadow(painter: &egui::Painter, rect: Rect, radius: u8) {
     painter.add(
         RectShape::filled(
-            rect.translate(Vec2::new(0.0, 1.0)),
+            rect.translate(Vec2::new(0.0, theme::SHADOW_OFFSET_Y)),
             CornerRadius::same(radius),
-            Color32::from_rgba_premultiplied(0x10, 0x18, 0x28, 0x16),
+            theme::SHADOW_CARD,
         )
-        .with_blur_width(3.0),
+        .with_blur_width(theme::CARD_SHADOW_BLUR),
     );
 }
 
@@ -137,10 +138,7 @@ pub fn overlay_phases(t: f32) -> (f32, f32) {
     (text, icon)
 }
 
-fn fade(color: Color32, factor: f32) -> Color32 {
-    let a = (f32::from(color.a()) * factor) as u8;
-    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
-}
+use crate::ui::theme::alpha as fade;
 
 /// 一个自绘按钮。`label` 为空且给了图标时就是一个方形图标按钮。
 pub fn button(
@@ -174,7 +172,11 @@ pub fn button_ex(
     size: Size,
     enabled: bool,
 ) -> Response {
-    let font = egui::FontId::monospace(if size == Size::Sm { 10.5 } else { 11.0 });
+    let font = egui::FontId::monospace(if size == Size::Sm {
+        theme::FONT_SMALL
+    } else {
+        theme::FONT_BUTTON
+    });
     let color = egui::Color32::PLACEHOLDER;
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
     let text_h = galley.size().y;
@@ -202,7 +204,14 @@ pub fn button_ex(
         None => size.pad_x() * 2.0 + icon_w + text_w,
     };
 
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(width, height),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
 
     if !enabled {
         // 光标不变，也不给悬停反馈。
@@ -216,12 +225,16 @@ pub fn button_ex(
         (Variant::Solid, true) => (theme::SURFACE, theme::HAIRLINE_STRONG, theme::INK),
         (Variant::Ghost, false) => (Color32::TRANSPARENT, Color32::TRANSPARENT, theme::INK_2),
         (Variant::Ghost, true) => (theme::SURFACE_3, Color32::TRANSPARENT, theme::INK),
-        (Variant::Primary, false) => (theme::ACCENT, theme::ACCENT, Color32::WHITE),
-        (Variant::Primary, true) => (theme::ACCENT_HOVER, theme::ACCENT_HOVER, Color32::WHITE),
+        (Variant::Primary, false) => (theme::ACCENT, theme::ACCENT, theme::INK_ON_COLOR),
+        (Variant::Primary, true) => (
+            theme::ACCENT_HOVER,
+            theme::ACCENT_HOVER,
+            theme::INK_ON_COLOR,
+        ),
         (Variant::Danger, false) => (Color32::TRANSPARENT, theme::DANGER_LINE, theme::DANGER),
         (Variant::Danger, true) => (theme::DANGER_SOFT, theme::DANGER, theme::DANGER),
     };
-    let factor = if enabled { 1.0 } else { 0.45 };
+    let factor = if enabled { 1.0 } else { theme::DISABLED_ALPHA };
 
     let painter = ui.painter();
     if variant == Variant::Solid && enabled {
@@ -260,7 +273,11 @@ pub fn button_ex(
             Rect::from_min_size(Pos2::new(x, cy - text_h * 0.5), Vec2::new(text_w, text_h));
         let galley = ui.painter().layout_no_wrap(
             label.to_owned(),
-            egui::FontId::monospace(if size == Size::Sm { 10.5 } else { 11.0 }),
+            egui::FontId::monospace(if size == Size::Sm {
+                theme::FONT_SMALL
+            } else {
+                theme::FONT_BUTTON
+            }),
             fade(fg, text_alpha),
         );
         // 按墨迹居中，图标和汉字才对得齐（见 `ink_top`）。
@@ -301,10 +318,10 @@ pub fn switch(ui: &mut Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool {
     if changed {
         *value = !*value;
     }
-    let t = ui.ctx().animate_bool_with_time(id, *value, 0.16);
+    let t = motion::animate(ui.ctx(), id, *value, motion::QUICK);
 
-    let height = rect.height() * 0.8;
-    let width = (height * 1.8).min(rect.width());
+    let height = rect.height() * theme::SWITCH_TRACK_RATIO;
+    let width = (height * theme::SWITCH_ASPECT).min(rect.width());
     let track = Rect::from_min_size(
         Pos2::new(rect.right() - width, rect.center().y - height * 0.5),
         Vec2::new(width, height),
@@ -328,7 +345,7 @@ pub fn switch(ui: &mut Ui, id: egui::Id, rect: Rect, value: &mut bool) -> bool {
     );
     painter.rect_stroke(track, radius, Stroke::new(1.0, accent), StrokeKind::Inside);
 
-    let pad = height * 0.15;
+    let pad = height * theme::SWITCH_KNOB_PAD_RATIO;
     let dot = height * 0.5 - pad;
     let travel = (track.width() - 2.0 * (dot + pad)).max(0.0);
     let x = track.left() + dot + pad + travel * t;

@@ -17,7 +17,6 @@ use crate::features::video::VideoFormat;
 use crate::media::{MediaValue, Meta};
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef, SelectOption};
 use crate::model::params::{self, Params};
-use crate::model::port_type::PortType;
 use crate::model::value::{human_size, one_output, NodeArgs, Value, ValueMap};
 use crate::progress::NodeStep;
 use crate::registry::NodeSpec;
@@ -49,16 +48,10 @@ pub fn spec() -> NodeSpec {
                           输出容器由「输出格式」决定。"
                 .into(),
             is_source: false,
-            inputs: vec![
-                PortDef::new("video", "视频", PortType::Video(VideoFormat::Any))
-                    .required()
-                    .hint("常见视频格式"),
-            ],
-            outputs: vec![PortDef::new(
-                "video",
-                "视频",
-                PortType::Video(VideoFormat::Any),
-            )],
+            inputs: vec![PortDef::new("video", "视频", VideoFormat::Any.port_type())
+                .required()
+                .hint("常见视频格式")],
+            outputs: vec![PortDef::new("video", "视频", VideoFormat::Any.port_type())],
             params: vec![
                 ParamDef::new(
                     PARAM_PRESET,
@@ -217,11 +210,7 @@ fn target_format(params: &Params) -> VideoFormat {
 
 fn output_ports(params: &Params) -> Vec<PortDef> {
     let format = target_format(params);
-    vec![PortDef::new(
-        "video",
-        format.label(),
-        PortType::Video(format),
-    )]
+    vec![PortDef::new("video", format.label(), format.port_type())]
 }
 
 /// 编码器选择。
@@ -717,7 +706,7 @@ mod tests {
             target_port: "video".into(),
         });
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
         let progress = crate::progress::Progress::new(tx);
         let report =
             crate::engine::run_with(&workflow, None, &dir.join("out"), None, Some(&progress))
@@ -794,7 +783,7 @@ mod tests {
         let report = run(&workflow, None, &dir.join("out")).unwrap();
         assert!(report.ok, "{:?}", report.nodes);
         let out = &report.nodes[1].outputs[0];
-        assert_eq!(out.ty, PortType::Video(VideoFormat::Mp4));
+        assert_eq!(out.ty, VideoFormat::Mp4.port_type());
         assert!(
             out.summary.contains("MP4"),
             "摘要该说明是什么：{}",

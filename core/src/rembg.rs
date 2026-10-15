@@ -3,13 +3,11 @@
 //! 这里是 rembg 那条流水线的 Rust 版：把图缩到 320×320、按 ImageNet 的均值方差
 //! 归一化、喂给模型，再把模型吐出来的那张遮罩缩回原尺寸当 alpha。
 //!
-//! 不启用 `onnx` 特性时只有一个会报错的桩 —— 节点会给出一句明确的提示，而不是静默地
-//! 什么都干不了。
+//! 此模块和背景移除节点仅在启用 `onnx` 特性时编译。
 
 use std::path::Path;
 
 use image::{imageops::FilterType, GrayImage, Luma, RgbaImage};
-#[cfg(feature = "onnx")]
 use tract_onnx::prelude::tract_ndarray;
 
 /// 模型输入的边长（u2net 系列固定是 320）。
@@ -19,7 +17,6 @@ const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// 把背景抠掉：跑模型、拿遮罩、当成 alpha 盖回去。
-#[cfg(feature = "onnx")]
 pub fn remove_background(image: &RgbaImage, model_path: &Path) -> Result<RgbaImage, String> {
     use tract_onnx::prelude::*;
 
@@ -43,14 +40,7 @@ pub fn remove_background(image: &RgbaImage, model_path: &Path) -> Result<RgbaIma
     Ok(apply_mask(image, &mask))
 }
 
-/// 没开 `onnx` 特性时的桩。
-#[cfg(not(feature = "onnx"))]
-pub fn remove_background(_image: &RgbaImage, _model_path: &Path) -> Result<RgbaImage, String> {
-    Err("这次构建没有启用 ONNX 推理（用 `--features onnx` 重新构建）".to_string())
-}
-
 /// 缩到 320×320、按 rembg 的方式来一遍归一化，得到一个 `[1, 3, 320, 320]` 的张量。
-#[cfg(feature = "onnx")]
 fn preprocess(image: &RgbaImage) -> tract_ndarray::Array4<f32> {
     let resized = image::imageops::resize(image, SIZE as u32, SIZE as u32, FilterType::Triangle);
     // rembg 先整图除以最大值，再按 ImageNet 的均值方差归一化。
@@ -72,7 +62,6 @@ fn preprocess(image: &RgbaImage) -> tract_ndarray::Array4<f32> {
 ///
 /// 先按最大最小把遮罩拉回 0–1（模型输出不一定在范围内），再缩放到原尺寸 ——
 /// 和 rembg 一致。alpha 就是遮罩值：背景处接近 0、主体处接近 255。
-#[cfg(feature = "onnx")]
 fn apply_mask(image: &RgbaImage, mask: &tract_ndarray::ArrayView4<f32>) -> RgbaImage {
     let mut min = f32::INFINITY;
     let mut max = f32::NEG_INFINITY;
@@ -107,7 +96,7 @@ fn apply_mask(image: &RgbaImage, mask: &tract_ndarray::ArrayView4<f32>) -> RgbaI
     out
 }
 
-#[cfg(all(test, feature = "onnx"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

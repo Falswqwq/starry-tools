@@ -1,175 +1,253 @@
-//! 类型系统 —— 注册式，与应用本体解耦。
-//!
-//! 这里只有两个概念：
-//!
-//! * **接口（trait）** —— 一族类型的共同身份，像 `IMG`（图像）、`VID`（视频）、
-//!   `FILE`（能写盘的产物）、`ANY`（通配）。接口**本身不是一个类型**，它就是
-//!   「哪些类型算一类」这件事的名字。接口之间也没有继承 —— `IMG` 想说自己也能当
-//!   `FILE` 用，只是把自己的 `traits` 里写上 `"file"` 而已。
-//! * **具体类型** —— `PNG` / `JPEG` / `TEXT` / `MP4` …… 每个具体类型声明它实现哪些接口。
-//!   具体类型之间没有任何派生关系，全是并列的。
-//!
-//! 端口的类型（[`PortType`]）要么指向一个**具体类型**（只收它自己），要么指向一个
-//! **接口**（收下所有实现它的类型）。
-//!
-//! 内置类型由本模块登记；其它 feature（视频、音频……）在启动时用
-//! [`Registry::register_trait`] / [`Registry::register_type`] 补上自己的接口与类型，
-//! 界面侧完全不用改 —— 它只认登记表。
-//!
-//! 序列化时，一个端口类型就是一个字符串 id（`"png"` / `"img"` / `"video/mp4"` 之类）。
+//! 注册式类型系统。构建期允许拥有字符串的扩展，冻结后只读。
+//! 类型 ID 和展示文本在启动期统一去重驻留，使 `PortType` 保持 `Copy` 和零分配查询。
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 
-use serde::ser::{Serialize, Serializer};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use crate::model::port_type::ImageFormat;
+use crate::registry::RegistrationError;
 
-/// 徽标的语义色。
-///
-/// **只回答「这是什么类型」一个问题** —— 与节点的状态色（选中 / 运行 / 报错）无关。
-/// 界面把它映射成具体颜色，因此同一类型在任何地方都同色。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypeColor {
-    /// 通配、以及「说不清是什么」的类型。
-    Unknown,
-    Text,
-    Number,
-    Bool,
-    Image,
-    Video,
+/// GUI 无关的 RGB 值；扩展可以直接贡献新颜色，无需增加枚举分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TypeColor(pub [u8; 3]);
+
+impl TypeColor {
+    pub const UNKNOWN: Self = Self::rgb(0x94, 0xa3, 0xb8);
+    pub const TEXT: Self = Self::rgb(0x33, 0x41, 0x55);
+    pub const NUMBER: Self = Self::rgb(0x47, 0x55, 0x69);
+    pub const BOOL: Self = Self::rgb(0x64, 0x74, 0x8b);
+    pub const IMAGE: Self = Self::rgb(0x3b, 0x82, 0xf6);
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self([r, g, b])
+    }
 }
 
-/// 一条类型登记记录 —— 接口和具体类型共用这一份结构。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TypeInfo {
     pub id: &'static str,
     pub label: &'static str,
     pub badge: &'static str,
     pub color: TypeColor,
-    /// 具体类型：它实现的接口；接口：它能当作哪些上级接口用。
-    pub traits: &'static [&'static str],
-    /// 是接口（trait）还是具体类型。
+    pub traits: Vec<String>,
     pub is_trait: bool,
-    /// 写盘用的主扩展名（只有具体类型有）。
     pub extension: Option<&'static str>,
-    /// 这个类型的**列表形式** `List[它]` 的徽标与名字 —— 登记时一次性算好、泄漏成
-    /// `&'static str`（字符串就那几个）。于是 `PortType::badge()` 对列表也能零分配返回。
     pub list_badge: &'static str,
     pub list_label: &'static str,
 }
 
-/// 拼出某个类型的列表徽标 / 名字。只在登记时调几次，泄漏可忽略。
-fn list_forms(label: &str, badge: &str) -> (&'static str, &'static str) {
-    let list_badge = Box::leak(format!("[{badge}]").into_boxed_str());
-    let list_label = Box::leak(format!("列表 · {label}").into_boxed_str());
-    (list_badge, list_label)
+/// 仅构建器调用：每个不同字符串在进程内只驻留一次；查询/每帧绘制不泄漏。
+/// 接受动态字符串后调用方可立即释放原值。冻结表和 `PortType` 共用稳定文本。
+fn intern(text: &str) -> &'static str {
+    static TEXTS: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+    let mut texts = TEXTS.lock().expect("type metadata interner poisoned");
+    if let Some(existing) = texts.get(text) {
+        return existing;
+    }
+    let text = Box::leak(text.to_owned().into_boxed_str());
+    texts.insert(text);
+    text
 }
 
-/// 全部已登记的类型。
 #[derive(Default)]
+pub struct RegistryBuilder {
+    entries: BTreeMap<&'static str, TypeInfo>,
+}
+
+impl RegistryBuilder {
+    pub fn register_trait(
+        &mut self,
+        id: &str,
+        label: &str,
+        badge: &str,
+        color: TypeColor,
+        supertraits: &[&str],
+    ) -> Result<PortType, RegistrationError> {
+        self.register(id, label, badge, color, supertraits, true, None)
+    }
+
+    pub fn register_type(
+        &mut self,
+        id: &str,
+        label: &str,
+        badge: &str,
+        color: TypeColor,
+        traits: &[&str],
+        extension: Option<&str>,
+    ) -> Result<PortType, RegistrationError> {
+        self.register(id, label, badge, color, traits, false, extension)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register(
+        &mut self,
+        id: &str,
+        label: &str,
+        badge: &str,
+        color: TypeColor,
+        traits: &[&str],
+        is_trait: bool,
+        extension: Option<&str>,
+    ) -> Result<PortType, RegistrationError> {
+        if self.entries.contains_key(id) {
+            return Err(RegistrationError::Duplicate {
+                kind: "type",
+                id: id.to_owned(),
+            });
+        }
+        let id = intern(id);
+        self.entries.insert(
+            id,
+            TypeInfo {
+                id,
+                label: intern(label),
+                badge: intern(badge),
+                color,
+                traits: traits.iter().map(|id| (*id).to_owned()).collect(),
+                is_trait,
+                extension: extension.map(intern),
+                list_badge: intern(&format!("[{badge}]")),
+                list_label: intern(&format!("列表 · {label}")),
+            },
+        );
+        Ok(PortType {
+            id,
+            is_trait,
+            list: false,
+        })
+    }
+
+    pub fn freeze(self) -> Result<Registry, RegistrationError> {
+        for info in self.entries.values() {
+            for parent in &info.traits {
+                if !self
+                    .entries
+                    .get(parent.as_str())
+                    .is_some_and(|entry| entry.is_trait)
+                {
+                    return Err(RegistrationError::Unknown {
+                        kind: "type interface",
+                        id: parent.clone(),
+                    });
+                }
+            }
+        }
+        let registry = Registry {
+            entries: self.entries,
+        };
+        // 继承图必须无环，否则“最具体的共同接口”没有明确含义。
+        for info in registry.entries.values() {
+            for parent in &info.traits {
+                if registry.implements_id(parent, info.id) {
+                    return Err(RegistrationError::TypeCycle(info.id.into()));
+                }
+            }
+        }
+        Ok(registry)
+    }
+}
+
 pub struct Registry {
-    entries: HashMap<&'static str, TypeInfo>,
+    entries: BTreeMap<&'static str, TypeInfo>,
 }
 
 impl Registry {
-    /// 登记一个接口。
-    pub fn register_trait(
-        &mut self,
-        id: &'static str,
-        label: &'static str,
-        badge: &'static str,
-        color: TypeColor,
-        supertraits: &'static [&'static str],
-    ) {
-        let (list_badge, list_label) = list_forms(label, badge);
-        self.entries.insert(
-            id,
-            TypeInfo {
-                id,
-                label,
-                badge,
-                color,
-                traits: supertraits,
-                is_trait: true,
-                extension: None,
-                list_badge,
-                list_label,
-            },
-        );
-    }
-
-    /// 登记一个具体类型。
-    pub fn register_type(
-        &mut self,
-        id: &'static str,
-        label: &'static str,
-        badge: &'static str,
-        color: TypeColor,
-        traits: &'static [&'static str],
-        extension: Option<&'static str>,
-    ) {
-        let (list_badge, list_label) = list_forms(label, badge);
-        self.entries.insert(
-            id,
-            TypeInfo {
-                id,
-                label,
-                badge,
-                color,
-                traits,
-                is_trait: false,
-                extension,
-                list_badge,
-                list_label,
-            },
-        );
-    }
-
     pub fn get(&self, id: &str) -> Option<&TypeInfo> {
         self.entries.get(id)
     }
+    /// 按稳定的 ID 顺序枚举。
+    pub fn all(&self) -> impl Iterator<Item = &TypeInfo> {
+        self.entries.values()
+    }
+    pub fn port_type(&self, id: &str) -> Option<PortType> {
+        let info = self.get(id)?;
+        Some(PortType {
+            id: info.id,
+            is_trait: info.is_trait,
+            list: false,
+        })
+    }
+
+    fn implements_id(&self, id: &str, target: &str) -> bool {
+        let mut pending = vec![id];
+        let mut visited = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let Some(info) = self.get(id) else {
+                continue;
+            };
+            if info.is_trait && info.id == target {
+                return true;
+            }
+            pending.extend(info.traits.iter().map(String::as_str));
+        }
+        false
+    }
+
+    pub fn implements(&self, ty: PortType, trait_id: &str) -> bool {
+        trait_id == "any" || (!ty.list && self.implements_id(ty.id, trait_id))
+    }
+
+    /// 同型保留具体类型；否则选共同接口中不再有更具体候选的那个。
+    /// 不可比较的多个最具体接口用 ID 字典序打破平局，避免 HashMap 顺序影响结果。
+    pub fn common_type(&self, types: &[PortType]) -> PortType {
+        let Some(&first) = types.first() else {
+            return PortType::Any;
+        };
+        // 端口当前只支持一层列表，嵌套列表不能伪装成其标量元素。
+        if types.iter().any(|ty| ty.is_list()) {
+            return PortType::Any;
+        }
+        if types.iter().all(|ty| *ty == first) {
+            return first;
+        }
+        let candidates: Vec<_> = self
+            .entries
+            .values()
+            .filter(|info| info.is_trait && types.iter().all(|ty| self.implements(*ty, info.id)))
+            .collect();
+        candidates
+            .iter()
+            .find(|candidate| {
+                !candidates.iter().any(|other| {
+                    other.id != candidate.id
+                        && (candidate.id == "any" || self.implements_id(other.id, candidate.id))
+                })
+            })
+            .map_or(PortType::Any, |info| PortType::trait_(info.id))
+    }
 }
 
-/// 全局类型表。第一次用时建好：内置类型 + 各 feature 补上的类型。
+/// 与节点表使用同一个冻结快照，扩展必须在首次查询前安装。
 pub fn types() -> &'static Registry {
-    static REGISTRY: LazyLock<Registry> = LazyLock::new(build);
-    &REGISTRY
+    crate::registry::registry().types()
 }
 
-fn build() -> Registry {
-    let mut registry = Registry::default();
-    builtin(&mut registry);
-    #[cfg(feature = "video")]
-    crate::features::video::register(&mut registry);
-    registry
-}
-
-/// 内置的接口：通配、文件、图像。
-fn builtin(registry: &mut Registry) {
-    registry.register_trait("any", "任意值", "ANY", TypeColor::Unknown, &[]);
-    // 能写盘的东西：图像、视频、以后可能还有音频，都实现它。
-    registry.register_trait("file", "文件", "FILE", TypeColor::Unknown, &[]);
-    registry.register_trait("img", "图像", "IMG", TypeColor::Image, &["file"]);
-
-    registry.register_type("text", "文本", "TXT", TypeColor::Text, &[], None);
-    registry.register_type("number", "数字", "NUM", TypeColor::Number, &[], None);
-    registry.register_type("bool", "布尔", "BOOL", TypeColor::Bool, &[], None);
-    // 空信号：逻辑节点（顺序执行 / 遍历的「结束」）用它当输出；任何不需要数据的节点
-    // 都可以接一个，**纯粹用来定执行先后**（见 `NodeKind::inputs_for`）。
-    registry.register_type("void", "空", "-", TypeColor::Unknown, &[], None);
-
-    // 图像格式：id 就是 `ImageFormat::name()`，徽标 / 名字 / 扩展名都取自它 ——
-    // 保持「图像格式表」只有一个来源。
+pub(crate) fn register_builtin(registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
+    registry.register_trait("any", "任意值", "ANY", TypeColor::UNKNOWN, &[])?;
+    registry.register_trait("file", "文件", "FILE", TypeColor::UNKNOWN, &[])?;
+    registry.register_trait("img", "图像", "IMG", TypeColor::IMAGE, &["file"])?;
+    registry.register_type("text", "文本", "TXT", TypeColor::TEXT, &[], None)?;
+    registry.register_type("number", "数字", "NUM", TypeColor::NUMBER, &[], None)?;
+    registry.register_type("bool", "布尔", "BOOL", TypeColor::BOOL, &[], None)?;
+    registry.register_type("void", "空", "-", TypeColor::UNKNOWN, &[], None)?;
     for format in ImageFormat::CONCRETE {
         registry.register_type(
             format.name(),
             format.label(),
             format.badge(),
-            TypeColor::Image,
+            TypeColor::IMAGE,
             &["img", "file"],
             Some(format.extension()),
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// 一个端口的类型。
@@ -269,17 +347,6 @@ impl PortType {
         }
     }
 
-    /// 视频类型：与图像同理。
-    #[cfg(feature = "video")]
-    #[allow(non_snake_case)]
-    pub fn Video(format: crate::features::video::VideoFormat) -> Self {
-        use crate::features::video::VideoFormat;
-        match format {
-            VideoFormat::Any => Self::trait_("vid"),
-            concrete => Self::concrete(concrete.name()),
-        }
-    }
-
     pub fn id(self) -> &'static str {
         self.id
     }
@@ -347,13 +414,7 @@ impl PortType {
         if trait_id == "any" {
             return true;
         }
-        let Some(info) = self.info() else {
-            return false;
-        };
-        if info.is_trait && self.id == trait_id {
-            return true;
-        }
-        info.traits.contains(&trait_id)
+        types().implements(self.element(), trait_id)
     }
 
     /// 端口徽标上的短标签。列表是 `[元素徽标]`。
@@ -376,7 +437,7 @@ impl PortType {
 
     /// 徽标的语义色。列表沿用元素的颜色（同一个色系，一眼能看出元素是什么）。
     pub fn color(self) -> TypeColor {
-        self.info().map_or(TypeColor::Unknown, |info| info.color)
+        self.info().map_or(TypeColor::UNKNOWN, |info| info.color)
     }
 
     /// 写盘时该用的主扩展名（具体类型才有）。
@@ -450,6 +511,138 @@ impl Serialize for PortType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_types_support_transitive_interfaces_and_deterministic_common_types() {
+        let mut builder = RegistryBuilder::default();
+        register_builtin(&mut builder).unwrap();
+        let family = format!("custom/{}", "audio");
+        builder
+            .register_trait(&family, "声音", "AUD", TypeColor::rgb(2, 4, 6), &["file"])
+            .unwrap();
+        builder
+            .register_trait(
+                "custom/lossless",
+                "无损音频",
+                "LA",
+                TypeColor::UNKNOWN,
+                &[&family],
+            )
+            .unwrap();
+        let a = builder
+            .register_type(
+                "custom/a",
+                "A",
+                "A",
+                TypeColor::UNKNOWN,
+                &["custom/lossless"],
+                Some("a"),
+            )
+            .unwrap();
+        let b = builder
+            .register_type(
+                "custom/b",
+                "B",
+                "B",
+                TypeColor::UNKNOWN,
+                &["custom/lossless"],
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            builder.register_type("custom/a", "覆盖", "X", TypeColor::UNKNOWN, &[], None),
+            Err(RegistrationError::Duplicate { kind: "type", .. })
+        ));
+        drop(family);
+        let registry = builder.freeze().unwrap();
+        assert!(registry.implements(a, "file"));
+        assert_eq!(registry.common_type(&[a, b]).id(), "custom/lossless");
+        assert_eq!(registry.common_type(&[a, a]), a);
+        assert_eq!(
+            registry.common_type(&[a, PortType::Image(ImageFormat::Png)]),
+            PortType::File
+        );
+        assert_eq!(registry.common_type(&[a, PortType::Text]), PortType::Any);
+        assert_eq!(registry.get("custom/audio").unwrap().color.0, [2, 4, 6]);
+        assert_eq!(registry.port_type("custom/a"), Some(a));
+        assert_eq!(
+            serde_json::to_string(&PortType::list_of(a)).unwrap(),
+            "\"list:custom/a\""
+        );
+    }
+
+    #[test]
+    fn incomparable_common_interfaces_use_id_order() {
+        let mut builder = RegistryBuilder::default();
+        builder
+            .register_trait("z", "Z", "Z", TypeColor::UNKNOWN, &[])
+            .unwrap();
+        builder
+            .register_trait("a", "A", "A", TypeColor::UNKNOWN, &[])
+            .unwrap();
+        let x = builder
+            .register_type("x", "X", "X", TypeColor::UNKNOWN, &["z", "a"], None)
+            .unwrap();
+        let y = builder
+            .register_type("y", "Y", "Y", TypeColor::UNKNOWN, &["a", "z"], None)
+            .unwrap();
+        let registry = builder.freeze().unwrap();
+        assert_eq!(registry.common_type(&[x, y]).id(), "a");
+        assert_eq!(registry.common_type(&[y, x]).id(), "a");
+    }
+
+    #[test]
+    fn invalid_interface_graphs_fail_at_freeze() {
+        let mut missing = RegistryBuilder::default();
+        missing
+            .register_trait("a", "A", "A", TypeColor::UNKNOWN, &["missing"])
+            .unwrap();
+        assert!(matches!(
+            missing.freeze(),
+            Err(RegistrationError::Unknown {
+                kind: "type interface",
+                ..
+            })
+        ));
+        let mut cyclic = RegistryBuilder::default();
+        cyclic
+            .register_trait("a", "A", "A", TypeColor::UNKNOWN, &["b"])
+            .unwrap();
+        cyclic
+            .register_trait("b", "B", "B", TypeColor::UNKNOWN, &["a"])
+            .unwrap();
+        assert!(matches!(
+            cyclic.freeze(),
+            Err(RegistrationError::TypeCycle(_))
+        ));
+    }
+
+    #[test]
+    fn type_ids_are_interned_only_once() {
+        let mut first = RegistryBuilder::default();
+        let mut second = RegistryBuilder::default();
+        let a = first
+            .register_type(
+                &String::from("owned/id"),
+                "A",
+                "A",
+                TypeColor::UNKNOWN,
+                &[],
+                None,
+            )
+            .unwrap();
+        let b = second
+            .register_type(
+                &String::from("owned/id"),
+                "B",
+                "B",
+                TypeColor::UNKNOWN,
+                &[],
+                None,
+            )
+            .unwrap();
+        assert!(std::ptr::eq(a.id(), b.id()));
+    }
 
     #[test]
     fn json_shape_is_a_plain_id() {

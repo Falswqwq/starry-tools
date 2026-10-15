@@ -47,7 +47,9 @@ pub fn boolean(params: &Params, key: &str, default: bool) -> bool {
     match params.get(key) {
         Some(Value::Bool(b)) => *b,
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
-        Some(Value::String(s)) => matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Some(Value::String(s)) => {
+            matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+        }
         _ => default,
     }
 }

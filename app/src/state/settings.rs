@@ -30,7 +30,11 @@ impl Default for Settings {
 impl Settings {
     /// 夹到合法范围，免得滑块以外的入口塞进 0 或负数把节流搞出除零。
     pub fn clamped_fps(&self) -> f32 {
-        self.max_fps.clamp(FPS_MIN, FPS_MAX)
+        if self.max_fps.is_finite() {
+            self.max_fps.clamp(FPS_MIN, FPS_MAX)
+        } else {
+            Self::default().max_fps
+        }
     }
 
     /// 从默认位置读一份；文件不在 / 坏了就用默认值，绝不拦住启动。
@@ -89,6 +93,17 @@ mod tests {
             "starrytools-settings-{name}-{}.json",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn non_finite_fps_cannot_reach_the_pacer() {
+        for fps in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let settings = Settings {
+                max_fps: fps,
+                show_fps: true,
+            };
+            assert_eq!(settings.clamped_fps(), 60.0);
+        }
     }
 
     #[test]
