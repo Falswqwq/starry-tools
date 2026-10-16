@@ -22,16 +22,16 @@ pub mod upscale;
 use crate::registry::{CategoryInfo, RegistrationError, RegistryBuilder};
 use crate::types::TypeColor;
 
+/// 「逻辑节点」专色 id —— 顺序执行 / 遍历用暗蓝，一眼和普通节点区分开。
+pub const LOGIC_ACCENT: &str = "logic";
+
 pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
-    for (category, color) in [
-        ("来源", TypeColor::rgb(0x03, 0x69, 0xa1)),
-        ("图像", TypeColor::rgb(0x15, 0x80, 0x3d)),
-        ("逻辑", TypeColor::rgb(0x1e, 0x40, 0xaf)),
-        ("通用", TypeColor::rgb(0x6d, 0x28, 0xd9)),
-        ("产出", TypeColor::rgb(0xb4, 0x53, 0x09)),
-    ] {
-        registry.register_category(CategoryInfo::new(category, category, Some(color)))?;
+    // 分类只用来把节点分组，不带颜色 —— 节点外观是另一套（见下面的专色）。
+    for category in ["来源", "图像", "逻辑", "通用", "产出"] {
+        registry.register_category(CategoryInfo::new(category, category))?;
     }
+    // 逻辑类专色：声明了 `LOGIC_ACCENT` 的节点（顺序执行 / 遍历）边线走它。
+    registry.register_accent(LOGIC_ACCENT, TypeColor::rgb(0x1e, 0x40, 0xaf))?;
     for spec in [
         read::spec(),
         read_dir::spec(),

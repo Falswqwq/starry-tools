@@ -122,7 +122,8 @@ impl VideoFormat {
 /// 此 feature 自带类别、颜色、工具探测、类型和节点，不污染核心的封闭枚举。
 pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
     let color = TypeColor::rgb(0x0d, 0x94, 0x88);
-    registry.register_category(CategoryInfo::new("视频", "视频", Some(color)))?;
+    // 分类只做分组：视频节点走正常主题边线，不额外占用一种节点颜色。
+    registry.register_category(CategoryInfo::new("视频", "视频"))?;
     registry.register_tool(ToolSpec::new("ffmpeg", ffmpeg::available))?;
     let types = registry.types_mut();
     types.register_trait("vid", "视频", "VID", color, &["file"])?;

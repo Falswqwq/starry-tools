@@ -130,6 +130,8 @@ impl Prompt {
             .show(ctx, |ui| {
                 widgets::panel_frame().show(ui, |ui| {
                     ui.set_width(PANEL_W);
+                    // 交互专色（core 注册的 `interactive`）：遮罩框、角把柄、标签都用它。
+                    let accent = theme::interactive_color();
                     // ---- 顶栏 ----
                     egui::Frame::default()
                         .inner_margin(egui::Margin {
@@ -142,7 +144,7 @@ impl Prompt {
                             ui.horizontal(|ui| {
                                 let (dot, _) =
                                     ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                ui.painter().circle_filled(dot.center(), 4.0, theme::PURPLE);
+                                ui.painter().circle_filled(dot.center(), 4.0, accent);
                                 ui.label(
                                     egui::RichText::new(&node_name)
                                         .color(theme::INK)
@@ -151,7 +153,7 @@ impl Prompt {
                                 );
                                 ui.label(
                                     egui::RichText::new("等待你框定范围")
-                                        .color(theme::PURPLE)
+                                        .color(accent)
                                         .size(11.0),
                                 );
                                 ui.with_layout(
@@ -237,13 +239,13 @@ impl Prompt {
                                 ));
                             }
                             ui.painter()
-                                .add(egui::Shape::line(points, Stroke::new(2.0, theme::PURPLE)));
+                                .add(egui::Shape::line(points, Stroke::new(2.0, accent)));
                         } else {
                             draw_scrim(ui.painter(), img, mask);
                             ui.painter().rect_stroke(
                                 mask,
                                 cr,
-                                Stroke::new(2.0, theme::PURPLE),
+                                Stroke::new(2.0, accent),
                                 StrokeKind::Inside,
                             );
                         }
@@ -260,7 +262,7 @@ impl Prompt {
                             let side = if active { HANDLE * 1.35 } else { HANDLE };
                             let handle = Rect::from_center_size(corner, Vec2::splat(side));
                             ui.painter()
-                                .rect_filled(handle, CornerRadius::same(3), theme::PURPLE);
+                                .rect_filled(handle, CornerRadius::same(3), accent);
                         }
 
                         // 尺寸标签贴在遮罩上边。
@@ -278,8 +280,7 @@ impl Prompt {
                             egui::pos2(mask.center().x, (mask.top() - 12.0).max(img.top() + 10.0)),
                             galley.size() + Vec2::new(12.0, 5.0),
                         );
-                        ui.painter()
-                            .rect_filled(tag, CornerRadius::same(4), theme::PURPLE);
+                        ui.painter().rect_filled(tag, CornerRadius::same(4), accent);
                         ui.painter().galley(
                             tag.center() - galley.size() * 0.5,
                             galley,

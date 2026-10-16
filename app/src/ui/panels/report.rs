@@ -205,7 +205,7 @@ impl Report {
         if let Some(waiting) = runner.waiting() {
             return Status {
                 text: format!("等待「{}」操作…", waiting.node_name),
-                dot: theme::PURPLE,
+                dot: theme::interactive_color(),
                 busy: true,
                 kind: Kind::Waiting,
             };
@@ -266,7 +266,7 @@ impl Report {
     ) -> (Rect, egui::Response) {
         let text_color = match status.kind {
             Kind::Error => theme::DANGER,
-            Kind::Waiting => theme::PURPLE,
+            Kind::Waiting => theme::interactive_color(),
             _ => theme::INK_2,
         };
         let stat = report.map(|report| {

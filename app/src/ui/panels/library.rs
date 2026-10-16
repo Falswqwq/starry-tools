@@ -305,12 +305,13 @@ impl Library {
                                     theme::SURFACE_3,
                                 );
                             }
+                            // 分类只是分组：名字不带颜色（专色属于节点，不属于分类）。
                             let ink = if on {
-                                theme::category_color(category).unwrap_or(theme::ACCENT)
+                                theme::ACCENT
                             } else if resp.hovered() {
                                 theme::INK
                             } else {
-                                theme::category_color(category).unwrap_or(theme::INK_2)
+                                theme::INK_2
                             };
                             ui.painter().text(
                                 egui::pos2(rect.left() + 8.0, rect.center().y),
@@ -467,13 +468,16 @@ impl Library {
             widgets::card_shadow(&painter, rect, theme::R_CARD);
         }
         painter.rect_filled(rect, cr, theme::SURFACE);
+        let accent = if kind.interactive {
+            Some(theme::interactive_color())
+        } else {
+            kind.accent.as_deref().and_then(theme::accent_color)
+        };
         let border = if dragging {
             theme::ACCENT
         } else if expanded {
             theme::ACCENT_LINE
-        } else if kind.interactive {
-            theme::PURPLE
-        } else if let Some(color) = theme::category_color(&kind.kind.category) {
+        } else if let Some(color) = accent {
             color
         } else if hot {
             theme::HAIRLINE_STRONG
@@ -501,12 +505,13 @@ impl Library {
         let badges_y = top + crate::ui::widgets::ink_center(&name);
         self.draw_badges(&painter, kind, x, badges_y, content_alpha);
 
-        // 紫色节点（要你动手的）在卡片右上角挂一个小标记。
+        // 要你动手的节点（拦住运行的那类）在卡片右上角挂一个小标记。
         if kind.interactive {
+            let interactive = theme::interactive_color();
             let tag = painter.layout_no_wrap(
                 "交互".to_string(),
                 FontId::monospace(8.5),
-                theme::PURPLE.gamma_multiply(content_alpha),
+                interactive.gamma_multiply(content_alpha),
             );
             let w = tag.size().x + 10.0;
             let h = tag.size().y + 3.0;
@@ -531,7 +536,7 @@ impl Library {
                     crate::ui::widgets::ink_top(&tag, r.center().y),
                 ),
                 tag,
-                theme::PURPLE.gamma_multiply(content_alpha),
+                interactive.gamma_multiply(content_alpha),
             );
         }
 

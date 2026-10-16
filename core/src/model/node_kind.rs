@@ -405,6 +405,12 @@ pub struct NodeKindInfo {
     pub kind: NodeKind,
     /// 用默认参数时会不会拦住运行（紫色节点）。节点库卡片据此标注。
     pub interactive: bool,
+    /// 这个节点声明的**节点类专色** id（`None` = 走正常主题边线）。
+    ///
+    /// 颜色本身在注册表的颜色册里（见 `RegistryBuilder::register_accent`）；
+    /// 「拦住运行」的紫色不在这里，它随参数变，由 `interactive` 推导。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
     /// 这个节点要一个**得下载的模型**才能跑时，给出那个「模型」参数的 id。
     ///
     /// 界面据此：模型不在本地就把整个节点禁用，并在卡片上挂一个下载按钮。

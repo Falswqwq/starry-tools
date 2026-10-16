@@ -66,6 +66,8 @@ pub fn spec() -> NodeSpec {
         output_prefix: "out".into(),
         blocking_prefix: "block".into(),
     })
+    // 逻辑类：边线走暗蓝 —— 「这类节点长这样」。
+    .accent(super::LOGIC_ACCENT)
 }
 
 /// 按参数里的个数现算这一排输出端口：`out1`（必须）+ `out2` .. `outN`（可选）。

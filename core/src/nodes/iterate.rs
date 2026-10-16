@@ -72,6 +72,8 @@ pub fn spec() -> NodeSpec {
         finally_output: FINALLY_PORT.into(),
         max_param: "max".into(),
     })
+    // 逻辑类：边线走暗蓝 —— 「这类节点长这样」。
+    .accent(super::LOGIC_ACCENT)
 }
 
 /// 引擎其实不用这个函数的返回值来跑循环体 —— 它自己按元素逐个跑。这里给的是一份

@@ -41,6 +41,11 @@ pub struct NodeSpec {
     pub kind: NodeKind,
     pub resolve_outputs: Option<ResolveOutputsFn>,
     pub interactive: Option<InteractiveFn>,
+    /// 这个节点属于哪类**专色**（颜色册里的 id，见 [`RegistryBuilder::register_accent`]）。
+    ///
+    /// `None` 表示没有专属外观，走正常主题边线。拦住运行的紫色不在这里声明 ——
+    /// 那是随参数变的，由 [`NodeSpec::interactive`] 推导。
+    pub accent: Option<String>,
     pub model_param: Option<String>,
     pub requires_tool: Option<String>,
     pub control_flow: Option<ControlFlow>,
@@ -56,6 +61,7 @@ impl NodeSpec {
             kind,
             resolve_outputs: None,
             interactive: None,
+            accent: None,
             model_param: None,
             requires_tool: None,
             control_flow: None,
@@ -91,6 +97,12 @@ impl NodeSpec {
         self
     }
 
+    /// 声明这个节点属于哪类专色（颜色册里的 id）。
+    pub fn accent(mut self, id: impl Into<String>) -> Self {
+        self.accent = Some(id.into());
+        self
+    }
+
     pub fn control_flow(mut self, control_flow: ControlFlow) -> Self {
         self.control_flow = Some(control_flow);
         self
@@ -113,19 +125,44 @@ impl NodeSpec {
 pub struct CategoryInfo {
     pub id: String,
     pub label: String,
-    /// 类别边线色。没有专属颜色时由 UI 使用状态色。
-    pub color: Option<TypeColor>,
 }
 
 impl CategoryInfo {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, color: Option<TypeColor>) -> Self {
+    /// 分类只负责把节点**分组**，不带颜色 —— 颜色属于节点类专色。
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
+        }
+    }
+}
+
+/// 一类节点的**专色**。
+///
+/// 专色说的是「这类节点长这样」（逻辑节点暗蓝、会拦住运行的节点紫色），
+/// 与节点库分类**无关** —— 分类只把节点分组，不给节点上色。
+/// 一个节点属于哪一类，由它自己在 [`NodeSpec::accent`] 里声明颜色册里的 id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeAccent {
+    pub id: String,
+    pub color: TypeColor,
+}
+
+impl NodeAccent {
+    pub fn new(id: impl Into<String>, color: TypeColor) -> Self {
+        Self {
+            id: id.into(),
             color,
         }
     }
 }
+
+/// 保留的专色 id：**当前会拦住运行**的节点（见 [`NodeSpec::interactive`]）。
+///
+/// 它不是静态声明 —— 同一个节点（如「图像裁切」）换个参数才变成紫色，
+/// 所以由 `interactive` 回调推导，界面按这个 id 取色。
+pub const INTERACTIVE_ACCENT: &str = "interactive";
 
 pub struct ToolSpec {
     pub id: String,
@@ -159,6 +196,7 @@ pub struct RegistryBuilder {
     types: types::RegistryBuilder,
     specs: Vec<NodeSpec>,
     categories: Vec<CategoryInfo>,
+    accents: BTreeMap<String, NodeAccent>,
     tools: BTreeMap<String, ToolSpec>,
     aliases: BTreeMap<String, String>,
 }
@@ -171,6 +209,8 @@ impl RegistryBuilder {
     pub fn with_builtins() -> Result<Self, RegistrationError> {
         let mut builder = Self::new();
         types::register_builtin(builder.types_mut())?;
+        // 框架级专色：拦住运行的节点是紫色的。它随参数变，不能由节点静态声明。
+        builder.register_accent(INTERACTIVE_ACCENT, TypeColor::rgb(0x7c, 0x3a, 0xed))?;
         crate::nodes::register(&mut builder)?;
         Ok(builder)
     }
@@ -199,6 +239,25 @@ impl RegistryBuilder {
             });
         }
         self.categories.push(category);
+        Ok(())
+    }
+
+    /// 注册一类节点的**专色**。节点用 [`NodeSpec::accent`] 声明自己属于哪一类。
+    ///
+    /// 专色与分类无关：分类只把节点分组，颜色说的是「这类节点长这样」。
+    pub fn register_accent(
+        &mut self,
+        id: impl Into<String>,
+        color: TypeColor,
+    ) -> Result<(), RegistrationError> {
+        let id = id.into();
+        if self.accents.contains_key(&id) {
+            return Err(RegistrationError::Duplicate {
+                kind: "node accent",
+                id,
+            });
+        }
+        self.accents.insert(id.clone(), NodeAccent { id, color });
         Ok(())
     }
 
@@ -253,10 +312,21 @@ impl RegistryBuilder {
                 });
             }
         }
+        for spec in &self.specs {
+            if let Some(accent) = &spec.accent {
+                if !self.accents.contains_key(accent) {
+                    return Err(RegistrationError::Unknown {
+                        kind: "node accent",
+                        id: accent.clone(),
+                    });
+                }
+            }
+        }
         Ok(Registry {
             types: self.types.freeze()?,
             specs: self.specs,
             categories: self.categories,
+            accents: self.accents,
             tools: self.tools,
             aliases: self.aliases,
         })
@@ -267,6 +337,7 @@ pub struct Registry {
     types: types::Registry,
     specs: Vec<NodeSpec>,
     categories: Vec<CategoryInfo>,
+    accents: BTreeMap<String, NodeAccent>,
     tools: BTreeMap<String, ToolSpec>,
     aliases: BTreeMap<String, String>,
 }
@@ -280,6 +351,10 @@ impl Registry {
     }
     pub fn category(&self, id: &str) -> Option<&CategoryInfo> {
         self.categories.iter().find(|category| category.id == id)
+    }
+    /// 某类节点的专色，界面按它给节点边线上色。
+    pub fn accent(&self, id: &str) -> Option<&NodeAccent> {
+        self.accents.get(id)
     }
     pub fn tool(&self, id: &str) -> Option<&ToolSpec> {
         self.tools.get(id)
@@ -310,6 +385,7 @@ impl Registry {
                 NodeKindInfo {
                     kind: spec.kind.clone(),
                     interactive: spec.is_interactive(&defaults),
+                    accent: spec.accent.clone(),
                     model_param: spec.model_param.clone(),
                     requires_tool: spec.requires_tool.clone(),
                     control_flow: spec.control_flow.clone(),
@@ -370,11 +446,11 @@ mod tests {
         let mut builder = RegistryBuilder::with_builtins().unwrap();
         let category = String::from("extension");
         builder
-            .register_category(CategoryInfo::new(
-                category.clone(),
-                "扩展",
-                Some(TypeColor::rgb(3, 5, 7)),
-            ))
+            .register_category(CategoryInfo::new(category.clone(), "扩展"))
+            .unwrap();
+        // 专色颜色册：扩展可以自报一类节点色，节点用 id 声明归属。
+        builder
+            .register_accent(String::from("extension-accent"), TypeColor::rgb(3, 5, 7))
             .unwrap();
         let available = Arc::new(AtomicBool::new(false));
         let probe_state = available.clone();
@@ -397,6 +473,7 @@ mod tests {
             },
         )
         .interactive(move |params| params.contains_key(&interactive_key))
+        .accent(String::from("extension-accent"))
         .needs_tool(String::from("extension-tool"));
         builder.register_node(spec).unwrap();
         builder
@@ -411,8 +488,16 @@ mod tests {
         assert_eq!(spec.kind.notes, ["extension/node 的动态注释"]);
         assert_eq!(registry.category("extension").unwrap().label, "扩展");
         assert_eq!(
-            serde_json::to_value(registry.category("extension").unwrap()).unwrap()["color"],
-            serde_json::json!([3, 5, 7])
+            registry.accent("extension-accent").unwrap().color,
+            TypeColor::rgb(3, 5, 7)
+        );
+        assert_eq!(
+            registry
+                .kinds()
+                .iter()
+                .find(|info| info.kind.id == "extension/node")
+                .and_then(|info| info.accent.clone()),
+            Some(String::from("extension-accent"))
         );
         assert!(!registry.tool_available("extension-tool"));
         available.store(true, Ordering::SeqCst);
@@ -448,12 +533,22 @@ mod tests {
     fn every_registration_namespace_rejects_duplicates() {
         let mut builder = RegistryBuilder::new();
         builder
-            .register_category(CategoryInfo::new("extension", "扩展", None))
+            .register_category(CategoryInfo::new("extension", "扩展"))
             .unwrap();
         assert!(matches!(
-            builder.register_category(CategoryInfo::new("extension", "替换", None)),
+            builder.register_category(CategoryInfo::new("extension", "替换")),
             Err(RegistrationError::Duplicate {
                 kind: "category",
+                ..
+            })
+        ));
+        builder
+            .register_accent("accent", TypeColor::rgb(1, 2, 3))
+            .unwrap();
+        assert!(matches!(
+            builder.register_accent("accent", TypeColor::rgb(4, 5, 6)),
+            Err(RegistrationError::Duplicate {
+                kind: "node accent",
                 ..
             })
         ));
@@ -507,6 +602,21 @@ mod tests {
                 ..
             })
         ));
+        // 节点声明了颜色册里没有的专色 id：冻结时拒绝，避免执行期找不到颜色。
+        let mut builder = RegistryBuilder::new();
+        builder
+            .register_category(CategoryInfo::new("extension", "扩展"))
+            .unwrap();
+        builder
+            .register_node(NodeSpec::fixed(kind("node"), |_| Ok(ValueMap::new())).accent("missing"))
+            .unwrap();
+        assert!(matches!(
+            builder.freeze(),
+            Err(RegistrationError::Unknown {
+                kind: "node accent",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -520,10 +630,26 @@ mod tests {
             registry.get("convert_to_png").unwrap().kind.id,
             crate::nodes::convert::KIND
         );
+        // 专色颜色册：框架的「拦住运行」紫 + 内置逻辑类暗蓝。
         assert_eq!(
-            registry.category("逻辑").unwrap().color,
-            Some(TypeColor::rgb(0x1e, 0x40, 0xaf))
+            registry.accent(INTERACTIVE_ACCENT).unwrap().color,
+            TypeColor::rgb(0x7c, 0x3a, 0xed)
         );
+        assert_eq!(
+            registry.accent(crate::nodes::LOGIC_ACCENT).unwrap().color,
+            TypeColor::rgb(0x1e, 0x40, 0xaf)
+        );
+        // 声明归属：只有逻辑节点带专色，其余节点走正常主题边线。
+        for id in ["sequence", "iterate"] {
+            assert_eq!(
+                registry.get(id).unwrap().accent.as_deref(),
+                Some(crate::nodes::LOGIC_ACCENT),
+                "{id} 应该属于逻辑类专色"
+            );
+        }
+        for id in ["convert_image", "read", "save_output"] {
+            assert_eq!(registry.get(id).unwrap().accent, None, "{id} 不该带专色");
+        }
         for spec in registry.all() {
             assert!(registry.category(&spec.kind.category).is_some());
         }

@@ -639,9 +639,15 @@ impl Graph {
         let tool_missing = node.requirements.tool_missing;
         // 是不是流程的起点 —— 只看元数据，不靠「有没有输入端口」猜。
         let is_source = kind_of(kinds, node).is_some_and(|kind| kind.kind.is_source);
-        // 逻辑类（顺序执行 / 遍历）：边线走暗蓝 —— 像紫色节点那样「这类节点长这样」。
-        let category_ink =
-            kind_of(kinds, node).and_then(|kind| theme::category_color(&kind.kind.category));
+        // 节点专色：拦住运行的节点用框架的「交互」专色（紫），
+        // 其余按节点自己**声明**的节点类（如逻辑类）取色；没声明的走正常主题边线。
+        let accent = if interactive {
+            Some(theme::interactive_color())
+        } else {
+            kind_of(kinds, node)
+                .and_then(|kind| kind.accent.as_deref())
+                .and_then(theme::accent_color)
+        };
 
         // 白底（投影已经在上一遍里铺好了）。
         painter.rect_filled(r, cr, theme::SURFACE);
@@ -652,20 +658,17 @@ impl Graph {
             theme::ACCENT
         } else if model_missing || tool_missing {
             theme::WARN
-        } else if interactive {
-            theme::PURPLE
-        } else if let Some(ink) = category_ink {
+        } else if let Some(ink) = accent {
             ink
         } else if marks.ok_nodes.contains(&node.id) {
             theme::ACCENT
         } else {
             theme::HAIRLINE
         };
-        // 正在等用户操作 / 正在跑 / 有类别色：把边框加粗一档。
+        // 正在等用户操作 / 正在跑 / 有专色：把边框加粗一档。
         let border_width = if waiting {
             3.0
-        } else if running || interactive || category_ink.is_some() || model_missing || tool_missing
-        {
+        } else if running || accent.is_some() || model_missing || tool_missing {
             1.5
         } else {
             1.0

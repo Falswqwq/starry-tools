@@ -150,11 +150,12 @@ Windows `%APPDATA%\`。设置与工作流存档分开；「工作流 → 打开�
 | --- | --- |
 | `RegistryBuilder::with_builtins()` | 带上内置类型、类别、节点和当前 feature 的贡献项，返回 `Result` |
 | `types_mut()` | 取得类型构建器，调用 `register_trait` / `register_type` |
-| `register_category(CategoryInfo)` | 注册稳定类别 ID、显示名和可选 RGB 颜色 |
+| `register_category(CategoryInfo)` | 注册稳定类别 ID 与显示名（分类不带颜色） |
+| `register_accent(id, TypeColor)` | 注册一类**节点专色**（如 `logic` 暗蓝、`interactive` 紫） |
 | `register_tool(ToolSpec)` | 注册外部工具 ID 与可捕获状态的探测回调 |
-| `register_node(NodeSpec)` | 登记节点契约、执行回调及可选控制流描述 |
+| `register_node(NodeSpec)` | 登记节点契约、执行回调、可选控制流与 `accent` 归属 |
 | `register_alias(old, target)` | 旧节点 ID 直接映射到正式 ID，不允许别名链 |
-| `freeze()` | 消耗构建器，校验类别 / 别名引用及类型接口环等，得到只读 `Registry` |
+| `freeze()` | 消耗构建器，校验类别 / 别名 / 专色引用及类型接口环等，得到只读 `Registry` |
 | `registry::install(registry)` | 一次性安装全局快照，必须早于**任何首次查询** |
 
 `registry()` / `types()` / `catalog::all()` 等查询会惰性安装默认内置快照；先查询再 `install`
@@ -176,8 +177,11 @@ fn install_extension(spec: registry::NodeSpec) -> Result<(), RegistrationError> 
     let color = TypeColor::rgb(160, 90, 40);
     builder.types_mut().register_trait("audio", "音频", "AUD", color, &["file"])?;
     builder.types_mut().register_type("wav", "WAV 音频", "WAV", color, &["audio"], Some("wav"))?;
-    builder.register_category(CategoryInfo::new("audio-tools", "音频工具", Some(color)))?;
-    // spec.kind.category 必须使用上面已注册的类别 ID。
+    builder.register_category(CategoryInfo::new("audio-tools", "音频工具"))?;
+    // 一类节点的专色：节点用 .accent("audio") 声明归属，颜色由颜色册统一给。
+    builder.register_accent("audio", color)?;
+    // spec.kind.category 必须使用上面已注册的类别 ID；
+    // spec.accent 则必须使用颜色册里已注册的专色 id。
     builder.register_node(spec)?;
     registry::install(builder.freeze()?)
 }
@@ -227,7 +231,7 @@ let spec = NodeSpec::fixed(kind, move |_args| {
 
 ```text
 core/src/
-  registry.rs       节点 / 类别 / 工具 / 别名构建器、冻结快照与控制流协议
+  registry.rs       节点 / 类别 / 专色 / 工具 / 别名构建器、冻结快照与控制流协议
   types/            类型注册、接口兼容、共同类型收窄
   model/            参数 / 端口元数据、值、工作流
   nodes/            内置工具及 register 入口
@@ -272,7 +276,7 @@ app/src/
 - 工作流执行及缩略图生成在后台；UI 接收运行进度、缓存预览并上传最近邻纹理。
   工具探测也在后台，`catalog` 保存 Pending / Available / Missing 快照，探测完成后唤醒 UI。
   原生文件对话框、模型下载和产物复制不占用 UI 线程。
-- 配色与尺寸集中在 `ui/theme/`，所有内置类别都注册专色；类型徽标也直接使用 core 的 RGB。
+- 配色与尺寸集中在 `ui/theme/`，节点专色从 core 的颜色册取（分类不带颜色）；类型徽标也直接用 core 的 RGB。
   动画统一走 `ui/motion.rs`，面板、参数控件和画布共享时长 / 缓动令牌。
 - `state/pacing.rs` 在 UI 入口做**整帧软件 pacing**，输入帧、egui 内部动画与后台唤醒都受限。
   等待预算扣除已花的 UI / 渲染 / present 时间，不在帧尾再叠加完整周期，不忙等。

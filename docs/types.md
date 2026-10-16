@@ -71,7 +71,8 @@ VOID       空信号，只用于定执行先后
 同一类型的徽标在哪都同色，与节点选中 / 运行 / 报错状态无关。`TypeColor([r, g, b])`
 是 core 的 GUI 无关 RGB 值，扩展直接注册新颜色，不需要增加颜色枚举或 UI 映射分支。
 `app/src/ui/theme/colors.rs` 的 `badge_color` / `type_color` 只把注册值转成 `Color32`。
-类别边线色来自单独的 `CategoryInfo.color`，不要与端口类型色混为一谈。
+节点专色来自单独的 `RegistryBuilder::register_accent` / `NodeSpec::accent`，
+不要与端口类型色混为一谈。
 
 ## 两趟检查
 

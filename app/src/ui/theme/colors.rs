@@ -21,7 +21,8 @@ pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0x8f, 0xb5, 0xf7);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1d, 0x4e, 0xd8);
 pub const ACCENT_SOFT: Color32 = Color32::from_rgb(0xef, 0xf4, 0xff);
 pub const ACCENT_LINE: Color32 = Color32::from_rgb(0xc3, 0xd6, 0xfe);
-pub const PURPLE: Color32 = Color32::from_rgb(0x7c, 0x3a, 0xed);
+/// 「交互」专色的浅色底与描边 —— core 注册的 `interactive` 专色（紫）派生的 tints，
+/// 只用于本地的小标记与光晕。节点边线本身走 `interactive_color()`，不从这里取。
 pub const PURPLE_SOFT: Color32 = Color32::from_rgb(0xf5, 0xf1, 0xff);
 pub const PURPLE_LINE: Color32 = Color32::from_rgb(0xdd, 0xd0, 0xfb);
 pub const DANGER: Color32 = Color32::from_rgb(0xdc, 0x26, 0x26);
@@ -47,8 +48,17 @@ pub fn category_label(category: &str) -> &str {
         .map_or(category, |info| info.label.as_str())
 }
 
-pub fn category_color(category: &str) -> Option<Color32> {
-    registry().category(category)?.color.map(type_color)
+/// 某类**节点**的专色（id → 颜色），颜色由 core 的颜色册注册。
+///
+/// 分类不参与：分类只把节点分组，颜色说的是「这类节点长这样」。
+pub fn accent_color(id: &str) -> Option<Color32> {
+    registry().accent(id).map(|accent| type_color(accent.color))
+}
+
+/// 「当前会拦住运行」的专色 —— core 注册的 `interactive`（紫）。
+/// 颜色册里查不到时退回主题蓝，不至于画出错色。
+pub fn interactive_color() -> Color32 {
+    accent_color(starrytools_core::registry::INTERACTIVE_ACCENT).unwrap_or(ACCENT)
 }
 
 pub fn badge_color(ty: PortType) -> Color32 {
@@ -104,12 +114,15 @@ mod tests {
     #[test]
     fn registry_colors_are_used_without_ui_mirrors() {
         assert_eq!(type_color(TypeColor([3, 5, 7])), Color32::from_rgb(3, 5, 7));
+        // 分类只有名字，没有颜色。
         for category in registry().categories() {
-            assert_eq!(category_color(&category.id), category.color.map(type_color));
             assert_eq!(category_label(&category.id), category.label);
         }
         assert_eq!(category_label("extension-category"), "extension-category");
-        assert_eq!(category_color("unregistered"), None);
+        // 节点专色走颜色册：`interactive` 是框架注册的那支紫。
+        assert_eq!(interactive_color(), Color32::from_rgb(0x7c, 0x3a, 0xed));
+        assert_eq!(accent_color("interactive"), Some(interactive_color()));
+        assert_eq!(accent_color("not-registered"), None);
         assert_eq!(
             badge_color(PortType::Image(ImageFormat::Png)),
             badge_color(PortType::Image(ImageFormat::Jpeg))
