@@ -156,7 +156,7 @@ impl Graph {
                         handled = true;
                         break;
                     }
-                    if play.contains(p) {
+                    if play.contains(p) && self.can_run_node(kinds, i) {
                         // 要模型 / 外部程序但本地还没有：这个节点还不能跑 —— 点运行不生效。
                         if self.nodes[i].requirements.model_missing
                             || self.nodes[i].requirements.tool_missing
@@ -391,10 +391,25 @@ impl Graph {
             return false;
         };
 
-        // 一个输入端口只接一条线。想换就先划断那一条。
-        let occupied = self.wire_at_port(input.node, &target.id, true).is_some();
+        // 同一个上游接两次没有意义。
+        if self.wires.iter().any(|wire| {
+            wire.from == out.node
+                && wire.from_port == source.id
+                && wire.to == input.node
+                && wire.to_port == target.id
+        }) {
+            return false;
+        }
 
-        !occupied && target.ty.accepts(source.ty)
+        if source.exec != target.exec {
+            return false;
+        }
+        if source.exec {
+            // Exec 输出只允许一条边，分支使用 Sequence。
+            return self.wire_at_port(out.node, &source.id, false).is_none();
+        }
+        let occupied = self.wire_at_port(input.node, &target.id, true).is_some();
+        (target.multi || !occupied) && target.ty.accepts(source.ty)
     }
 
     /// 把两个端口接上。
@@ -519,8 +534,14 @@ impl Graph {
         port_id: &str,
         input: bool,
     ) -> bool {
-        self.wire_at_port(node_index, port_id, input)
-            .is_some_and(|wire| marks.invalid_edges.contains(&wire.id))
+        self.wires.iter().any(|wire| {
+            let at_port = if input {
+                wire.to == node_index && wire.to_port == port_id
+            } else {
+                wire.from == node_index && wire.from_port == port_id
+            };
+            at_port && marks.invalid_edges.contains(&wire.id)
+        })
     }
 
     /// 这个端口接没接线。

@@ -1,32 +1,29 @@
-//! 「字面量」节点 —— 文本 / 数字 / 布尔。
+//! 变量节点：本地保存一个值，带 Get / Set 两个数据口。
 //!
-//! 它们是**基本类型**的源头：一个节点就装一个值，输出那个值。就是普通的节点样式
-//! （标题栏 + 端口列 + 参数区），只是没有输入。
-//!
-//! 这类节点的意义在于：参数端口（把参数改从上游取）需要一个「值从哪来」的地方，
-//! 而这些节点就是那个地方 —— 比如把「重命名」的文件名接到一个文本节点上。
-//!
-//! 三个节点共用同一套定义，只有控件的种类和输出的类型不同，所以写成一个函数生成。
+//! 它们不接入执行线：Get 被别的节点读取时才求值；Set 允许接多个上游，
+//! 按上游实际运行的顺序写入，后写到的覆盖先到的。没有写入时使用节点上的本地值。
 
 use crate::error::NodeError;
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef};
 use crate::model::params;
 use crate::model::port_type::PortType;
 use crate::model::value::{NodeArgs, Value, ValueMap};
-use crate::registry::NodeSpec;
+use crate::registry::{NodeSpec, VariablePorts};
 
 pub const KIND_TEXT: &str = "literal_text";
 pub const KIND_NUMBER: &str = "literal_number";
 pub const KIND_BOOL: &str = "literal_bool";
 
 const PARAM_VALUE: &str = "value";
+const PORT_GET: &str = "out";
+const PORT_SET: &str = "set";
 
 pub fn text_spec() -> NodeSpec {
     NodeSpec::fixed(
-        literal(
+        variable(
             KIND_TEXT,
             "文本",
-            "一段文本。接到别的节点的参数端口上，就能把那个参数改从这里取。",
+            "保存一段文本。Get 供下游读取，Set 可由多个上游写入。",
             ParamSpec::Text {
                 default: String::new(),
                 // 多行：文本可以有多行，框也会跟着内容长。
@@ -37,14 +34,17 @@ pub fn text_spec() -> NodeSpec {
         ),
         run_text,
     )
+    .accent(super::DATA_ACCENT)
+    .variable(VariablePorts::new(PARAM_VALUE, PORT_GET, PORT_SET))
+    .pure()
 }
 
 pub fn number_spec() -> NodeSpec {
     NodeSpec::fixed(
-        literal(
+        variable(
             KIND_NUMBER,
             "数字",
-            "一个数字。接到别的节点的参数端口上，就能把那个参数改从这里取。",
+            "保存一个数字。Get 供下游读取，Set 可由多个上游写入。",
             ParamSpec::Number {
                 default: 0.0,
                 min: f64::MIN,
@@ -57,59 +57,62 @@ pub fn number_spec() -> NodeSpec {
         ),
         run_number,
     )
+    .accent(super::DATA_ACCENT)
+    .variable(VariablePorts::new(PARAM_VALUE, PORT_GET, PORT_SET))
+    .pure()
 }
 
 pub fn bool_spec() -> NodeSpec {
     NodeSpec::fixed(
-        literal(
+        variable(
             KIND_BOOL,
             "布尔",
-            "真或假。接到别的节点的参数端口上，就能把那个开关改从这里取。",
+            "保存真或假。Get 供下游读取，Set 可由多个上游写入。",
             ParamSpec::Bool { default: false },
             PortType::Bool,
         ),
         run_bool,
     )
+    .accent(super::DATA_ACCENT)
+    .variable(VariablePorts::new(PARAM_VALUE, PORT_GET, PORT_SET))
+    .pure()
 }
 
-fn literal(id: &str, name: &str, description: &str, spec: ParamSpec, output: PortType) -> NodeKind {
+fn variable(id: &str, name: &str, description: &str, spec: ParamSpec, ty: PortType) -> NodeKind {
     NodeKind {
         id: id.into(),
         name: name.into(),
-        category: "来源".into(),
+        category: "变量".into(),
         description: description.into(),
-        is_source: true,
-        // 起点节点：没有输入端口；输出端口的类型就是它装的那种基本类型。
-        inputs: Vec::new(),
-        // 端口名和参数名都叫「值」—— 节点名（标题栏）已经说明是什么了，不重复一遍。
-        outputs: vec![PortDef::new("out", "值", output)],
-        params: vec![ParamDef::new(PARAM_VALUE, "", spec)],
+        // Set 可以接多个上游；运行中后写到的值生效。
+        inputs: vec![PortDef::new(PORT_SET, "Set", ty)
+            .multi()
+            .hint("可接多个上游；按运行顺序以后写到的为准")],
+        // Get 是普通数据输出，可以同时被多个节点读取。
+        outputs: vec![PortDef::new(PORT_GET, "Get", ty)],
+        // 本地值始终可编辑；Set 连线只覆盖本次求值，不改写参数。
+        params: vec![ParamDef::new(PARAM_VALUE, "", spec).local_only()],
         notes: vec![
-            "它本身就是一个值，所以没有输入，也不用配置什么。".into(),
-            "接到别的节点的**参数端口**（参数名前面那个小圆点）上，\
-             那个参数就会改从这里取，原来那个输入组件会变成不可用。"
-                .into(),
+            "变量节点不接执行线：Get 被读取时按需求值。".into(),
+            "Set 可接多个上游，按运行顺序以最后一个为准；未接 Set 时使用本地值。".into(),
         ],
     }
 }
 
 fn run_text(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let text = params::string(args.params, PARAM_VALUE, "");
-    let mut outputs = ValueMap::new();
-    outputs.insert("out".to_string(), Value::text(text));
-    Ok(outputs)
+    Ok(ValueMap::from([(PORT_GET.to_string(), Value::text(text))]))
 }
 
 fn run_number(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let number = params::number(args.params, PARAM_VALUE, 0.0);
-    let mut outputs = ValueMap::new();
-    outputs.insert("out".to_string(), Value::Number(number));
-    Ok(outputs)
+    Ok(ValueMap::from([(
+        PORT_GET.to_string(),
+        Value::Number(number),
+    )]))
 }
 
 fn run_bool(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let value = params::boolean(args.params, PARAM_VALUE, false);
-    let mut outputs = ValueMap::new();
-    outputs.insert("out".to_string(), Value::Bool(value));
-    Ok(outputs)
+    Ok(ValueMap::from([(PORT_GET.to_string(), Value::Bool(value))]))
 }

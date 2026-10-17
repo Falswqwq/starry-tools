@@ -151,11 +151,35 @@ impl App {
         self.graph.selected = self.graph.nodes.iter().position(|node| node.id == node_id);
     }
 
-    /// 开跑。`only` 是「运行至此」的那个节点，`None` 就是跑整张图。
+    /// 成功运行后，把变量节点的最新值写回节点参数，下一轮从这里继续。
+    fn commit_variable_states(&mut self) {
+        let states = self.runner.take_variable_states();
+        if !states.is_empty() {
+            self.graph.apply_variable_states(&states, &self.kinds);
+        }
+    }
+
+    /// 开跑。`only` 只调试纯节点及其纯数据依赖。
     fn start_run(&mut self, only: Option<String>, ctx: &egui::Context) {
         // 包括画布的「运行至此」入口：检查尚未返回或本帧刚编辑时都不能运行旧快照。
         if self.runner.is_running() || !self.check.runnable(self.graph.check_revision()) {
             return;
+        }
+        if let Some(id) = &only {
+            let pure = self
+                .graph
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .and_then(|node| self.kinds.iter().find(|kind| kind.kind.id == node.kind))
+                .is_some_and(|kind| kind.pure);
+            if !pure {
+                self.toast = Some((
+                    "仅可调试纯节点；副作用节点请通过 Exec 入口运行".into(),
+                    ctx.input(|input| input.time),
+                ));
+                return;
+            }
         }
         // 新的一次运行：先把上一次留下的缩略图 / 色板 / 状态清掉，
         // 接下来缩略图会随着每个节点跑完一张张出现。
@@ -173,6 +197,7 @@ impl eframe::App for App {
         self.pacer
             .pace(ctx.cumulative_frame_nr(), self.settings.clamped_fps());
         self.runner.poll();
+        self.commit_variable_states();
 
         let rect = ui.max_rect();
         ui.painter()
@@ -282,6 +307,7 @@ impl eframe::App for App {
 
         // ---- 底部：状态药丸 + 运行记录 ----
         self.runner.poll();
+        self.commit_variable_states();
         let pick = self.report.ui(&ctx, &mut self.runner, runnable, errors);
         if let Some(report::Action::Select(id)) = pick {
             self.select(&id);

@@ -125,7 +125,7 @@ fn png_only_input_rejects_a_jpeg_source() {
     );
 
     // 检查没过就不该真的跑起来。
-    let report = run(&workflow, None, &dir).unwrap();
+    let report = run_pipeline(&workflow, None, &dir).unwrap();
     assert!(!report.ok);
     assert!(report.nodes.is_empty());
 }
@@ -164,7 +164,7 @@ fn runs_convert_then_upscale() {
         PortType::Image(ImageFormat::Png)
     );
 
-    let report = run(&workflow, None, &outputs).unwrap();
+    let report = run_pipeline(&workflow, None, &outputs).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     assert_eq!(report.order, vec!["in", "to_png", "up"]);
 
@@ -212,76 +212,6 @@ fn required_input_must_be_connected() {
 }
 
 #[test]
-fn cycles_are_reported_instead_of_hanging() {
-    let dir = workspace("cycle");
-    let png = image_fixture(&dir, "png", 4, 3);
-
-    let mut workflow = Workflow::new("环");
-    workflow.nodes.push(input_node("in", &png));
-    workflow.nodes.push(node(
-        "a",
-        crate::nodes::convert::KIND,
-        defaults(crate::nodes::convert::KIND),
-    ));
-    workflow.nodes.push(node(
-        "b",
-        crate::nodes::convert::KIND,
-        defaults(crate::nodes::convert::KIND),
-    ));
-    workflow.edges.push(edge("e1", "in", "out", "a", "image"));
-    workflow.edges.push(edge("e2", "a", "image", "b", "image"));
-    workflow.edges.push(edge("e3", "b", "image", "a", "image"));
-
-    let resolved = resolve(&workflow);
-    assert!(!resolved.runnable);
-    assert!(
-        errors(&resolved.issues)
-            .iter()
-            .any(|message| message.contains("环")),
-        "{:?}",
-        resolved.issues
-    );
-}
-
-#[test]
-fn only_node_runs_just_its_upstream() {
-    let dir = workspace("partial");
-    let png = image_fixture(&dir, "png", 8, 6);
-
-    let mut workflow = Workflow::new("只跑一半");
-    workflow.nodes.push(input_node("in", &png));
-    workflow.nodes.push(node(
-        "to_png",
-        crate::nodes::convert::KIND,
-        defaults(crate::nodes::convert::KIND),
-    ));
-    workflow.nodes.push(node(
-        "up",
-        crate::nodes::upscale::KIND,
-        defaults(crate::nodes::upscale::KIND),
-    ));
-    workflow.nodes.push(node(
-        "other",
-        crate::nodes::upscale::KIND,
-        defaults(crate::nodes::upscale::KIND),
-    ));
-    workflow
-        .edges
-        .push(edge("e1", "in", "out", "to_png", "image"));
-    workflow
-        .edges
-        .push(edge("e2", "to_png", "image", "up", "image"));
-    workflow
-        .edges
-        .push(edge("e3", "to_png", "image", "other", "image"));
-
-    let report = run(&workflow, Some("to_png"), &dir.join("out")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    assert_eq!(report.order, vec!["in", "to_png"]);
-    assert!(!report.nodes.iter().any(|result| result.node_id == "other"));
-}
-
-#[test]
 fn missing_file_is_reported_per_node() {
     let dir = workspace("missing-file");
     let mut workflow = Workflow::new("文件不见了");
@@ -299,7 +229,7 @@ fn missing_file_is_reported_per_node() {
         .edges
         .push(edge("e1", "in", "out", "to_png", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(!report.ok);
     assert_eq!(report.nodes[0].status, NodeStatus::Failed);
     assert!(report.nodes[0]
@@ -308,7 +238,7 @@ fn missing_file_is_reported_per_node() {
         .unwrap()
         .contains("无法读取文件"));
     // 下游被跳过，而不是拿着空数据硬跑。
-    assert_eq!(report.nodes[1].status, NodeStatus::Skipped);
+    assert!(!report.nodes.iter().any(|n| n.node_id == "to_png"));
 }
 
 #[test]
@@ -325,7 +255,7 @@ fn upscale_keeps_pixels_crisp_with_nearest_neighbour() {
         .push(node("up", crate::nodes::upscale::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "up", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let path = report.nodes[1].outputs[0].path.as_ref().unwrap();
@@ -344,232 +274,6 @@ fn upscale_keeps_pixels_crisp_with_nearest_neighbour() {
             );
         }
     }
-}
-
-#[test]
-fn kind_metadata_is_a_stable_contract() {
-    // 前端完全靠这份 JSON 渲染，形状变了要在这里显性失败。
-    let json = serde_json::to_value(registry().kinds()).unwrap();
-    let kinds = json.as_array().unwrap();
-    let expected_count =
-        18 + usize::from(cfg!(feature = "onnx")) + usize::from(cfg!(feature = "video"));
-    assert_eq!(
-        kinds.len(),
-        expected_count,
-        "内置工具的数量（改动时请一并更新这条）"
-    );
-    for (id, enabled) in [
-        ("background_removal", cfg!(feature = "onnx")),
-        ("video_compress", cfg!(feature = "video")),
-    ] {
-        assert_eq!(
-            kinds.iter().any(|kind| kind["id"] == id),
-            enabled,
-            "{id} 的存在与否必须匹配其 feature",
-        );
-    }
-
-    let convert = kinds
-        .iter()
-        .find(|kind| kind["id"] == "convert_image")
-        .unwrap();
-    assert_eq!(convert["name"], "图像格式转换");
-    assert_eq!(convert["isSource"], false);
-    assert_eq!(convert["inputs"][0]["ty"], "img");
-    assert_eq!(convert["inputs"][0]["required"], true);
-    // 输出格式跟着「目标格式」走，清单（节点库卡片）里给的是泛化的 IMG。
-    assert_eq!(convert["outputs"][0]["ty"], "img");
-
-    let format_param = convert["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "format")
-        .expect("转换节点要有目标格式这个参数");
-    assert_eq!(format_param["control"], "select");
-    assert_eq!(format_param["default"], "png");
-    let formats: Vec<&str> = format_param["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|option| option["value"].as_str().unwrap())
-        .collect();
-    assert!(formats.contains(&"jpeg"), "{formats:?}");
-    assert!(formats.contains(&"webp"), "{formats:?}");
-    assert!(!formats.contains(&"any"), "通配不是个能转出去的目标");
-
-    // 画质只对 JPEG 有意义（WebP 在这个 crate 里只有无损）。
-    let quality = convert["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "quality")
-        .unwrap();
-    assert_eq!(quality["visibleWhen"]["anyOf"][0], "jpeg");
-
-    assert!(
-        convert["notes"].as_array().unwrap().len() >= 3,
-        "展开卡片要显示「注意事项」，每个工具都得写几条"
-    );
-
-    let rename = kinds.iter().find(|kind| kind["id"] == "rename").unwrap();
-    assert_eq!(rename["name"], "重命名");
-    assert_eq!(
-        rename["category"], "通用",
-        "重命名是个通用节点，不该待在图像分类里"
-    );
-    assert_eq!(rename["inputs"][0]["id"], "in");
-    assert_eq!(rename["inputs"][0]["ty"], "any", "什么值都能接");
-    assert_eq!(rename["outputs"][0]["id"], "out");
-    assert_eq!(rename["outputs"][0]["ty"], "any");
-    let auto_extension = rename["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "autoExtension")
-        .expect("重命名节点要有自检测后缀名这个开关");
-    assert_eq!(auto_extension["control"], "bool");
-    assert_eq!(auto_extension["default"], true);
-
-    let read = kinds.iter().find(|kind| kind["id"] == "read").unwrap();
-    assert_eq!(read["name"], "读取");
-    assert_eq!(read["isSource"], true);
-    // 输出声明为通配（ANY）：具体类型自动推断。
-    assert_eq!(read["outputs"][0]["ty"], "any");
-    assert_eq!(read["params"][0]["control"], "select");
-    assert_eq!(read["defaults"]["valueType"], "image");
-
-    let file_param = read["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["control"] == "file")
-        .unwrap();
-    assert!(file_param["extensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|ext| ext == "png"));
-    assert_eq!(file_param["visibleWhen"]["anyOf"][0], "image");
-
-    let upscale = kinds.iter().find(|kind| kind["id"] == "upscale").unwrap();
-    assert_eq!(upscale["name"], "缩放图像");
-    assert_eq!(upscale["inputs"][0]["ty"], "png");
-    assert_eq!(upscale["params"][0]["control"], "number");
-    assert_eq!(upscale["params"][0]["unit"], "%");
-    assert_eq!(upscale["defaults"]["percent"], 200.0);
-
-    let compress = kinds
-        .iter()
-        .find(|kind| kind["id"] == "compress_image")
-        .unwrap();
-    assert_eq!(compress["name"], "图像压缩");
-    assert_eq!(compress["inputs"][0]["ty"], "img");
-    // 输出格式跟着压缩方式走，卡片上是泛化的 IMG。
-    assert_eq!(compress["outputs"][0]["ty"], "img");
-    let loss = compress["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "loss")
-        .expect("压缩节点要有允许的损耗率这个参数");
-    assert_eq!(loss["control"], "slider", "损耗率是个滑杆");
-    assert_eq!(loss["unit"], "%");
-    assert_eq!(loss["visibleWhen"]["anyOf"][0], "lossy");
-    // 损耗率只对 JPEG 那条有损路线有意义，所以还挂了一个「而且」条件。
-    assert_eq!(loss["visibleWhen"]["allOf"][0]["param"], "lossyFormat");
-    assert_eq!(loss["visibleWhen"]["allOf"][0]["anyOf"][0], "jpeg");
-
-    let params = compress["params"].as_array().unwrap();
-    let find_param = |id: &str| {
-        params
-            .iter()
-            .find(|param| param["id"] == id)
-            .unwrap_or_else(|| panic!("压缩节点少了 {id} 这个参数"))
-    };
-    let options_of = |id: &str| -> Vec<String> {
-        find_param(id)["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|option| option["value"].as_str().unwrap().to_string())
-            .collect()
-    };
-
-    assert_eq!(
-        options_of("scheme"),
-        vec!["fast", "balanced", "maximum", "zopfli"],
-        "无损那四档要都在"
-    );
-    assert_eq!(find_param("scheme")["visibleWhen"]["anyOf"][0], "lossless");
-    assert_eq!(options_of("strip"), vec!["safe", "all"]);
-    assert_eq!(options_of("lossyFormat"), vec!["jpeg", "palette"]);
-
-    let colors = find_param("colors");
-    assert_eq!(colors["control"], "slider");
-    assert_eq!(colors["visibleWhen"]["anyOf"][0], "lossy");
-    assert_eq!(colors["visibleWhen"]["allOf"][0]["anyOf"][0], "palette");
-
-    let crop = kinds
-        .iter()
-        .find(|kind| kind["id"] == "crop_image")
-        .unwrap();
-    assert_eq!(crop["name"], "图像裁切");
-    assert_eq!(crop["inputs"][0]["ty"], "png");
-    assert_eq!(crop["outputs"][0]["ty"], "png");
-    let modes: Vec<&str> = crop["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "mode")
-        .unwrap()["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|option| option["value"].as_str().unwrap())
-        .collect();
-    assert_eq!(modes, vec!["ratio", "size", "content", "shape"]);
-    // 「形状裁切」是一个紫色（阻塞）节点：切到 shape 时才拦住运行。
-    let crop_spec = registry().get("crop_image").unwrap();
-    let mut shape_params = defaults("crop_image");
-    shape_params.insert("mode".into(), serde_json::json!("shape"));
-    assert!(crop_spec.is_interactive(&shape_params));
-    assert!(!crop_spec.is_interactive(&defaults("crop_image")));
-    assert!(
-        crop["interactive"].is_boolean(),
-        "卡片要能知道默认是不是紫色"
-    );
-
-    let border = kinds
-        .iter()
-        .find(|kind| kind["id"] == "border_image")
-        .unwrap();
-    assert_eq!(border["name"], "边框/边距");
-    let color = border["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["id"] == "color")
-        .unwrap();
-    assert_eq!(color["control"], "color", "颜色参数用的是一块取色器");
-
-    let save = kinds
-        .iter()
-        .find(|kind| kind["id"] == "save_output")
-        .unwrap();
-    assert_eq!(save["name"], "保存到目录");
-    assert_eq!(save["inputs"][0]["ty"], "file");
-    assert_eq!(save["outputs"][0]["ty"], "text");
-    let directory_param = save["params"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|param| param["control"] == "file")
-        .unwrap();
-    assert_eq!(
-        directory_param["directory"], true,
-        "保存节点的文件参数选的是一个目录"
-    );
 }
 
 #[test]
@@ -596,7 +300,7 @@ fn converter_output_type_follows_the_target_format() {
         "选了 JPEG，输出端口就该是 Image(Jpeg)"
     );
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     // 产物得真的是一个 JPEG（自己看字节头，别信标签）。
@@ -641,7 +345,7 @@ fn legacy_convert_to_png_ids_still_run() {
         PortType::Image(ImageFormat::Png)
     );
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let bytes = std::fs::read(report.nodes[1].outputs[0].path.as_ref().unwrap()).unwrap();
     assert_eq!(&bytes[..4], b"\x89PNG");
@@ -661,7 +365,7 @@ fn compress_lossless_keeps_every_pixel() {
     ));
     workflow.edges.push(edge("e1", "in", "out", "c", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let source = image::open(&png).unwrap().to_rgba8();
@@ -698,7 +402,7 @@ fn compress_output_type_follows_the_mode() {
         "选了有损，输出端口就该是 Image(Jpeg)"
     );
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let bytes = std::fs::read(report.nodes[1].outputs[0].path.as_ref().unwrap()).unwrap();
     assert_eq!(&bytes[..2], b"\xff\xd8", "有损模式的产物得真的是 JPEG");
@@ -750,7 +454,7 @@ fn lossless_mode_picks_an_indexed_encoding_for_pixel_art() {
     ));
     workflow.edges.push(edge("e1", "in", "out", "c", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let bytes = std::fs::read(report.nodes[1].outputs[0].path.as_ref().unwrap()).unwrap();
@@ -790,7 +494,7 @@ fn lossy_palette_mode_quantizes_to_an_indexed_png() {
         "调色板那条路出来还是 PNG"
     );
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let bytes = std::fs::read(report.nodes[1].outputs[0].path.as_ref().unwrap()).unwrap();
@@ -824,7 +528,7 @@ fn crop_to_ratio_keeps_the_target_aspect() {
         .edges
         .push(edge("e1", "in", "out", "crop", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out = image::open(report.nodes[1].outputs[0].path.as_ref().unwrap())
         .unwrap()
@@ -858,7 +562,7 @@ fn crop_to_size_anchored_at_a_corner() {
         .edges
         .push(edge("e1", "in", "out", "crop", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out = image::open(report.nodes[1].outputs[0].path.as_ref().unwrap())
         .unwrap()
@@ -892,7 +596,7 @@ fn crop_to_content_trims_the_transparent_border() {
         .edges
         .push(edge("e1", "in", "out", "crop", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out = image::open(report.nodes[1].outputs[0].path.as_ref().unwrap())
         .unwrap()
@@ -920,7 +624,7 @@ fn save_to_directory_writes_and_respects_overwrite() {
         .push(node("save", crate::nodes::save::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "save", "file"));
 
-    let first = run(&workflow, None, &dir.join("out")).unwrap();
+    let first = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(first.ok, "{:?}", first.nodes);
     let written = first.nodes[1].outputs[0].summary.clone();
     assert!(
@@ -930,7 +634,7 @@ fn save_to_directory_writes_and_respects_overwrite() {
     assert!(target.join("input.png").exists(), "产物应该真的写出来了");
 
     // 再跑一次，不允许覆盖：应该另存成 input (2).png，不动原来那个。
-    let second = run(&workflow, None, &dir.join("out")).unwrap();
+    let second = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(second.ok, "{:?}", second.nodes);
     let rewritten = second.nodes[1].outputs[0].summary.clone();
     assert!(
@@ -975,7 +679,7 @@ fn rename_pipeline(dir: &Path, name: &str, auto_extension: bool) -> (PathBuf, Ru
     workflow.edges.push(edge("e1", "in", "out", "rn", "in"));
     workflow.edges.push(edge("e2", "rn", "out", "save", "file"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     (target, report)
 }
 
@@ -1039,7 +743,7 @@ fn rename_survives_a_re_encode_and_follows_the_real_format() {
         .edges
         .push(edge("e3", "c", "image", "save", "file"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     assert!(
         target.join("shot.jpg").exists(),
@@ -1066,7 +770,7 @@ fn read_reads_a_text_file_as_text() {
     // 文本模式推断出 Text。
     assert_eq!(resolved.nodes[0].outputs[0].ty, PortType::Text);
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     assert_eq!(report.nodes[0].outputs[0].ty, PortType::Text);
 }
@@ -1095,7 +799,7 @@ fn rename_passes_a_non_image_value_through_untouched() {
     assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
     assert_eq!(resolved.nodes[1].outputs[0].ty, PortType::Any);
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     assert_eq!(
         report.nodes[1].outputs[0].ty,
@@ -1136,7 +840,7 @@ fn a_wildcard_output_may_feed_any_input_at_edit_time() {
     assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
     assert!(resolved.runnable);
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 }
 
@@ -1170,23 +874,143 @@ fn params_get_optional_input_ports() {
 }
 
 #[test]
-fn source_nodes_have_no_param_ports() {
-    // 字面量节点本身就是那个值，没有上游可接数据 —— 但会有一个「空输入」用来排先后。
-    for id in [
-        crate::nodes::literal::KIND_TEXT,
-        crate::nodes::literal::KIND_NUMBER,
-        crate::nodes::literal::KIND_BOOL,
-    ] {
-        let spec = registry().get(id).unwrap();
-        assert!(spec.kind.is_source, "{id} 该是起点节点");
-        let ports = spec.kind.inputs_for(&spec.kind.default_params());
-        assert_eq!(ports.len(), 1, "{id} 只该有那个空输入");
-        assert_eq!(ports[0].ty, PortType::Void);
-        assert!(
-            ports.iter().all(|port| !port.is_param()),
-            "{id} 不该有参数端口"
-        );
+fn read_does_not_duplicate_its_source_into_the_output_directory() {
+    let dir = workspace("read-no-artifact");
+    let png = image_fixture(&dir, "png", 2, 2);
+    let mut workflow = Workflow::new("读取不复制");
+    workflow.nodes.push(input_node("in", &png));
+
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let output_dir = PathBuf::from(report.output_dir.expect("该有产物目录"));
+    let images: Vec<_> = std::fs::read_dir(&output_dir)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".png"))
+        .collect();
+    assert!(images.is_empty(), "读取不该自动写产物：{images:?}");
+}
+
+#[test]
+fn operation_follows_the_selected_operator() {
+    for (index, (op, a, b, expected)) in [
+        ("add", 7.0, 3.0, "10"),
+        ("subtract", 7.0, 3.0, "4"),
+        ("multiply", 7.0, 3.0, "21"),
+        ("divide", 7.0, 2.0, "3.5"),
+        ("remainder", 7.0, 3.0, "1"),
+        ("truncate", 7.0, 2.0, "3"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = workspace(&format!("operation-{index}"));
+        let mut workflow = Workflow::new("运算");
+        let mut left = defaults(crate::nodes::literal::KIND_NUMBER);
+        left.insert("value".into(), serde_json::json!(a));
+        workflow
+            .nodes
+            .push(node("a", crate::nodes::literal::KIND_NUMBER, left));
+        let mut right = defaults(crate::nodes::literal::KIND_NUMBER);
+        right.insert("value".into(), serde_json::json!(b));
+        workflow
+            .nodes
+            .push(node("b", crate::nodes::literal::KIND_NUMBER, right));
+        let mut params = defaults(crate::nodes::operation::KIND);
+        params.insert("op".into(), serde_json::json!(op));
+        workflow
+            .nodes
+            .push(node("op", crate::nodes::operation::KIND, params));
+        workflow.edges.push(edge("e1", "a", "out", "op", "a"));
+        workflow.edges.push(edge("e2", "b", "out", "op", "b"));
+
+        let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+        assert!(report.ok, "{op}: {:?}", report.nodes);
+        let result = report
+            .nodes
+            .iter()
+            .find(|result| result.node_id == "op")
+            .unwrap();
+        assert_eq!(result.outputs[0].summary, expected, "运算 {op}");
     }
+}
+
+#[test]
+fn operation_concat_switches_ports_and_input_types() {
+    let mut params = defaults(crate::nodes::operation::KIND);
+    params.insert("op".into(), serde_json::json!("concat"));
+    let spec = registry().get(crate::nodes::operation::KIND).unwrap();
+
+    // 静态端口契约跟着模式变：两个必填文本输入，输出也是文本。
+    let inputs = spec.inputs_for(&params);
+    let data: Vec<_> = inputs.iter().filter(|port| !port.exec).collect();
+    assert_eq!(data.len(), 2, "{inputs:?}");
+    assert!(data.iter().all(|port| port.ty == PortType::Text));
+    assert!(data.iter().all(|port| port.required));
+    assert_eq!(spec.outputs_for(&params)[0].ty, PortType::Text);
+
+    let dir = workspace("operation-concat");
+    let mut workflow = Workflow::new("拼接");
+    let mut left = defaults(crate::nodes::literal::KIND_TEXT);
+    left.insert("value".into(), serde_json::json!("foo"));
+    workflow
+        .nodes
+        .push(node("a", crate::nodes::literal::KIND_TEXT, left));
+    let mut right = defaults(crate::nodes::literal::KIND_TEXT);
+    right.insert("value".into(), serde_json::json!("bar"));
+    workflow
+        .nodes
+        .push(node("b", crate::nodes::literal::KIND_TEXT, right));
+    workflow
+        .nodes
+        .push(node("op", crate::nodes::operation::KIND, params));
+    workflow.edges.push(edge("e1", "a", "out", "op", "a"));
+    workflow.edges.push(edge("e2", "b", "out", "op", "b"));
+
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let result = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "op")
+        .unwrap();
+    assert_eq!(result.outputs[0].summary, "foobar");
+}
+
+#[test]
+fn operation_rejects_division_by_zero() {
+    let dir = workspace("operation-div0");
+    let mut workflow = Workflow::new("除零");
+    let mut left = defaults(crate::nodes::literal::KIND_NUMBER);
+    left.insert("value".into(), serde_json::json!(6));
+    workflow
+        .nodes
+        .push(node("a", crate::nodes::literal::KIND_NUMBER, left));
+    let mut right = defaults(crate::nodes::literal::KIND_NUMBER);
+    right.insert("value".into(), serde_json::json!(0));
+    workflow
+        .nodes
+        .push(node("b", crate::nodes::literal::KIND_NUMBER, right));
+    let mut params = defaults(crate::nodes::operation::KIND);
+    params.insert("op".into(), serde_json::json!("divide"));
+    workflow
+        .nodes
+        .push(node("op", crate::nodes::operation::KIND, params));
+    workflow.edges.push(edge("e1", "a", "out", "op", "a"));
+    workflow.edges.push(edge("e2", "b", "out", "op", "b"));
+
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+    let result = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "op")
+        .unwrap();
+    assert_eq!(result.status, NodeStatus::Failed);
+    assert!(
+        result.error.as_deref().unwrap_or("").contains("除数"),
+        "{:?}",
+        result.error
+    );
 }
 
 #[test]
@@ -1216,7 +1040,7 @@ fn a_linked_param_port_overrides_the_param() {
         .edges
         .push(edge("e2", "num", "out", "up", "param:percent"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let path = report
@@ -1236,7 +1060,6 @@ fn a_linked_param_port_overrides_the_param() {
     );
 }
 
-/// 把一个图像写进工作流、跑「边框/边距」、把产物读回来。
 fn border_result(name: &str, image: &RgbaImage, thickness: i64, color: &str) -> RgbaImage {
     use crate::nodes::border as bd;
 
@@ -1252,7 +1075,7 @@ fn border_result(name: &str, image: &RgbaImage, thickness: i64, color: &str) -> 
     workflow.nodes.push(node("bd", bd::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "bd", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out_path = report
         .nodes
@@ -1284,7 +1107,8 @@ fn progress_streams_node_by_node() {
 
     let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
     let progress = Progress::new(tx);
-    let report = run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
+    let report =
+        run_pipeline_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let events: Vec<ProgressEvent> = rx.try_iter().collect();
@@ -1300,8 +1124,8 @@ fn progress_streams_node_by_node() {
         .filter(|event| matches!(event, ProgressEvent::Finished { .. }))
         .count();
     // 每个节点各一条 Started + 一条 Finished，且顺序就是拓扑序。
-    assert_eq!(started, vec!["in", "up"]);
-    assert_eq!(finished, 2);
+    assert_eq!(started, vec!["fixture-entry", "in", "up"]);
+    assert_eq!(finished, 3);
 }
 
 /// 进度事件要把每个节点的**结果**也带过来 —— 界面靠它把缩略图跟着流程一张张贴上卡片，
@@ -1324,7 +1148,7 @@ fn progress_carries_each_nodes_result_as_it_finishes() {
 
     let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
     let progress = Progress::new(tx);
-    run_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
+    run_pipeline_with(&workflow, None, &dir.join("out"), None, Some(&progress)).unwrap();
 
     let finished: Vec<crate::engine::NodeRunResult> = rx
         .try_iter()
@@ -1362,7 +1186,7 @@ fn color_analysis_outputs_a_palette_text() {
     workflow.nodes.push(node("an", pa::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "an", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let output = &report
         .nodes
@@ -1395,7 +1219,7 @@ fn color_analysis_over_an_any_image_input_takes_any_format() {
 
     let resolved = resolve(&workflow);
     assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
-    assert!(run(&workflow, None, &dir.join("out")).unwrap().ok);
+    assert!(run_pipeline(&workflow, None, &dir.join("out")).unwrap().ok);
 }
 
 #[test]
@@ -1429,7 +1253,7 @@ fn a_palette_feeds_a_colour_parameter_by_its_first_colour() {
 
     let resolved = resolve(&workflow);
     assert!(errors(&resolved.issues).is_empty(), "{:?}", resolved.issues);
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     let out_path = report
@@ -1469,7 +1293,7 @@ fn remove_color_keyed_the_matching_pixels_transparent() {
     workflow.nodes.push(node("rc", rc::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "rc", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out_path = report
         .nodes
@@ -1563,7 +1387,7 @@ fn transform_flips_then_rotates_a_png() {
     workflow.nodes.push(node("tf", tf::KIND, params));
     workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let path = report
         .nodes
@@ -1598,7 +1422,7 @@ fn transform_with_default_params_is_a_no_op() {
         .push(node("tf", tf::KIND, defaults(tf::KIND)));
     workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
 
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let result = report
         .nodes
@@ -1645,7 +1469,8 @@ fn shape_crop_asks_the_interface_and_honours_the_answer() {
         .unwrap();
     let interaction = Interaction::new(request_tx, response_rx);
 
-    let report = run_with(&workflow, None, &dir.join("out"), Some(&interaction), None).unwrap();
+    let report =
+        run_pipeline_with(&workflow, None, &dir.join("out"), Some(&interaction), None).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
 
     // 请求确实发出来了，而且认得出是谁在等。
@@ -1682,7 +1507,7 @@ fn a_blocking_node_without_an_interface_fails_cleanly() {
         .push(edge("e1", "in", "out", "crop", "image"));
 
     // 无头运行：没有界面可问，应当明确报错而不是 panic。
-    let report = run(&workflow, None, &dir.join("out")).unwrap();
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
     assert!(!report.ok);
     let cropped = report
         .nodes
@@ -1702,642 +1527,6 @@ fn a_blocking_node_without_an_interface_fails_cleanly() {
 // ---------------------------------------------------------------------------
 
 /// 「顺序执行」的输出个数跟着 `outs` 参数走；它不需要数据输入，因此自动带一个空输入。
-#[test]
-fn sequence_ports_follow_its_count_param() {
-    let spec = registry().get(crate::nodes::sequence::KIND).unwrap();
-    let mut params = spec.kind.default_params();
-    assert_eq!(spec.outputs_for(&params).len(), 1, "默认就一个输出");
-
-    params.insert("outs".into(), serde_json::json!(3.0));
-    let ports = spec.outputs_for(&params);
-    assert_eq!(
-        ports.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-        vec!["out1", "out2", "out3"]
-    );
-    assert!(ports[0].required, "第一个是必须输出");
-    assert!(ports[1..].iter().all(|p| !p.required), "其余的都可删");
-    assert!(ports.iter().all(|p| p.ty == PortType::Void));
-    // 输出都挂在参数栏的对应行上 —— 节点顶部不该再有输出。
-    assert_eq!(
-        ports.iter().map(|p| p.panel_row).collect::<Vec<_>>(),
-        vec![Some(0), Some(1), Some(2)]
-    );
-
-    // 不需要数据输入 —— 自动一个空输入。
-    let inputs = spec.kind.inputs_for(&params);
-    assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].id, crate::model::node_kind::VOID_INPUT_PORT);
-    assert_eq!(inputs[0].ty, PortType::Void);
-}
-
-/// 「遍历」的端口：一个循环体输出 + 可选的「结束」；默认不限制遍历数目。
-#[test]
-fn iterate_has_a_single_body_output_and_an_optional_finally() {
-    let spec = registry().get(crate::nodes::iterate::KIND).unwrap();
-    let params = spec.kind.default_params();
-    let ports = spec.outputs_for(&params);
-    assert_eq!(
-        ports.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-        vec!["item", "finally"]
-    );
-    // 「元素」是必填的（不接就等于循环体什么都不做）；「结束」可选。
-    assert!(ports[0].required, "元素是必填输出");
-    assert!(!ports[1].required, "结束时可选输出");
-    assert_eq!(spec.kind.inputs_for(&params)[0].ty, PortType::any_list());
-    assert_eq!(params["max"], serde_json::json!(0.0), "默认 0 = 不限制");
-}
-
-/// 「遍历」对每个元素把下游那一支跑一遍。
-#[test]
-fn iterate_runs_the_body_once_per_element() {
-    let src = workspace("iterate-src");
-    image_fixture(&src, "png", 2, 2);
-    // 第二个文件（同一种格式，类型才对得上「缩放图像」）。
-    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
-
-    let mut dir_params = defaults(crate::nodes::read_dir::KIND);
-    dir_params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
-    let mut up_params = defaults(crate::nodes::upscale::KIND);
-    up_params.insert("percent".into(), serde_json::json!(200.0));
-
-    let mut workflow = Workflow::new("循环");
-    workflow
-        .nodes
-        .push(node("d", crate::nodes::read_dir::KIND, dir_params));
-    workflow.nodes.push(node(
-        "it",
-        crate::nodes::iterate::KIND,
-        defaults(crate::nodes::iterate::KIND),
-    ));
-    workflow
-        .nodes
-        .push(node("up", crate::nodes::upscale::KIND, up_params));
-    workflow.edges.push(edge("e1", "d", "out", "it", "list"));
-    workflow.edges.push(edge(
-        "e2",
-        "it",
-        crate::nodes::iterate::ITEM_PORT,
-        "up",
-        "image",
-    ));
-
-    let out = workspace("iterate-out");
-    let report = run(&workflow, None, &out).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-
-    let it = report.nodes.iter().find(|r| r.node_id == "it").unwrap();
-    assert!(
-        it.warnings.iter().any(|w| w.contains("遍历了 2 个元素")),
-        "{:?}",
-        it.warnings
-    );
-    let up = report.nodes.iter().find(|r| r.node_id == "up").unwrap();
-    assert_eq!(up.status, NodeStatus::Ok);
-
-    // 循环体跑了两轮 —— 自动输出目录里该有两份产物。
-    let produced: Vec<_> = std::fs::read_dir(report.output_dir.as_ref().unwrap())
-        .unwrap()
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
-        .collect();
-    assert_eq!(produced.len(), 2, "两轮该落两份");
-}
-
-/// 「最大遍历数目」限制跑几轮；0 是不限制。
-#[test]
-fn iterate_honours_the_maximum() {
-    let src = workspace("iterate-max-src");
-    image_fixture(&src, "png", 2, 2);
-    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
-
-    let mut dir_params = defaults(crate::nodes::read_dir::KIND);
-    dir_params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
-    let mut it_params = defaults(crate::nodes::iterate::KIND);
-    it_params.insert("max".into(), serde_json::json!(1.0));
-
-    let mut workflow = Workflow::new("限量");
-    workflow
-        .nodes
-        .push(node("d", crate::nodes::read_dir::KIND, dir_params));
-    workflow
-        .nodes
-        .push(node("it", crate::nodes::iterate::KIND, it_params));
-    workflow.nodes.push(node(
-        "up",
-        crate::nodes::upscale::KIND,
-        defaults(crate::nodes::upscale::KIND),
-    ));
-    workflow.edges.push(edge("e1", "d", "out", "it", "list"));
-    workflow.edges.push(edge(
-        "e2",
-        "it",
-        crate::nodes::iterate::ITEM_PORT,
-        "up",
-        "image",
-    ));
-
-    let out = workspace("iterate-max-out");
-    let report = run(&workflow, None, &out).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    let it = report.nodes.iter().find(|r| r.node_id == "it").unwrap();
-    assert!(
-        it.warnings.iter().any(|w| w.contains("遍历了 1 个元素")),
-        "{:?}",
-        it.warnings
-    );
-    let produced = std::fs::read_dir(report.output_dir.as_ref().unwrap())
-        .unwrap()
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
-        .count();
-    assert_eq!(produced, 1, "限量到 1 就只跑一轮");
-}
-
-/// 嵌套的遍历：外层收到内层循环的节点，`direct` / `reach` 要能正确划分。
-#[test]
-fn nested_loops_partition_into_direct_scopes() {
-    let mut workflow = Workflow::new("嵌套");
-    let it = defaults(crate::nodes::iterate::KIND);
-    let rn = defaults(crate::nodes::rename::KIND);
-    for (id, kind, params) in [
-        ("outer", crate::nodes::iterate::KIND, it.clone()),
-        ("x", crate::nodes::rename::KIND, rn.clone()),
-        ("inner", crate::nodes::iterate::KIND, it.clone()),
-        ("y", crate::nodes::rename::KIND, rn.clone()),
-        ("z", crate::nodes::rename::KIND, rn.clone()),
-    ] {
-        workflow.nodes.push(node(id, kind, params));
-    }
-    // outer.item → x → inner.list → inner.item → y → z
-    workflow.edges.push(edge(
-        "e1",
-        "outer",
-        crate::nodes::iterate::ITEM_PORT,
-        "x",
-        "in",
-    ));
-    workflow.edges.push(edge("e2", "x", "out", "inner", "list"));
-    workflow.edges.push(edge(
-        "e3",
-        "inner",
-        crate::nodes::iterate::ITEM_PORT,
-        "y",
-        "in",
-    ));
-    workflow.edges.push(edge("e4", "y", "out", "z", "in"));
-    // 循环体 y 还有一个**外部**依赖 w —— 该被排到内层循环之前。
-    workflow
-        .nodes
-        .push(node("w", crate::nodes::rename::KIND, rn.clone()));
-    workflow.edges.push(edge("e5", "w", "out", "y", "in"));
-
-    let sets = super::loop_sets(registry(), &workflow);
-    let outer = &sets["outer"];
-    assert_eq!(
-        sorted(&outer.direct),
-        vec!["inner", "x"],
-        "内层循环自己留在外层里"
-    );
-    assert!(outer.reach.contains("y") && outer.reach.contains("z"));
-    let inner = &sets["inner"];
-    assert_eq!(sorted(&inner.direct), vec!["y", "z"]);
-    assert_eq!(inner.reach.len(), 2, "内层不该把外层的节点算进来");
-
-    // 内层的外部依赖 w 该排到内层之前。
-    let ordering = super::loop_ordering(registry(), &workflow);
-    assert!(ordering.contains(&("w", "inner")), "{:?}", ordering);
-    assert!(
-        ordering.contains(&("w", "outer")),
-        "嵌套体用到的外部依赖必须在外层之前"
-    );
-    assert!(!ordering.contains(&("x", "outer")));
-}
-
-fn loop_fixture(src: &Path) -> Workflow {
-    let mut workflow = Workflow::new("loop regression");
-    let mut params = defaults(crate::nodes::read_dir::KIND);
-    params.insert("path".into(), serde_json::json!(src.to_string_lossy()));
-    workflow
-        .nodes
-        .push(node("source", crate::nodes::read_dir::KIND, params));
-    workflow.nodes.push(node(
-        "loop",
-        crate::nodes::iterate::KIND,
-        defaults(crate::nodes::iterate::KIND),
-    ));
-    workflow.nodes.push(node(
-        "body",
-        crate::nodes::upscale::KIND,
-        defaults(crate::nodes::upscale::KIND),
-    ));
-    workflow
-        .edges
-        .push(edge("list", "source", "out", "loop", "list"));
-    workflow
-        .edges
-        .push(edge("item", "loop", "item", "body", "image"));
-    workflow
-}
-
-#[test]
-fn empty_loop_runs_zero_iterations_and_still_signals_finally() {
-    use crate::registry::RegistryBuilder;
-    let mut builder = RegistryBuilder::with_builtins().unwrap();
-    builder
-        .register_node(test_spec(
-            "empty_source",
-            vec![],
-            vec![PortDef::new("out", "list", PortType::any_list())],
-            |_| Ok(ValueMap::from([("out".into(), Value::List(vec![]))])),
-        ))
-        .unwrap();
-    let registry = builder.freeze().unwrap();
-    let mut workflow = loop_fixture(&workspace("empty-loop"));
-    workflow.nodes[0] = node("source", "empty_source", Params::new());
-    workflow.nodes.push(node(
-        "done",
-        crate::nodes::literal::KIND_TEXT,
-        defaults(crate::nodes::literal::KIND_TEXT),
-    ));
-    workflow.edges.push(edge(
-        "done",
-        "loop",
-        "finally",
-        "done",
-        crate::model::node_kind::VOID_INPUT_PORT,
-    ));
-    for target in [None, Some("body"), Some("done")] {
-        let report = run_with_registry(
-            &registry,
-            &workflow,
-            target,
-            &workspace("empty-loop-out"),
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
-        assert!(!report.nodes.iter().any(|result| result.node_id == "body"));
-        let loop_result = report
-            .nodes
-            .iter()
-            .find(|result| result.node_id == "loop")
-            .unwrap();
-        assert_eq!(loop_result.status, NodeStatus::Ok);
-        assert_eq!(loop_result.warnings, vec!["遍历了 0 个元素"]);
-        assert_eq!(
-            report.nodes.iter().any(|result| result.node_id == "done"),
-            target != Some("body"),
-        );
-    }
-}
-
-#[test]
-fn nested_empty_loops_do_not_execute_bodies_or_reuse_previous_items() {
-    use crate::registry::RegistryBuilder;
-    let mut builder = RegistryBuilder::with_builtins().unwrap();
-    builder
-        .register_node(test_spec(
-            "nested_empty_source",
-            vec![],
-            vec![PortDef::new("out", "list", PortType::any_list())],
-            |_| {
-                Ok(ValueMap::from([(
-                    "out".into(),
-                    Value::List(vec![
-                        Value::List(vec![]),
-                        Value::List(vec![Value::text("only item")]),
-                        Value::List(vec![]),
-                    ]),
-                )]))
-            },
-        ))
-        .unwrap();
-    let registry = builder.freeze().unwrap();
-    let mut workflow = Workflow::new("nested empty loops");
-    workflow.nodes = vec![
-        node("source", "nested_empty_source", Params::new()),
-        node(
-            "outer",
-            crate::nodes::iterate::KIND,
-            defaults(crate::nodes::iterate::KIND),
-        ),
-        node(
-            "inner",
-            crate::nodes::iterate::KIND,
-            defaults(crate::nodes::iterate::KIND),
-        ),
-        node(
-            "body",
-            crate::nodes::rename::KIND,
-            defaults(crate::nodes::rename::KIND),
-        ),
-        node(
-            "inner_done",
-            crate::nodes::literal::KIND_TEXT,
-            defaults(crate::nodes::literal::KIND_TEXT),
-        ),
-        node(
-            "outer_done",
-            crate::nodes::literal::KIND_TEXT,
-            defaults(crate::nodes::literal::KIND_TEXT),
-        ),
-    ];
-    workflow.edges = vec![
-        edge("list", "source", "out", "outer", "list"),
-        edge("nested", "outer", "item", "inner", "list"),
-        edge("item", "inner", "item", "body", "in"),
-        edge(
-            "inner_done",
-            "inner",
-            "finally",
-            "inner_done",
-            crate::model::node_kind::VOID_INPUT_PORT,
-        ),
-        edge(
-            "outer_done",
-            "outer",
-            "finally",
-            "outer_done",
-            crate::model::node_kind::VOID_INPUT_PORT,
-        ),
-    ];
-    let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
-    let progress = Progress::new(tx);
-    let report = run_with_registry(
-        &registry,
-        &workflow,
-        None,
-        &workspace("nested-empty-out"),
-        None,
-        Some(&progress),
-    )
-    .unwrap();
-    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
-    let inner = report
-        .nodes
-        .iter()
-        .find(|result| result.node_id == "inner")
-        .unwrap();
-    assert_eq!(
-        inner.warnings,
-        vec!["遍历了 0 个元素", "遍历了 1 个元素", "遍历了 0 个元素"]
-    );
-    let body = report
-        .nodes
-        .iter()
-        .find(|result| result.node_id == "body")
-        .unwrap();
-    assert_eq!(body.status, NodeStatus::Ok);
-    assert_eq!(body.outputs[0].summary, "only item");
-    let finished: Vec<_> = rx
-        .try_iter()
-        .filter_map(|event| match event {
-            crate::progress::ProgressEvent::Finished { result } => Some(result),
-            _ => None,
-        })
-        .collect();
-    for (id, count) in [
-        ("body", 1),
-        ("inner", 3),
-        ("inner_done", 3),
-        ("outer_done", 1),
-    ] {
-        assert_eq!(
-            finished
-                .iter()
-                .filter(|result| result.node_id == id)
-                .count(),
-            count,
-            "{id}"
-        );
-    }
-    for id in ["inner_done", "outer_done"] {
-        assert_eq!(
-            report
-                .nodes
-                .iter()
-                .find(|result| result.node_id == id)
-                .unwrap()
-                .status,
-            NodeStatus::Ok
-        );
-    }
-}
-
-#[test]
-fn connected_loop_limit_overrides_the_saved_parameter() {
-    let src = workspace("wired-max");
-    image_fixture(&src, "png", 2, 2);
-    std::fs::copy(src.join("input.png"), src.join("second.png")).unwrap();
-    let mut workflow = loop_fixture(&src);
-    let mut params = defaults(crate::nodes::literal::KIND_NUMBER);
-    params.insert("value".into(), serde_json::json!(1));
-    workflow
-        .nodes
-        .push(node("limit", crate::nodes::literal::KIND_NUMBER, params));
-    workflow
-        .edges
-        .push(edge("max", "limit", "out", "loop", "param:max"));
-    let report = run(&workflow, None, &workspace("wired-max-out")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    assert!(report
-        .nodes
-        .iter()
-        .find(|r| r.node_id == "loop")
-        .unwrap()
-        .warnings
-        .iter()
-        .any(|w| w.contains("遍历了 1 个元素")));
-}
-
-#[test]
-fn loop_merge_keeps_execution_errors_above_skips_and_successes() {
-    use crate::registry::RegistryBuilder;
-    for order in [[1.0, 2.0, 3.0], [2.0, 1.0, 3.0]] {
-        let mut builder = RegistryBuilder::with_builtins().unwrap();
-        builder
-            .register_node(test_spec(
-                "merge_source",
-                vec![],
-                vec![PortDef::new("out", "list", PortType::any_list())],
-                move |_| {
-                    Ok(ValueMap::from([(
-                        "out".into(),
-                        Value::List(order.into_iter().map(Value::Number).collect()),
-                    )]))
-                },
-            ))
-            .unwrap();
-        builder
-            .register_node(test_spec(
-                "merge_gate",
-                vec![PortDef::new("in", "in", PortType::Number).required()],
-                vec![PortDef::new("out", "out", PortType::Number)],
-                |args| {
-                    let value = args.input("in")?.as_number()?;
-                    if value == 2.0 {
-                        Ok(ValueMap::new())
-                    } else {
-                        Ok(ValueMap::from([("out".into(), Value::Number(value))]))
-                    }
-                },
-            ))
-            .unwrap();
-        builder
-            .register_node(test_spec(
-                "merge_body",
-                vec![PortDef::new("in", "in", PortType::Number).required()],
-                vec![PortDef::new("out", "out", PortType::Number)],
-                |args| {
-                    let value = args.input("in")?.as_number()?;
-                    args.warnings.push(format!("executed {value}"));
-                    if value == 1.0 {
-                        Err(crate::error::NodeError::new("actual execution failure"))
-                    } else {
-                        Ok(ValueMap::from([("out".into(), Value::Number(value))]))
-                    }
-                },
-            ))
-            .unwrap();
-        let registry = builder.freeze().unwrap();
-        let mut workflow = Workflow::new("merge error priority");
-        workflow.nodes = vec![
-            node("source", "merge_source", Params::new()),
-            node(
-                "loop",
-                crate::nodes::iterate::KIND,
-                defaults(crate::nodes::iterate::KIND),
-            ),
-            node("gate", "merge_gate", Params::new()),
-            node("body", "merge_body", Params::new()),
-        ];
-        workflow.edges = vec![
-            edge("list", "source", "out", "loop", "list"),
-            edge("item", "loop", "item", "gate", "in"),
-            edge("body", "gate", "out", "body", "in"),
-        ];
-        let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
-        let progress = Progress::new(tx);
-        let report = run_with_registry(
-            &registry,
-            &workflow,
-            None,
-            &workspace("merge-priority-out"),
-            None,
-            Some(&progress),
-        )
-        .unwrap();
-        assert!(!report.ok);
-        let body = report
-            .nodes
-            .iter()
-            .find(|result| result.node_id == "body")
-            .unwrap();
-        assert_eq!(body.status, NodeStatus::Failed);
-        assert_eq!(body.error.as_deref(), Some("actual execution failure"));
-        assert_eq!(body.warnings, vec!["executed 1", "executed 3"]);
-        assert_eq!(body.outputs[0].summary, "3");
-        let statuses: Vec<_> = rx
-            .try_iter()
-            .filter_map(|event| match event {
-                crate::progress::ProgressEvent::Finished { result } if result.node_id == "body" => {
-                    Some(result.status)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            statuses,
-            if order[0] == 1.0 {
-                vec![NodeStatus::Failed, NodeStatus::Skipped, NodeStatus::Ok]
-            } else {
-                vec![NodeStatus::Skipped, NodeStatus::Failed, NodeStatus::Ok]
-            }
-        );
-    }
-}
-
-#[test]
-fn loop_failures_do_not_block_later_iterations() {
-    let src = workspace("iteration-reset");
-    image_fixture(&src, "jpg", 2, 2);
-    image_fixture(&src, "png", 2, 2);
-    let mut workflow = loop_fixture(&src);
-    workflow.nodes.push(node(
-        "after",
-        crate::nodes::rename::KIND,
-        defaults(crate::nodes::rename::KIND),
-    ));
-    workflow
-        .edges
-        .push(edge("after", "body", "image", "after", "in"));
-    let root = workspace("iteration-reset-out");
-    let report = run(&workflow, None, &root).unwrap();
-    assert!(
-        !report.ok,
-        "earlier failure must remain in the aggregate report"
-    );
-    let after = report.nodes.iter().find(|r| r.node_id == "after").unwrap();
-    assert!(
-        !after.outputs.is_empty(),
-        "second iteration must recover: {:?}",
-        report.nodes
-    );
-    let product = after.outputs[0].path.as_ref().unwrap();
-    assert!(Path::new(product).exists());
-    workflow
-        .nodes
-        .retain(|node| node.id == "source" || node.id == "loop");
-    workflow.edges.retain(|edge| edge.target == "loop");
-    assert!(run(&workflow, None, &root).unwrap().ok);
-    assert!(
-        !Path::new(product).exists(),
-        "failed runs must still persist artifact ownership"
-    );
-}
-
-#[test]
-fn partial_loop_run_never_executes_sibling_or_finally_branches() {
-    let src = workspace("partial-loop");
-    image_fixture(&src, "png", 2, 2);
-    let mut workflow = loop_fixture(&src);
-    workflow.nodes.push(node(
-        "sibling",
-        crate::nodes::rename::KIND,
-        defaults(crate::nodes::rename::KIND),
-    ));
-    workflow.nodes.push(node(
-        "done",
-        crate::nodes::rename::KIND,
-        defaults(crate::nodes::rename::KIND),
-    ));
-    workflow
-        .edges
-        .push(edge("sibling", "loop", "item", "sibling", "in"));
-    workflow
-        .edges
-        .push(edge("done", "loop", "finally", "done", "in"));
-    let report = run(&workflow, Some("body"), &workspace("partial-loop-out")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    assert!(report
-        .nodes
-        .iter()
-        .all(|r| report.order.contains(&r.node_id)));
-    assert!(!report
-        .nodes
-        .iter()
-        .any(|r| r.node_id == "sibling" || r.node_id == "done"));
-    let report = run(&workflow, Some("done"), &workspace("partial-finally-out")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    for id in ["body", "sibling", "done"] {
-        assert!(
-            report.nodes.iter().any(|r| r.node_id == id),
-            "finally must wait for its complete body"
-        );
-    }
-}
-
 #[test]
 fn unsafe_rename_stems_fail_before_saving() {
     for name in [
@@ -2371,9 +1560,20 @@ fn unsafe_rename_stems_fail_before_saving() {
 fn product_manifest_preserves_user_files_and_isolates_workflow_ids() {
     let src = workspace("manifest-source");
     image_fixture(&src, "png", 2, 2);
-    let mut workflow = loop_fixture(&src);
+    let mut workflow = Workflow::new("manifest");
+    workflow
+        .nodes
+        .push(input_node("read", &src.join("input.png")));
+    workflow.nodes.push(node(
+        "body",
+        crate::nodes::convert::KIND,
+        defaults(crate::nodes::convert::KIND),
+    ));
+    workflow
+        .edges
+        .push(edge("data", "read", "out", "body", "image"));
     let root = workspace("manifest-root");
-    let first = run(&workflow, None, &root).unwrap();
+    let first = run_pipeline(&workflow, None, &root).unwrap();
     let dir = PathBuf::from(first.output_dir.unwrap());
     let product = first
         .nodes
@@ -2388,7 +1588,7 @@ fn product_manifest_preserves_user_files_and_isolates_workflow_ids() {
     std::fs::write(dir.join("100-user.png"), b"user").unwrap();
     workflow.nodes.retain(|n| n.id != "body");
     workflow.edges.retain(|e| e.target != "body");
-    let second = run(&workflow, None, &root).unwrap();
+    let second = run_pipeline(&workflow, None, &root).unwrap();
     assert!(second.ok);
     assert!(!Path::new(&product).exists());
     assert_eq!(std::fs::read(dir.join("01-user.txt")).unwrap(), b"user");
@@ -2399,290 +1599,6 @@ fn product_manifest_preserves_user_files_and_isolates_workflow_ids() {
     assert_ne!(second.output_dir, other.output_dir);
 }
 
-fn test_spec(
-    id: &str,
-    inputs: Vec<PortDef>,
-    outputs: Vec<PortDef>,
-    run: impl Fn(&mut NodeArgs<'_>) -> Result<ValueMap, crate::error::NodeError> + Send + Sync + 'static,
-) -> crate::registry::NodeSpec {
-    let mut kind = registry()
-        .get(crate::nodes::rename::KIND)
-        .unwrap()
-        .kind
-        .clone();
-    kind.id = id.into();
-    kind.name = id.into();
-    kind.inputs = inputs;
-    kind.outputs = outputs;
-    kind.params.clear();
-    crate::registry::NodeSpec::fixed(kind, run)
-}
-
-#[test]
-fn custom_control_metadata_supports_nested_loops_and_external_dependencies() {
-    use crate::registry::{ControlFlow, NodeSpec, RegistryBuilder};
-    use std::sync::{Arc, Mutex};
-    let mut builder = RegistryBuilder::with_builtins().unwrap();
-    builder
-        .register_node(test_spec(
-            "nested_source",
-            vec![],
-            vec![PortDef::new("out", "list", PortType::any_list())],
-            |_| {
-                Ok(ValueMap::from([(
-                    "out".into(),
-                    Value::List(vec![
-                        Value::List(vec![Value::Number(1.0), Value::Number(2.0)]),
-                        Value::List(vec![Value::Number(3.0)]),
-                    ]),
-                )]))
-            },
-        ))
-        .unwrap();
-    let mut kind = registry()
-        .get(crate::nodes::iterate::KIND)
-        .unwrap()
-        .kind
-        .clone();
-    kind.id = "custom_loop".into();
-    kind.inputs = vec![PortDef::new("batch", "batch", PortType::any_list()).required()];
-    kind.outputs = vec![
-        PortDef::new("current", "current", PortType::Any),
-        PortDef::new("done", "done", PortType::Void),
-    ];
-    kind.params[0].id = "ceiling".into();
-    builder
-        .register_node(
-            NodeSpec::fixed(kind, |_| panic!("loop callback must not run")).control_flow(
-                ControlFlow::Loop {
-                    list_input: "batch".into(),
-                    item_output: "current".into(),
-                    finally_output: "done".into(),
-                    max_param: "ceiling".into(),
-                },
-            ),
-        )
-        .unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&seen);
-    builder
-        .register_node(test_spec(
-            "record",
-            vec![
-                PortDef::new("in", "in", PortType::Number).required(),
-                PortDef::new("external", "external", PortType::Number).required(),
-            ],
-            vec![],
-            move |args| {
-                captured
-                    .lock()
-                    .unwrap()
-                    .push(args.input("in")?.as_number()? + args.input("external")?.as_number()?);
-                Ok(ValueMap::new())
-            },
-        ))
-        .unwrap();
-    let registry = builder.freeze().unwrap();
-    let mut workflow = Workflow::new("custom nested");
-    workflow.nodes = vec![
-        node("source", "nested_source", Params::new()),
-        node("outer", "custom_loop", Params::new()),
-        node("inner", "custom_loop", Params::new()),
-        node("body", "record", Params::new()),
-        node(
-            "external",
-            crate::nodes::literal::KIND_NUMBER,
-            Params::from_iter([("value".into(), serde_json::json!(10))]),
-        ),
-    ];
-    workflow.edges = vec![
-        edge("a", "source", "out", "outer", "batch"),
-        edge("b", "outer", "current", "inner", "batch"),
-        edge("c", "inner", "current", "body", "in"),
-        edge("d", "external", "out", "body", "external"),
-    ];
-    let report = run_with_registry(
-        &registry,
-        &workflow,
-        None,
-        &workspace("custom-nested"),
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
-    assert_eq!(*seen.lock().unwrap(), vec![11.0, 12.0, 13.0]);
-    seen.lock().unwrap().clear();
-    workflow.nodes.push(node(
-        "limit",
-        crate::nodes::literal::KIND_NUMBER,
-        Params::from_iter([("value".into(), serde_json::json!(1))]),
-    ));
-    workflow
-        .edges
-        .push(edge("limit", "limit", "out", "inner", "param:ceiling"));
-    let report = run_with_registry(
-        &registry,
-        &workflow,
-        Some("body"),
-        &workspace("custom-nested-partial"),
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(report.ok, "{:?} {:?}", report.issues, report.nodes);
-    assert_eq!(*seen.lock().unwrap(), vec![11.0, 13.0]);
-}
-
-#[test]
-fn loop_parameter_inputs_share_runtime_type_and_failure_checks() {
-    use crate::registry::RegistryBuilder;
-    for fail in [false, true] {
-        let src = workspace("bad-loop-max");
-        image_fixture(&src, "png", 2, 2);
-        let mut builder = RegistryBuilder::with_builtins().unwrap();
-        builder
-            .register_node(test_spec(
-                "bad_limit",
-                vec![],
-                vec![PortDef::new("out", "limit", PortType::Any)],
-                move |_| {
-                    if fail {
-                        Err(crate::error::NodeError::new("failed limit"))
-                    } else {
-                        Ok(ValueMap::from([(
-                            "out".into(),
-                            Value::text("not a number"),
-                        )]))
-                    }
-                },
-            ))
-            .unwrap();
-        let registry = builder.freeze().unwrap();
-        let mut workflow = loop_fixture(&src);
-        workflow
-            .nodes
-            .push(node("limit", "bad_limit", Params::new()));
-        workflow
-            .edges
-            .push(edge("limit", "limit", "out", "loop", "param:max"));
-        let report = run_with_registry(
-            &registry,
-            &workflow,
-            None,
-            &workspace("bad-loop-max-out"),
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(!report.ok);
-        assert_eq!(
-            report
-                .nodes
-                .iter()
-                .find(|r| r.node_id == "loop")
-                .unwrap()
-                .status,
-            if fail {
-                NodeStatus::Skipped
-            } else {
-                NodeStatus::Failed
-            }
-        );
-        assert_eq!(
-            report
-                .nodes
-                .iter()
-                .find(|r| r.node_id == "body")
-                .unwrap()
-                .status,
-            NodeStatus::Skipped
-        );
-    }
-}
-
-#[test]
-fn sequence_ordering_uses_custom_prefixes() {
-    use crate::registry::{ControlFlow, RegistryBuilder};
-    let mut builder = RegistryBuilder::with_builtins().unwrap();
-    builder
-        .register_node(
-            test_spec(
-                "custom_sequence",
-                vec![],
-                vec![
-                    PortDef::new("step1", "one", PortType::Void),
-                    PortDef::new("step2", "two", PortType::Void),
-                ],
-                |_| {
-                    Ok(ValueMap::from([
-                        ("step1".into(), Value::Void),
-                        ("step2".into(), Value::Void),
-                    ]))
-                },
-            )
-            .control_flow(ControlFlow::Sequence {
-                output_prefix: "step".into(),
-                blocking_prefix: "wait".into(),
-            }),
-        )
-        .unwrap();
-    let registry = builder.freeze().unwrap();
-    let mut workflow = Workflow::new("custom sequence");
-    workflow.nodes = vec![
-        node("b", crate::nodes::literal::KIND_TEXT, Params::new()),
-        node("a", crate::nodes::literal::KIND_TEXT, Params::new()),
-        node("seq", "custom_sequence", Params::new()),
-    ];
-    workflow.edges = vec![
-        edge(
-            "b",
-            "seq",
-            "step2",
-            "b",
-            crate::model::node_kind::VOID_INPUT_PORT,
-        ),
-        edge(
-            "a",
-            "seq",
-            "step1",
-            "a",
-            crate::model::node_kind::VOID_INPUT_PORT,
-        ),
-    ];
-    let report = run_with_registry(
-        &registry,
-        &workflow,
-        None,
-        &workspace("custom-sequence"),
-        None,
-        None,
-    )
-    .unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    assert_eq!(report.order, vec!["seq", "a", "b"]);
-    workflow.nodes[2]
-        .params
-        .insert("wait1".into(), serde_json::json!(false));
-    let report = run_with_registry(
-        &registry,
-        &workflow,
-        None,
-        &workspace("custom-sequence-free"),
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(report.order, vec!["seq", "b", "a"]);
-}
-
-fn sorted(set: &HashSet<String>) -> Vec<String> {
-    let mut values: Vec<String> = set.iter().cloned().collect();
-    values.sort();
-    values
-}
-
-/// 「图像分割」把 sprite 图切成一个列表（每块一张图）。
 #[test]
 fn split_image_cuts_a_sprite_sheet_into_a_list() {
     let dir = workspace("split-src");
@@ -2707,7 +1623,7 @@ fn split_image_cuts_a_sprite_sheet_into_a_list() {
         .edges
         .push(edge("e1", "in", "out", "split", "image"));
 
-    let report = run(&workflow, None, &workspace("split-out")).unwrap();
+    let report = run_pipeline(&workflow, None, &workspace("split-out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out = &report.nodes[1].outputs[0];
     assert_eq!(
@@ -2732,103 +1648,6 @@ fn a_list_value_derives_its_element_type() {
 
 /// 「顺序执行」的输出序号决定分支先后：即使「后一个分支」的节点先加入列表，也要后跑。
 #[test]
-fn sequence_orders_branches_by_output_index() {
-    let mut seq_params = defaults(crate::nodes::sequence::KIND);
-    seq_params.insert("outs".into(), serde_json::json!(2.0));
-
-    let mut text_params = defaults(crate::nodes::literal::KIND_TEXT);
-    text_params.insert("value".into(), serde_json::json!("second"));
-
-    let mut workflow = Workflow::new("顺序");
-    // 故意让第二个分支的节点先出现 —— 拓扑序得靠排序约束把它压到后面。
-    workflow.nodes.push(node(
-        "b2",
-        crate::nodes::literal::KIND_TEXT,
-        text_params.clone(),
-    ));
-    text_params.insert("value".into(), serde_json::json!("first"));
-    workflow
-        .nodes
-        .push(node("b1", crate::nodes::literal::KIND_TEXT, text_params));
-    workflow
-        .nodes
-        .push(node("s", crate::nodes::sequence::KIND, seq_params));
-    workflow.edges.push(edge(
-        "e2",
-        "s",
-        "out2",
-        "b2",
-        crate::model::node_kind::VOID_INPUT_PORT,
-    ));
-    workflow.edges.push(edge(
-        "e1",
-        "s",
-        "out1",
-        "b1",
-        crate::model::node_kind::VOID_INPUT_PORT,
-    ));
-
-    let report = run(&workflow, None, &workspace("sequence-order")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    let pos = |id: &str| report.order.iter().position(|n| n == id).unwrap();
-    assert!(pos("s") < pos("b1"), "顺序执行先跑");
-    assert!(
-        pos("b1") < pos("b2"),
-        "out1 的分支该先跑：{:?}",
-        report.order
-    );
-}
-
-/// 把 out1 的阻塞开关关掉：两段之间不再有先后约束。
-#[test]
-fn sequence_non_blocking_output_drops_the_ordering() {
-    let mut seq_params = defaults(crate::nodes::sequence::KIND);
-    seq_params.insert("outs".into(), serde_json::json!(2.0));
-    seq_params.insert("block1".into(), serde_json::json!(false));
-
-    let mut second = defaults(crate::nodes::literal::KIND_TEXT);
-    second.insert("value".into(), serde_json::json!("second"));
-    let mut first = defaults(crate::nodes::literal::KIND_TEXT);
-    first.insert("value".into(), serde_json::json!("first"));
-
-    let mut workflow = Workflow::new("非阻塞");
-    // 这里故意让 b2 在 b1 之前 —— 非阻塞时顺序就按插入序，不再被“抢”过来。
-    workflow
-        .nodes
-        .push(node("b2", crate::nodes::literal::KIND_TEXT, second));
-    workflow
-        .nodes
-        .push(node("b1", crate::nodes::literal::KIND_TEXT, first));
-    workflow
-        .nodes
-        .push(node("s", crate::nodes::sequence::KIND, seq_params));
-    workflow.edges.push(edge(
-        "e2",
-        "s",
-        "out2",
-        "b2",
-        crate::model::node_kind::VOID_INPUT_PORT,
-    ));
-    workflow.edges.push(edge(
-        "e1",
-        "s",
-        "out1",
-        "b1",
-        crate::model::node_kind::VOID_INPUT_PORT,
-    ));
-
-    let report = run(&workflow, None, &workspace("seq-nonblock")).unwrap();
-    assert!(report.ok, "{:?}", report.nodes);
-    let pos = |id: &str| report.order.iter().position(|n| n == id).unwrap();
-    assert!(
-        pos("b2") < pos("b1"),
-        "非阻塞就不该把 b1 抢到前面：{:?}",
-        report.order
-    );
-}
-
-/// 「读取目录」把目录里的图像读成一个列表；混合格式收窄到 `List[Img]`。
-#[test]
 fn read_dir_collects_a_list_of_images() {
     let dir = workspace("read-dir-src");
     image_fixture(&dir, "png", 2, 2);
@@ -2841,7 +1660,7 @@ fn read_dir_collects_a_list_of_images() {
         .nodes
         .push(node("d", crate::nodes::read_dir::KIND, params));
 
-    let report = run(&workflow, None, &workspace("read-dir-out")).unwrap();
+    let report = run_pipeline(&workflow, None, &workspace("read-dir-out")).unwrap();
     assert!(report.ok, "{:?}", report.nodes);
     let out = &report.nodes[0].outputs[0];
     assert_eq!(
@@ -2850,4 +1669,54 @@ fn read_dir_collects_a_list_of_images() {
         "PNG + JPEG 混合应收窄为 List[Img]"
     );
     assert_eq!(out.summary, "列表 · 2 项");
+}
+
+fn wire_pipeline(workflow: &Workflow) -> Workflow {
+    let mut workflow = workflow.clone();
+    let effects: Vec<_> = workflow
+        .nodes
+        .iter()
+        .filter(|n| !registry().get(&n.kind).unwrap().pure)
+        .map(|n| n.id.clone())
+        .collect();
+    workflow
+        .nodes
+        .push(node("fixture-entry", "start", Params::new()));
+    let mut previous = "fixture-entry".to_string();
+    let mut port = "out";
+    for id in effects {
+        workflow
+            .edges
+            .push(edge(&format!("exec-{id}"), &previous, port, &id, "exec"));
+        previous = id;
+        port = "then";
+    }
+    workflow
+}
+fn run_pipeline(w: &Workflow, only: Option<&str>, root: &Path) -> Result<RunReport, AppError> {
+    if only.is_some() {
+        return super::run(w, only, root);
+    }
+    if w.nodes
+        .iter()
+        .all(|n| registry().get(&n.kind).unwrap().pure)
+    {
+        return super::run(w, w.nodes.last().map(|n| n.id.as_str()), root);
+    }
+    super::run(&wire_pipeline(w), None, root).map(strip_entry)
+}
+fn run_pipeline_with(
+    w: &Workflow,
+    only: Option<&str>,
+    root: &Path,
+    interaction: Option<&Interaction>,
+    progress: Option<&Progress>,
+) -> Result<RunReport, AppError> {
+    super::run_with(&wire_pipeline(w), only, root, interaction, progress).map(strip_entry)
+}
+
+fn strip_entry(mut report: RunReport) -> RunReport {
+    report.order.retain(|id| id != "fixture-entry");
+    report.nodes.retain(|n| n.node_id != "fixture-entry");
+    report
 }

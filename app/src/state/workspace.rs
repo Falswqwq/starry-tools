@@ -108,6 +108,10 @@ impl Workspace {
     pub fn load(&mut self, id: &str) -> Option<Workflow> {
         match self.storage.load(id) {
             Ok(workflow) => {
+                if workflow.version != 2 {
+                    self.notice = Some(format!("无法打开 v{} 工作流：需要显式迁移入口和 Exec 连线；原存档已保留，不会自动升级。", workflow.version));
+                    return None;
+                }
                 self.current = workflow.clone();
                 self.notice = None;
                 Some(workflow)
@@ -145,15 +149,15 @@ pub fn data_root() -> PathBuf {
     paths::data_root()
 }
 
-/// 一份新的空工作流：只有一个「起点」节点（所有工作流都从它开始）。
+/// 一份新的空工作流：只有一个「起点」节点（入口标记）。
 fn fresh(kinds: &[NodeKindInfo]) -> Workflow {
     let mut workflow = Workflow::new("未命名工作流");
-    if let Some(read) = kinds.iter().find(|kind| kind.kind.is_source) {
+    if let Some(start) = kinds.iter().find(|kind| kind.entry) {
         workflow.nodes.push(NodeInstance {
             id: uuid::Uuid::new_v4().to_string(),
-            kind: read.kind.id.clone(),
+            kind: start.kind.id.clone(),
             position: Position { x: 120.0, y: 180.0 },
-            params: read.defaults.clone(),
+            params: start.defaults.clone(),
         });
     }
     workflow
@@ -173,17 +177,17 @@ mod tests {
         assert_eq!(paths::IDENTIFIER, "com.falsw.starrytools");
     }
 
-    /// 新建的工作流自带一个「读取」节点 —— 所有工作流都从它开始。
+    /// 新建的工作流自带一个「起点」节点。
     #[test]
-    fn a_fresh_workflow_starts_with_an_input() {
+    fn a_fresh_workflow_starts_with_the_start_node() {
         let kinds = crate::catalog::all();
         let workflow = fresh(&kinds);
         assert_eq!(workflow.nodes.len(), 1);
-        assert_eq!(workflow.nodes[0].kind, "read");
+        assert_eq!(workflow.nodes[0].kind, "start");
         // 默认参数要从元数据里取，不能在这儿再拄一份。
         assert_eq!(
             workflow.nodes[0].params,
-            kinds.iter().find(|k| k.kind.id == "read").unwrap().defaults
+            kinds.iter().find(|kind| kind.entry).unwrap().defaults
         );
     }
 }

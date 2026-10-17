@@ -211,11 +211,13 @@ let spec = NodeSpec::fixed(kind, move |_args| {
   `catalog.rs` 只补 UI 摘要和依赖快照，不镜像一套参数、默认值、可见性或端口类型。
 - 默认值由 `NodeKind::default_params` 推导，可见性用 `ParamDef::visible`；参数输入端口由
   `ParamSpec::input_type` / `NodeKind::inputs_for` 推导。下拉与动态端口个数不生成参数端口。
+  `NodeSpec` 默认给副作用节点补 `exec` / `then`；纯节点用 `.pure()` 显式声明，入口不补执行输入。
 - 动态输出用 `NodeSpec::dynamic(kind, resolve_outputs, run)`；UI 先显示廉价声明端口，
   随后应用后台静态检查返回的 `ResolvedNode` 快照，不在绘制时探文件头。
+- 输入类型随参数变的节点（如「运算」）用 `NodeSpec::resolve_inputs` 声明；
+  它只返回声明输入；参数端口由 `NodeKind` 补齐，执行引脚由 `NodeSpec` 补齐。
   `ParamSpec::Ports` 的数量按注册的 default / min / max 取整约束，异常存档不能触发无界绘制；
-  行上的阻塞开关使用注册的 `blocking_prefix`（JSON 为 `blockingPrefix`），应与
-  `ControlFlow::Sequence.blocking_prefix` 一致，不由 UI 猜测 `block` 前缀。
+  Sequence 固定为同步串行，动态输出行没有阻塞开关。
 - 需要询问用户的节点用 `.interactive(predicate)` 与 `args.ask(...)`；缺少界面时返回错误。
   外部程序先 `register_tool(ToolSpec::new(id, probe))`，节点再 `.needs_tool(id)`，
   执行回调仍须检查可用性。长任务可用 `args.report(NodeStep { ... })` 报进度。
@@ -237,7 +239,7 @@ core/src/
   nodes/            内置工具及 register 入口
   features/video/   可选视频类型、节点、ffmpeg 调用
   engine/mod.rs     静态检查、通用执行、报告
-  engine/control.rs 顺序屏障、嵌套遍历、作用域与运行至此
+  engine/control.rs Exec 调度、完整序列分支、嵌套遍历与作用域
   engine/artifacts.rs 自动产物目录与所有权清单
   png_opt/          无损 PNG 优化；png_quant.rs 为有损量化
 app/src/
@@ -266,6 +268,13 @@ app/src/
 布局、命中和端口定位共用 `layout`，参数和端口语义始终从 core 获取。引擎按
 `NodeSpec::control_flow(ControlFlow::Sequence / Loop { ... })` 调度，不靠内置节点 ID
 写特例；新增普通数据节点不需要改控制流模块。
+
+执行由显式 Exec 控制链同步串行调度，Data 只传值；纯节点按需重新求值。
+Sequence 固定为同步串行并等待完整分支；Loop 分开 body / item / completed。
+变量节点通过 `.variable(VariablePorts::new(value_param, get, set))` 注册；
+Set 口需声明为 `PortDef::multi()`，状态在单次运行内由引擎维护。
+单节点调试仅支持纯节点及其纯数据依赖。v1 需要显式迁移，app 当前拒绝加载。
+完整契约见 [Blueprint v2 引擎](engine-blueprint.md)。
 
 ## 性能与界面验收
 

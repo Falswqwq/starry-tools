@@ -617,7 +617,7 @@ impl Library {
             .is_some_and(|(p, r)| !r.expand(DRAG_THRESHOLD).contains(p))
     }
 
-    /// 顶行的类型徽标：`[入] → [出]`，没有输入就写「起点」。
+    /// 顶行的类型徽标：`[入] → [出]`，没有输入就写「无输入」。
     fn draw_badges(
         &self,
         painter: &egui::Painter,
@@ -650,7 +650,7 @@ impl Library {
         };
 
         if kind.kind.inputs.is_empty() {
-            chip("起点", theme::ACCENT.gamma_multiply(alpha), &mut x);
+            chip("无输入", theme::INK_3.gamma_multiply(alpha), &mut x);
         } else {
             for port in &kind.kind.inputs {
                 chip(

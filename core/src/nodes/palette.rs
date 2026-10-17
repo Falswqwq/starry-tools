@@ -44,7 +44,6 @@ pub fn spec() -> NodeSpec {
             description: "从图里抽出色板：按主色归类，或者数每种颜色占多少像素。\
                           输出是一段 hex 文本，每行一个颜色。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any)).required(),
             ],

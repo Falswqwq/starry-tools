@@ -33,13 +33,65 @@ impl Graph {
                 changed |= node
                     .inputs
                     .iter()
-                    .map(|port| (&port.id, port.ty))
-                    .ne(snapshot.inputs.iter().map(|port| (&port.id, port.ty)))
+                    .map(|port| {
+                        (
+                            &port.id,
+                            port.ty,
+                            port.exec,
+                            &port.label,
+                            port.required,
+                            &port.hint,
+                            &port.param,
+                            port.panel_row,
+                            port.panel_input_row,
+                            port.multi,
+                        )
+                    })
+                    .ne(snapshot.inputs.iter().map(|port| {
+                        (
+                            &port.id,
+                            port.ty,
+                            port.exec,
+                            &port.label,
+                            port.required,
+                            &port.hint,
+                            &port.param,
+                            port.panel_row,
+                            port.panel_input_row,
+                            port.multi,
+                        )
+                    }))
                     || node
                         .outputs
                         .iter()
-                        .map(|port| (&port.id, port.ty))
-                        .ne(snapshot.outputs.iter().map(|port| (&port.id, port.ty)));
+                        .map(|port| {
+                            (
+                                &port.id,
+                                port.ty,
+                                port.exec,
+                                &port.label,
+                                port.required,
+                                &port.hint,
+                                &port.param,
+                                port.panel_row,
+                                port.panel_input_row,
+                                port.multi,
+                            )
+                        })
+                        .ne(snapshot.outputs.iter().map(|port| {
+                            (
+                                &port.id,
+                                port.ty,
+                                port.exec,
+                                &port.label,
+                                port.required,
+                                &port.hint,
+                                &port.param,
+                                port.panel_row,
+                                port.panel_input_row,
+                                port.multi,
+                            )
+                        }));
                 node.inputs.clone_from(&snapshot.inputs);
                 node.outputs.clone_from(&snapshot.outputs);
             }

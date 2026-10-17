@@ -170,7 +170,10 @@ pub fn all() -> Vec<NodeKindInfo> {
 /// UI 仅计算廉价的声明端口；动态输出由后台 Check 的 ResolvedNode 快照覆盖。
 pub fn ports_for(kind_id: &str, params: &Params) -> (Vec<PortDef>, Vec<PortDef>) {
     match registry().get(kind_id) {
-        Some(spec) => (spec.kind.inputs_for(params), spec.kind.outputs.clone()),
+        Some(spec) => {
+            let outputs = spec.outputs_for(params);
+            (spec.inputs_for(params), outputs)
+        }
         None => (Vec::new(), Vec::new()),
     }
 }

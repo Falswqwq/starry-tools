@@ -10,7 +10,6 @@ pub const CONTROL_PAD_Y: f32 = 3.0;
 pub const PORTS_ROW_H: f32 = CONTROL_H;
 pub const PORTS_GAP: f32 = 4.0;
 pub const PORTS_ADD_H: f32 = CONTROL_H;
-pub const SWITCH_H: f32 = 20.0;
 pub const BUTTON_H: f32 = 29.0;
 pub const BUTTON_SM_H: f32 = 25.0;
 pub const ICON_SM_H: f32 = 21.0;
@@ -37,9 +36,6 @@ mod tests {
     fn compact_control_metrics_leave_the_same_text_inset() {
         assert_eq!(CONTROL_H, PORTS_ROW_H);
         assert_eq!(CONTROL_H, PORTS_ADD_H);
-        // bool 是标签与开关同一行；保留 canvas 原有的 20px 几何。
-        assert_eq!(SWITCH_H, 20.0);
-        const { assert!(SWITCH_H / CONTROL_H >= 0.8) };
         for zoom in [0.5, 1.0, 2.0] {
             let rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(160.0, CONTROL_H) * zoom);
             let inner = control_inner(rect, zoom);

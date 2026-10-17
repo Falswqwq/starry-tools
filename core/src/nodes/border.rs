@@ -41,7 +41,6 @@ pub fn spec() -> NodeSpec {
             description: "给图像加一圈边框：沿着非透明像素的边界描边，透明的洞也描；\
                           整张不透明时就是在四周加边距。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "PNG 图像", PortType::Image(ImageFormat::Png)).required(),
             ],

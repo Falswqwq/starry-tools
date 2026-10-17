@@ -39,7 +39,6 @@ pub fn spec() -> NodeSpec {
             name: "颜色剔除".into(),
             category: "图像".into(),
             description: "把跟目标色相近的像素抠成透明 —— 去底色、做色键都靠它。".into(),
-            is_source: false,
             // 输入不锁格式：去底色的场合很多，没必要逼着先转 PNG。
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any)).required(),

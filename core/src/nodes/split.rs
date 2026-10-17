@@ -32,7 +32,6 @@ pub fn spec() -> NodeSpec {
             description: "按透明部分把一张图切成多张：每一块连续的不透明像素各成一张图。\
                           sprite 图处理常用，输出是一个列表。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any)).required(),
             ],

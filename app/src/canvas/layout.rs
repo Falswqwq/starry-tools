@@ -12,9 +12,9 @@ use starrytools_core::model::params::Params;
 
 use crate::canvas::graph::{
     BODY_PAD, HEADER_H, MODEL_PANEL_H, NODE_W, NOTICE_GAP, NOTICE_ICON, NOTICE_PAD, NOTICE_STACK,
-    PALETTE_H, PARAMS_BOTTOM, PARAMS_GAP, PARAM_BOOL_H, PARAM_GAP, PARAM_LABEL_GAP, PARAM_LABEL_H,
-    PARAM_NOTE_GAP, PARAM_TEXT_LINE, PORT_ROW_H, PREVIEW_H, PROGRESS_H, RUN_ACTIONS_H,
-    TOOL_PANEL_H,
+    PALETTE_H, PANEL_INPUT_H, PARAMS_BOTTOM, PARAMS_GAP, PARAM_BOOL_H, PARAM_GAP, PARAM_LABEL_GAP,
+    PARAM_LABEL_H, PARAM_NOTE_GAP, PARAM_TEXT_LINE, PORT_ROW_H, PREVIEW_H, PROGRESS_H,
+    RUN_ACTIONS_H, TOOL_PANEL_H,
 };
 use crate::canvas::node::{kind_of, Node};
 use crate::ui::controls::{
@@ -109,7 +109,11 @@ pub(crate) fn height_of_node(
     } else {
         0.0
     };
-    node_body_top(node) + params_height_of(kinds, node, notes) + sections.total() + gap
+    node_body_top(node)
+        + params_height_of(kinds, node, notes)
+        + panel_inputs_height(node)
+        + sections.total()
+        + gap
 }
 
 /// 「缺东西」面板占多高（什么都不缺时是 0）：缺模型给下载面板，缺外部程序给一句提示。
@@ -128,9 +132,13 @@ pub(crate) fn requirement_panel_height(_kinds: &[NodeKindInfo], node: &Node) -> 
 
 /// 端口区下沿（相对卡片顶部，流坐标）—— 也就是参数区的上沿。
 pub(crate) fn node_body_top(node: &Node) -> f32 {
-    // 只数**声明**的输入端口：参数端口画在参数那一行，不占端口列，也就
-    // 不撑高端口区 —— 否则灰底参数框会比里面的控件低一整行。
-    let declared = node.inputs.iter().filter(|port| !port.is_param()).count();
+    // 只数**声明**的输入端口：参数端口画在参数那一行、面板输入画在参数区下方，
+    // 都不占端口列，也就不撑高端口区。
+    let declared = node
+        .inputs
+        .iter()
+        .filter(|port| !port.is_param() && port.panel_input_row.is_none())
+        .count();
     // 挂在参数栏上的输出也不占端口列（「顺序执行」「遍历」的输出就在那儿）。
     let listed = node
         .outputs
@@ -141,23 +149,50 @@ pub(crate) fn node_body_top(node: &Node) -> f32 {
     HEADER_H + rows * PORT_ROW_H
 }
 
-/// 某个输出端口挂在参数栏的第 `row` 行时，它相对卡片顶部的高度（流坐标）——
-/// 即「动态输出」控件那一行的中心。找不到那个控件时返回 `None`。
+/// 参数区下方几行「设定值」输入占多高。
+pub(crate) fn panel_inputs_height(node: &Node) -> f32 {
+    node.inputs
+        .iter()
+        .filter(|port| port.panel_input_row.is_some())
+        .count() as f32
+        * PANEL_INPUT_H
+}
+
+/// 参数区下方第 `row` 行输入的中心（相对卡片顶部，流坐标）。
+pub(crate) fn panel_input_offset(
+    node: &Node,
+    kind: &NodeKindInfo,
+    notes: &HashMap<String, TextBlock>,
+    row: usize,
+) -> f32 {
+    let params_bottom = node_body_top(node) + params_height(kind, &node.params, notes);
+    params_bottom + row as f32 * PANEL_INPUT_H + PANEL_INPUT_H * 0.5
+}
+
+/// 某个输出端口挂在参数栏的第 `row` 行时，它相对卡片顶部的高度（流坐标）。
+///
+/// - 有「动态输出」控件（`ParamSpec::Ports`）的节点：`row` 是那一排里的行号；
+/// - 其余节点（如「数据」节点）：`row` 就是可见参数行的序号，对在该行控件的正中。
+///
+/// 找不到对应行时返回 `None`。
 pub(crate) fn panel_output_offset(
     kind: &NodeKindInfo,
     node: &Node,
     notes: &HashMap<String, TextBlock>,
     row: usize,
 ) -> Option<f32> {
-    let port_param = kind
+    let slots = param_slots(node, kind, notes);
+    if let Some(port_param) = kind
         .kind
         .params
         .iter()
-        .find(|param| matches!(param.spec, ParamSpec::Ports { .. }))?;
-    let slot = param_slots(node, kind, notes)
-        .into_iter()
-        .find(|slot| slot.id == port_param.id)?;
-    Some(slot.control_y + ports_row_center(row))
+        .find(|param| matches!(param.spec, ParamSpec::Ports { .. }))
+    {
+        let slot = slots.into_iter().find(|slot| slot.id == port_param.id)?;
+        return Some(slot.control_y + ports_row_center(row));
+    }
+    let slot = slots.get(row)?;
+    Some(slot.control_y + slot.control_h * 0.5)
 }
 
 /// 一个可见参数块在卡片里的纵向位置（**流坐标，相对卡片顶部**）。

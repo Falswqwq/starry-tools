@@ -498,6 +498,20 @@ impl PortType {
     }
 }
 
+impl<'de> Deserialize<'de> for PortType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        let (list, id) = name
+            .strip_prefix("list:")
+            .map_or((false, name.as_str()), |id| (true, id));
+        let mut ty = types()
+            .port_type(id)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown type: {id}")))?;
+        ty.list = list;
+        Ok(ty)
+    }
+}
+
 impl Serialize for PortType {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if self.list {

@@ -35,7 +35,6 @@ pub fn spec() -> NodeSpec {
             category: "图像".into(),
             description: "用 AI 模型认出主体、把背景抠成透明。需要先下载模型（模型不带在应用里）。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any)).required(),
             ],

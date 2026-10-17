@@ -34,7 +34,6 @@ pub fn spec() -> NodeSpec {
             description: "在常见图像格式之间转。输入收下任何能解码的格式，\
                           输出格式由「目标格式」决定。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any))
                     .required()

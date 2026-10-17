@@ -47,7 +47,6 @@ pub fn spec() -> NodeSpec {
             description: "用 ffmpeg 把视频重新编码压小。输入收下常见的视频格式，\
                           输出容器由「输出格式」决定。"
                 .into(),
-            is_source: false,
             inputs: vec![PortDef::new("video", "视频", VideoFormat::Any.port_type())
                 .required()
                 .hint("常见视频格式")],
@@ -612,6 +611,19 @@ mod tests {
         dir
     }
 
+    fn wire_exec(workflow: &mut Workflow) {
+        workflow.nodes.push(node("start", "start", Params::new()));
+        for (source, port, target) in [("start", "out", "in"), ("in", "then", "c")] {
+            workflow.edges.push(Edge {
+                id: format!("exec-{target}"),
+                source: source.into(),
+                source_port: port.into(),
+                target: target.into(),
+                target_port: "exec".into(),
+            });
+        }
+    }
+
     /// 用 ffmpeg 自己造一个小视频（mp4 / H.264）。
     fn make_video(dir: &Path) -> PathBuf {
         let path = dir.join("clip.mp4");
@@ -671,9 +683,10 @@ mod tests {
             target_port: "video".into(),
         });
 
+        wire_exec(&mut workflow);
         let report = run(&workflow, None, &dir.join("out")).unwrap();
         assert!(report.ok, "{preset}: {:?}", report.nodes);
-        let path = report.nodes[1].outputs[0].path.as_ref().expect("落盘");
+        let path = report.nodes[2].outputs[0].path.as_ref().expect("落盘");
         std::fs::metadata(path).unwrap().len()
     }
 
@@ -708,6 +721,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::sync_channel(crate::progress::PROGRESS_CAPACITY);
         let progress = crate::progress::Progress::new(tx);
+        wire_exec(&mut workflow);
         let report =
             crate::engine::run_with(&workflow, None, &dir.join("out"), None, Some(&progress))
                 .unwrap();
@@ -780,9 +794,10 @@ mod tests {
             target_port: "video".into(),
         });
 
+        wire_exec(&mut workflow);
         let report = run(&workflow, None, &dir.join("out")).unwrap();
         assert!(report.ok, "{:?}", report.nodes);
-        let out = &report.nodes[1].outputs[0];
+        let out = &report.nodes[2].outputs[0];
         assert_eq!(out.ty, VideoFormat::Mp4.port_type());
         assert!(
             out.summary.contains("MP4"),
@@ -799,12 +814,12 @@ mod tests {
         assert!(size > 0, "产物不该是空文件");
         // 大小变化会写进这个节点的提示里。
         assert!(
-            report.nodes[1]
+            report.nodes[2]
                 .warnings
                 .iter()
                 .any(|warning| warning.contains('→')),
             "该报一声大小变化：{:?}",
-            report.nodes[1].warnings
+            report.nodes[2].warnings
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -17,7 +17,7 @@ FILE       能写盘的产物接口
   VID      视频接口，实现 FILE，启用 video 时注册
     MP4 / MKV / WEBM / MOV / AVI
 TEXT / NUMBER / BOOL
-VOID       空信号，只用于定执行先后
+VOID       历史类型占位；是否为执行引脚由 PortDef.exec 决定
 ```
 
 `PortType` 指向具体类型或接口；新类型不需要增加核心枚举分支。图像格式转换收 `IMG`，
@@ -44,13 +44,19 @@ VOID       空信号，只用于定执行先后
 
 [读取目录](nodes/read_dir.md)产出列表，[遍历](nodes/iterate.md)让下游对元素重复执行。
 
-### 空输入与控制流
+### 执行引脚与数据引脚
 
-`VOID` 不携带数据。`NodeKind::inputs_for` 在节点没有任何其它输入（包括参数端口）时自动
-添加可选 `seq: VOID` 输入，把起点或逻辑节点挂到控制流输出上只表示执行先后，不喂数据。
+`PortDef.exec` 明确区分 Exec 与 Data，不能根据 `VOID` 或 `required` 推断执行。
+Exec 不携带值，不能连接 Data，即使 Data 类型是 `ANY` / `VOID`。
+普通副作用节点默认带 `exec` 输入和 `then` 输出；入口只提供执行输出。
 
-顺序屏障和循环调度实现在 `core/src/engine/control.rs`，根据注册表的
-`ControlFlow::Sequence` / `ControlFlow::Loop` 描述执行，不根据内置节点 ID 判断种类。
+执行线决定副作用顺序；必填或可选数据线都不会隐式执行来源节点。纯节点按消费者需求重新求值；
+已连接的数据缺失或类型错误会失败，仅未连接的可选参数使用本地值。纯数据环会报错。
+Data 输入默认最多一条边，`PortDef.multi` 的端口（如变量 Set）可接多条；Data 输出可扇出。
+Exec 输出最多一条边、输入可接受多个来源并分别触发。
+
+Sequence 执行完整分支后才进入下一分支；Loop 用 `body` 控制循环体、`item` 传值、
+`finally` 表示成功完成。调度基于注册的控制流协议，详见 [Blueprint v2](engine-blueprint.md)。
 
 ## 启动期注册
 
@@ -97,14 +103,14 @@ UI 先展示声明端口，后台解析完成后以当前 generation / revision 
 | [图像压缩](nodes/compress.md) | 压缩方式与有损格式 |
 | [视频压缩](nodes/video_compress.md) | 输出格式（仅 video feature） |
 | [顺序执行](nodes/sequence.md) | 输出个数 |
-| [遍历](nodes/iterate.md) | 解包项数 |
+
 
 可变个数由 `ParamSpec::Ports` 声明，参数存数量。`canvas/parameters.rs` 与
 `ui/widgets/controls.rs` 根据元数据提供行、删除按钮和加号；`PortDef::panel_row`
 指定输出挂在参数区哪一行，不必占据顶栏端口列。
 
-节点库的卡片是**声明模板**，`registry::kinds()` 不运行动态解析，所以显示泛化的
-`ANY` / `IMG` / `VID`。拖出后后台检查才解析为具体格式，不在每帧绘制时读取文件头。
+节点库使用 `Registry::kinds()` 提供的默认解析端口及 pure 元数据；
+实例端口由后台 `resolve` 按参数和文件进一步细化，不在每帧绘制时读取文件头。
 
 ## 参数端口与单一契约
 
@@ -122,9 +128,14 @@ app 直接使用 `NodeKindInfo` / `PortDef` / `ParamDef` / `ParamSpec`，不复�
 | 下拉 / 动态输出个数 | 不生成 |
 
 `NodeKind::inputs_for(params)` 根据 `ParamDef::visible` 只为可见、可喂值参数生成
-`param:<id>` 可选输入；起点节点不生成参数输入。默认值由 `NodeKind::default_params`
-推导，不能在 UI 手抄。连线后 UI 禁用本地控件，执行时 core 将输入值覆盖对应参数，
-而不是当成普通数据输入；拔线后恢复本地值。
+`param:<id>` 可选输入。默认值由 `NodeKind::default_params` 推导，不能在 UI 手抄。
+连线后 UI 禁用本地控件，执行时 core 将输入值覆盖对应参数，而不是当成普通数据输入；
+拔线后恢复本地值。
+
+变量节点是带本地值的纯节点：Get 输出类型与 Set 输入类型相同，不接执行线。
+状态只存在于单次运行，详见[变量节点](variables.md)。
+动态输入通过 `NodeSpec::resolve_inputs` 声明，参数输入由 `NodeKind` 补齐，执行引脚由 `NodeSpec` 补齐。
+app 应使用 `NodeSpec::inputs_for/outputs_for` 或 `resolve` 的实例端口。
 
 ## 色板与通用产物
 

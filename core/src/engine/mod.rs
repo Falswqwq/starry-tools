@@ -5,10 +5,10 @@
 //! 1. [`resolve`] —— 静态检查。把每个节点的端口类型算出来（输入节点要读文件
 //!    头才知道格式），顺便列出所有问题。编辑器每改一下就调它一次，用来画
 //!    端口徽标、判断连线能不能接、给节点打红标。
-//! 2. [`run`] —— 真的把图画一遍。按拓扑序逐个执行节点，运行期再严格核对一遍
+//! 2. [`run`] —— 真的把图画一遍。从入口沿显式 Exec 执行节点，纯数据按需求值，运行期再严格核对一遍
 //!    类型，把每个节点的产物（预览 + 落盘文件）收集成报告。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::interaction::Interaction;
-use crate::model::node_kind::{PortDef, PARAM_PORT_PREFIX};
+use crate::model::node_kind::PortDef;
 use crate::model::params::Params;
 use crate::model::port_type::PortType;
 use crate::model::value::{NodeArgs, Value, ValueMap};
@@ -27,9 +27,6 @@ use crate::registry::{registry, Registry};
 mod artifacts;
 mod control;
 pub(crate) use artifacts::validate_file_name;
-#[cfg(test)]
-use control::loop_sets;
-use control::{build_program, loop_ordering, sequence_ordering, Program};
 
 /// 节点缩略图的长边上限。
 const PREVIEW_MAX_DIM: u32 = 256;
@@ -98,7 +95,6 @@ impl Issue {
 pub struct ResolvedNode {
     pub node_id: String,
     pub kind: String,
-    pub is_source: bool,
     pub inputs: Vec<PortDef>,
     pub outputs: Vec<PortDef>,
 }
@@ -160,6 +156,10 @@ pub struct RunReport {
     pub order: Vec<String>,
     pub nodes: Vec<NodeRunResult>,
     pub issues: Vec<Issue>,
+    /// 成功运行结束时的变量节点状态（node_id -> 标量值）。
+    /// 调用方可在成功后写回节点参数，下一轮从新值开始。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub variable_states: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_dir: Option<String>,
     pub finished_at: i64,
@@ -171,9 +171,7 @@ pub struct RunReport {
 
 struct Analysis {
     resolved: Vec<ResolvedNode>,
-    index_of: HashMap<String, usize>,
     issues: Vec<Issue>,
-    order: Option<Vec<String>>,
 }
 
 impl Analysis {
@@ -193,6 +191,11 @@ fn port_type_map(ports: &[PortDef]) -> HashMap<String, PortType> {
 
 fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
     let mut issues = Vec::new();
+    if workflow.version != crate::model::workflow::CURRENT_VERSION {
+        issues.push(Issue::error(
+            "工作流版本不支持：请显式迁移到 v2 并重新连接 Exec；不会推测执行顺序",
+        ));
+    }
     let mut resolved: Vec<ResolvedNode> = Vec::with_capacity(workflow.nodes.len());
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut output_types: HashMap<String, HashMap<String, PortType>> = HashMap::new();
@@ -209,10 +212,9 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
                 node_id: node.id.clone(),
                 // 用归一后的 id：老存档里写的是老 id，前端要拿它去查元数据。
                 kind: spec.kind.id.clone(),
-                is_source: spec.kind.is_source,
                 // 含**参数端口**（每个能被上游喂的参数各一个）——
                 // 它们也是真正的输入端口，连线、类型检查都走同一套。
-                inputs: spec.kind.inputs_for(&node.params),
+                inputs: spec.inputs_for(&node.params),
                 outputs: spec.outputs_for(&node.params),
             },
             None => {
@@ -222,7 +224,6 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
                 ResolvedNode {
                     node_id: node.id.clone(),
                     kind: node.kind.clone(),
-                    is_source: false,
                     inputs: Vec::new(),
                     outputs: Vec::new(),
                 }
@@ -280,14 +281,24 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
             continue;
         };
 
-        if !filled.insert((edge.target.clone(), edge.target_port.clone())) {
-            issues.push(
-                Issue::error(format!("输入端口「{}」连接了多条线", target_port.label))
-                    .at_edge(&edge.id),
-            );
+        if !target_port.exec {
+            let duplicate = !filled.insert((edge.target.clone(), edge.target_port.clone()));
+            if duplicate && !target_port.multi {
+                issues.push(
+                    Issue::error(format!("输入端口「{}」连接了多条线", target_port.label))
+                        .at_edge(&edge.id),
+                );
+            }
         }
 
-        if !target_port.ty.accepts(source_type) {
+        let source_port = resolved[index_of[&edge.source]]
+            .outputs
+            .iter()
+            .find(|p| p.id == edge.source_port)
+            .unwrap();
+        if source_port.exec != target_port.exec
+            || (!target_port.exec && !target_port.ty.accepts(source_type))
+        {
             issues.push(
                 Issue::error(format!(
                     "类型不匹配：「{}」需要{}，而连过来的是{}",
@@ -305,7 +316,7 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
         let Some(spec) = registry.get(&node.kind) else {
             continue;
         };
-        for port in &spec.kind.inputs {
+        for port in &resolved[index_of[&node.id]].inputs {
             if port.required && !filled.contains(&(node.id.clone(), port.id.clone())) {
                 issues.push(
                     Issue::error(format!("必填的输入「{}」还没有连上", port.label))
@@ -313,7 +324,10 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
                 );
             }
         }
-        if !spec.kind.inputs.is_empty() && workflow.incoming(&node.id).next().is_none() {
+        if spec.variable.is_none()
+            && !spec.kind.inputs.is_empty()
+            && workflow.incoming(&node.id).next().is_none()
+        {
             issues.push(
                 Issue::warning(format!("「{}」还没有连接任何输入", spec.kind.name))
                     .at_node(&node.id),
@@ -321,91 +335,11 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
         }
     }
 
-    let order = topological_order(registry, workflow, &mut issues);
-
-    Analysis {
-        resolved,
-        index_of,
-        issues,
-        order,
-    }
+    control::validate(registry, workflow, &resolved, &mut issues);
+    Analysis { resolved, issues }
 }
 
-/// Kahn 算法。有环就返回 `None` 并记一条错误。
-fn topological_order(
-    registry: &Registry,
-    workflow: &Workflow,
-    issues: &mut Vec<Issue>,
-) -> Option<Vec<String>> {
-    let ids: Vec<&str> = workflow.nodes.iter().map(|node| node.id.as_str()).collect();
-    let known: HashSet<&str> = ids.iter().copied().collect();
-
-    // 先收集所有有向边（去重）：真实的连线 + 「顺序执行」加上的**排序约束**。
-    // 去掉重复边很关键 —— 同一条边数两遍会把入度算大，拓扑序就错了。
-    let mut candidates: Vec<(&str, &str)> = Vec::new();
-    for edge in &workflow.edges {
-        if !known.contains(edge.source.as_str()) || !known.contains(edge.target.as_str()) {
-            continue;
-        }
-        if edge.source == edge.target {
-            issues.push(
-                Issue::error("节点不能把输出接回自己")
-                    .at_edge(&edge.id)
-                    .at_node(&edge.source),
-            );
-            continue;
-        }
-        candidates.push((edge.source.as_str(), edge.target.as_str()));
-    }
-    candidates.extend(sequence_ordering(registry, workflow));
-    candidates.extend(loop_ordering(registry, workflow));
-
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut edges: Vec<(&str, &str)> = Vec::new();
-    for (from, to) in candidates {
-        if from != to && seen.insert((from, to)) {
-            edges.push((from, to));
-        }
-    }
-
-    let mut indegree: HashMap<&str, usize> = ids.iter().map(|id| (*id, 0)).collect();
-    let mut successors: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (from, to) in edges {
-        successors.entry(from).or_default().push(to);
-        if let Some(degree) = indegree.get_mut(to) {
-            *degree += 1;
-        }
-    }
-
-    let mut queue: VecDeque<&str> = ids
-        .iter()
-        .copied()
-        .filter(|id| indegree.get(id).copied().unwrap_or(0) == 0)
-        .collect();
-    let mut order = Vec::with_capacity(ids.len());
-
-    while let Some(id) = queue.pop_front() {
-        order.push(id.to_string());
-        if let Some(next_nodes) = successors.get(id) {
-            for next in next_nodes {
-                if let Some(degree) = indegree.get_mut(next) {
-                    *degree -= 1;
-                    if *degree == 0 {
-                        queue.push_back(next);
-                    }
-                }
-            }
-        }
-    }
-
-    if order.len() != ids.len() {
-        issues.push(Issue::error("工作流里存在循环，无法确定执行顺序"));
-        return None;
-    }
-    Some(order)
-}
-
-/// 静态检查一遍，顺便给出每个节点的真实端口类型。
+/// Resolve ports and validate without executing callbacks.
 pub fn resolve(workflow: &Workflow) -> ResolvedWorkflow {
     let analysis = analyze(registry(), workflow);
     let runnable = !analysis.has_errors();
@@ -422,7 +356,7 @@ pub fn resolve(workflow: &Workflow) -> ResolvedWorkflow {
 
 /// 执行工作流。
 ///
-/// `only_node` 给定时只跑「这个节点以及它所有的上游」，用来单步调试。
+/// `only_node` 仅允许纯节点求值；不会绕过 Exec 执行副作用。
 ///
 /// 没有界面可对话（测试、无头运行）时走这条路：紫色节点一律报错。
 pub fn run(
@@ -440,10 +374,14 @@ struct Exec<'a> {
     artifacts: &'a mut artifacts::Artifacts,
     interaction: Option<&'a Interaction>,
     progress: Option<&'a Progress>,
-    /// 循环布局（哪些节点是循环、各自的直接作用域、哪些被循环控制）。
-    program: &'a Program,
+    evaluating: HashSet<String>,
+    active: HashSet<String>,
+    trace: Vec<String>,
+    steps: usize,
     /// 节点在 `full_order` 里的下标（自动产物命名用）。
     position_of: HashMap<String, usize>,
+    /// 节点本地变量在一次运行中的当前值（node_id -> 值）。
+    variable_values: HashMap<String, Value>,
     values: HashMap<String, ValueMap>,
     failed: HashSet<String>,
     results: Vec<NodeRunResult>,
@@ -451,50 +389,137 @@ struct Exec<'a> {
 }
 
 impl Exec<'_> {
+    /// 用节点参数里的本地值给所有变量节点铺一次初始状态。
+    fn initialize_variables(&mut self) {
+        let nodes: Vec<_> = self
+            .workflow
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.kind.clone(), node.params.clone()))
+            .collect();
+        for (node_id, kind, params) in nodes {
+            let Some(spec) = self.registry.get(&kind) else {
+                continue;
+            };
+            let Some(variable) = spec.variable.clone() else {
+                continue;
+            };
+            let mut merged = spec.kind.default_params();
+            merged.extend(params);
+            let inputs = ValueMap::new();
+            let mut warnings = Vec::new();
+            let result = (spec.run)(&mut NodeArgs {
+                node_id: &node_id,
+                node_name: &spec.kind.name,
+                params: &merged,
+                inputs: &inputs,
+                warnings: &mut warnings,
+                interaction: self.interaction,
+                progress: self.progress,
+            });
+            let value = result
+                .ok()
+                .and_then(|outputs| outputs.get(&variable.get).cloned());
+            if let Some(value) = value {
+                self.variable_values.insert(node_id, value);
+            }
+        }
+    }
+
+    /// 上游节点产出值后，把它写进所有接在变量 Set 口上的目标。
+    ///
+    /// 多条 Set 连线按上游实际运行的顺序写入，后到的覆盖先到的；
+    /// 写入不会反向触发任何节点。
+    fn publish_variable_writes(&mut self, node_id: &str, outputs: &ValueMap) {
+        let edges: Vec<_> = self.workflow.outgoing(node_id).cloned().collect();
+        for edge in edges {
+            let Some(value) = outputs.get(&edge.source_port) else {
+                continue;
+            };
+            let Some(target) = self.workflow.node(&edge.target) else {
+                continue;
+            };
+            let Some(spec) = self.registry.get(&target.kind) else {
+                continue;
+            };
+            let Some(variable) = spec.variable.as_ref() else {
+                continue;
+            };
+            if variable.set != edge.target_port {
+                continue;
+            }
+            let mut params = spec.kind.default_params();
+            params.extend(target.params.clone());
+            let accepted = spec
+                .inputs_for(&params)
+                .into_iter()
+                .find(|port| port.id == variable.set)
+                .is_some_and(|port| port.ty.strictly_accepts(value.port_type()));
+            if accepted {
+                self.variable_values
+                    .insert(edge.target.clone(), value.clone());
+            }
+        }
+    }
+
     /// 参数连线与普通输入共用失败传播和运行期类型检查。
-    fn collect_inputs(&self, node_id: &str) -> Result<(Params, ValueMap), (NodeStatus, String)> {
+    fn collect_inputs(
+        &mut self,
+        node_id: &str,
+    ) -> Result<(Params, ValueMap), (NodeStatus, String)> {
         let node = self.workflow.node(node_id).expect("analyzed node");
         let spec = self.registry.get(&node.kind).expect("analyzed kind");
         let mut params = spec.kind.default_params();
         params.extend(node.params.clone());
+        let ports = spec.inputs_for(&params);
+        let edges: Vec<_> = self.workflow.incoming(node_id).cloned().collect();
         let mut inputs = ValueMap::new();
-        for edge in self.workflow.incoming(node_id) {
+        for edge in edges {
+            let port = ports.iter().find(|p| p.id == edge.target_port).unwrap();
+            if port.exec {
+                continue;
+            }
+            // Set 是写入口，不构成 Get 的求值依赖；值由上游运行时直接写入。
+            if spec
+                .variable
+                .as_ref()
+                .is_some_and(|variable| variable.set == port.id)
+            {
+                continue;
+            }
+            let source = self.workflow.node(&edge.source).unwrap();
+            if self.registry.get(&source.kind).unwrap().pure {
+                if self.evaluating.len() >= 256 || !self.evaluating.insert(edge.source.clone()) {
+                    return Err((NodeStatus::Failed, "纯数据依赖存在循环".into()));
+                }
+                self.run_node(&edge.source, &[], false);
+                self.evaluating.remove(&edge.source);
+            }
             let value = self
                 .values
                 .get(&edge.source)
-                .and_then(|ports| ports.get(&edge.source_port));
-            if self.failed.contains(&edge.source) || value.is_none() {
+                .and_then(|v| v.get(&edge.source_port))
+                .ok_or_else(|| {
+                    (
+                        NodeStatus::Failed,
+                        format!("数据源 {} 未执行或已离开循环作用域", edge.source),
+                    )
+                })?;
+            if !port.ty.strictly_accepts(value.port_type()) {
                 return Err((
-                    NodeStatus::Skipped,
-                    format!("上游节点 {} 没有产出，跳过了", short_id(&edge.source)),
+                    NodeStatus::Failed,
+                    format!("输入 {} 运行时类型不匹配", port.id),
                 ));
             }
-            let value = value.unwrap();
-            if let Some(param_id) = edge.target_port.strip_prefix(PARAM_PORT_PREFIX) {
-                if let Some(json) = value.to_param_json() {
-                    params.insert(param_id.to_string(), json);
-                }
+            if let Some(param) = &port.param {
+                params.insert(
+                    param.clone(),
+                    value
+                        .to_param_json()
+                        .ok_or_else(|| (NodeStatus::Failed, "参数值不可序列化".into()))?,
+                );
             } else {
-                inputs.insert(edge.target_port.clone(), value.clone());
-            }
-        }
-        // 连线以静态声明的端口为契约；参数覆盖可能隐藏端口，但不能绕过其类型检查。
-        let ports = spec.kind.inputs_for(&node.params);
-        for edge in self.workflow.incoming(node_id) {
-            let value = &self.values[&edge.source][&edge.source_port];
-            if let Some(port) = ports.iter().find(|port| port.id == edge.target_port) {
-                let actual = value.port_type();
-                if !port.ty.strictly_accepts(actual) {
-                    return Err((
-                        NodeStatus::Failed,
-                        format!(
-                            "输入「{}」声明要{}，实际拿到的是{}",
-                            port.label,
-                            port.ty.label(),
-                            actual.label()
-                        ),
-                    ));
-                }
+                inputs.insert(port.id.clone(), value.clone());
             }
         }
         Ok((params, inputs))
@@ -519,6 +544,8 @@ impl Exec<'_> {
     }
 
     fn run_node(&mut self, node_id: &str, iteration: &[usize], aggregate: bool) {
+        self.trace.push(node_id.to_owned());
+        self.values.remove(node_id);
         let mut result = self.start_result(node_id);
         let (params, inputs) = match self.collect_inputs(node_id) {
             Ok(prepared) => prepared,
@@ -532,21 +559,29 @@ impl Exec<'_> {
         let node = self.workflow.node(node_id).expect("analyzed node");
         let spec = self.registry.get(&node.kind).expect("analyzed kind");
         let started = Instant::now();
-        let outcome = (spec.run)(&mut NodeArgs {
-            node_id,
-            node_name: &spec.kind.name,
-            params: &params,
-            inputs: &inputs,
-            warnings: &mut result.warnings,
-            interaction: self.interaction,
-            progress: self.progress,
-        });
+        let outcome = if let Some(variable) = &spec.variable {
+            self.variable_values
+                .get(node_id)
+                .cloned()
+                .map(|value| ValueMap::from([(variable.get.clone(), value)]))
+                .ok_or_else(|| crate::error::NodeError("变量节点没有初始值".into()))
+        } else {
+            (spec.run)(&mut NodeArgs {
+                node_id,
+                node_name: &spec.kind.name,
+                params: &params,
+                inputs: &inputs,
+                warnings: &mut result.warnings,
+                interaction: self.interaction,
+                progress: self.progress,
+            })
+        };
         result.elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(outputs) => {
                 let output_ports = spec.outputs_for(&params);
                 let multiple_ports = output_ports.len() > 1;
-                for port in output_ports {
+                for port in output_ports.into_iter().filter(|p| !p.exec) {
                     let Some(value) = outputs.get(&port.id) else {
                         continue;
                     };
@@ -564,7 +599,7 @@ impl Exec<'_> {
                             }
                         }
                     }
-                    if !spec.kind.is_source {
+                    if spec.auto_artifact {
                         if let Some((bytes, extension)) = value.product() {
                             let filename = output_file_name(
                                 self.position_of.get(node_id).copied().unwrap_or(0),
@@ -592,6 +627,7 @@ impl Exec<'_> {
                         palette,
                     });
                 }
+                self.publish_variable_writes(node_id, &outputs);
                 self.values.insert(node_id.to_string(), outputs);
             }
             Err(error) => {
@@ -684,35 +720,35 @@ fn run_with_registry(
             order: Vec::new(),
             nodes: Vec::new(),
             issues: analysis.issues,
+            variable_states: Default::default(),
             output_dir: None,
             finished_at: now_millis(),
         });
     }
 
-    let full_order = analysis.order.clone().unwrap_or_default();
-    let execution = match only_node {
-        Some(target) if !analysis.index_of.contains_key(target) => {
-            let mut report = RunReport {
+    if let Some(target) = only_node {
+        let allowed = workflow
+            .node(target)
+            .and_then(|n| registry.get(&n.kind))
+            .is_some_and(|s| s.pure);
+        if !allowed {
+            return Ok(RunReport {
                 ok: false,
                 duration_ms: 0,
-                order: Vec::new(),
-                nodes: Vec::new(),
-                issues: analysis.issues,
+                order: vec![],
+                nodes: vec![],
+                issues: vec![Issue::error(
+                    "单节点调试仅支持纯节点；副作用必须从入口沿 Exec 触发",
+                )],
+                variable_states: Default::default(),
                 output_dir: None,
                 finished_at: now_millis(),
-            };
-            report
-                .issues
-                .push(Issue::error(format!("找不到节点：{target}")));
-            return Ok(report);
+            });
         }
-        Some(target) => control::ancestors_of(registry, workflow, target, &full_order),
-        None => full_order.clone(),
-    };
-
+    }
+    let full_order: Vec<_> = workflow.nodes.iter().map(|n| n.id.clone()).collect();
     let mut artifacts = artifacts::Artifacts::prepare(output_root, workflow, only_node.is_none())?;
     let output_dir = artifacts.dir().to_path_buf();
-    let program = build_program(registry, workflow, &execution);
 
     let mut exec = Exec {
         workflow,
@@ -720,25 +756,39 @@ fn run_with_registry(
         artifacts: &mut artifacts,
         interaction,
         progress,
-        program: &program,
+        evaluating: HashSet::new(),
+        active: HashSet::new(),
+        trace: vec![],
+        steps: 0,
         position_of: full_order
             .iter()
             .enumerate()
             .map(|(index, id)| (id.clone(), index))
             .collect(),
+        variable_values: HashMap::new(),
         values: HashMap::new(),
         failed: HashSet::new(),
-        results: Vec::with_capacity(execution.len()),
+        results: Vec::new(),
         previews_left: MAX_PREVIEWS,
     };
+    exec.initialize_variables();
 
-    let top_scope: Vec<String> = execution
+    if let Some(target) = only_node {
+        exec.evaluating.insert(target.to_owned());
+        exec.run_node(target, &[], false);
+    } else {
+        for node in &workflow.nodes {
+            if registry.get(&node.kind).unwrap().entry {
+                exec.trigger(&node.id, &[]);
+            }
+        }
+    }
+    let variable_states = exec
+        .variable_values
         .iter()
-        .filter(|id| !program.controlled.contains(*id))
-        .cloned()
+        .filter_map(|(node_id, value)| value.to_param_json().map(|value| (node_id.clone(), value)))
         .collect();
-    exec.run_scope(&top_scope, &[], false);
-
+    let execution = std::mem::take(&mut exec.trace);
     let results = std::mem::take(&mut exec.results);
     drop(exec);
 
@@ -750,6 +800,7 @@ fn run_with_registry(
         order: execution,
         nodes: results,
         issues: analysis.issues,
+        variable_states,
         output_dir: Some(output_dir.to_string_lossy().to_string()),
         finished_at: now_millis(),
     })
@@ -803,9 +854,8 @@ fn file_slug(text: &str) -> String {
     }
 }
 
-fn short_id(node_id: &str) -> String {
-    node_id.chars().take(6).collect()
-}
-
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod blueprint_tests;

@@ -55,7 +55,6 @@ pub fn spec() -> NodeSpec {
             category: "图像".into(),
             description: "从图上取出一块：按长宽比取、取固定尺寸、裁掉四周留白，或手动框一块。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "PNG 图像", PortType::Image(ImageFormat::Png)).required(),
             ],

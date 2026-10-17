@@ -116,7 +116,7 @@ impl Report {
                                         .strong(),
                                 );
                                 ui.label(
-                                    egui::RichText::new(format!("{} 个节点", report.nodes.len()))
+                                    egui::RichText::new(format!("{} 次调用", report.order.len()))
                                         .color(theme::INK_3)
                                         .size(10.0),
                                 );
@@ -270,12 +270,20 @@ impl Report {
             _ => theme::INK_2,
         };
         let stat = report.map(|report| {
+            let mut ids = std::collections::HashSet::new();
             let failed = report
                 .nodes
                 .iter()
-                .filter(|node| !matches!(node.status, NodeStatus::Ok))
+                .filter(|node| {
+                    ids.insert(node.node_id.clone()) && !matches!(node.status, NodeStatus::Ok)
+                })
                 .count();
-            let mut text = format!("{} 节点 · {}ms", report.nodes.len(), report.duration_ms);
+            let mut text = format!(
+                "{} 次调用 · {} 节点 · {}ms",
+                report.order.len(),
+                ids.len(),
+                report.duration_ms
+            );
             if failed > 0 {
                 text.push_str(&format!(" · {failed} 未通过"));
             }

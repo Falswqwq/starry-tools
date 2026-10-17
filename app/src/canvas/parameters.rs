@@ -1,6 +1,7 @@
 //! 参数控件、参数事件及说明文字缓存；控件与参数端口共用 layout 排版。
 use super::{
-    Graph, MODEL_PANEL_H, NODE_W, PARAM_BOOL_H, PARAM_LABEL_H, PARAM_LOD_ZOOM, TOOL_PANEL_H,
+    Graph, MODEL_PANEL_H, NODE_W, PANEL_INPUT_H, PARAM_BOOL_H, PARAM_LABEL_H, PARAM_LOD_ZOOM,
+    TOOL_PANEL_H,
 };
 use crate::canvas::layout::*;
 use crate::canvas::node::{kind_of, refresh_ports};
@@ -9,6 +10,9 @@ use crate::ui::controls::{control, ControlEvent};
 use crate::ui::theme;
 use eframe::egui::{self, Align2, CornerRadius, FontId, Rect, Stroke, StrokeKind};
 use starrytools_core::model::node_kind::{NodeKindInfo, ParamDef, ParamSpec, PortDef};
+
+/// 参数行右侧给面板输出留的宽度（Exec 徽标 + 序号 + 与圆点的间隔）。
+const PANEL_OUT_GUTTER: f32 = 52.0;
 
 impl Graph {
     /// 量一遍所有参数说明的高度（流坐标）。
@@ -80,11 +84,7 @@ impl Graph {
                 self.interaction.hovered_port = None;
                 true
             }
-            // 动态端口行上的阻塞开关：改的是注册前缀指定的另一个参数，端口本身不变。
-            Some(ControlEvent::SetOther { param, value }) => {
-                self.nodes[i].params.insert(param, value);
-                true
-            }
+
             Some(ControlEvent::PickFile {
                 title,
                 extensions,
@@ -137,19 +137,37 @@ impl Graph {
         // 也整个禁用，但没有任何参数需要留着。
         let model_missing = self.nodes[i].requirements.model_missing;
         let tool_missing = self.nodes[i].requirements.tool_missing;
-        if showing.is_empty() && !model_missing && !tool_missing {
+        // 面板布局也消费实例端口，避免后台解析后的类型和标签与控件错位。
+        let panel_inputs: Vec<PortDef> = self.nodes[i]
+            .inputs
+            .iter()
+            .filter(|port| port.panel_input_row.is_some())
+            .cloned()
+            .collect();
+        if showing.is_empty() && panel_inputs.is_empty() && !model_missing && !tool_missing {
             return false;
         }
 
         let card = self.screen_rect(kinds, i);
+        let left = card.left() + 10.0 * zoom;
+        let width = card.width() - 20.0 * zoom;
         // 每个可见参数块占哪几行 —— 绘制读它，端口圆点也读它（`param_slots`）。
         let slots = param_slots(&self.nodes[i], &kind, &self.notes);
         let mut changed = false;
 
-        for (k, slot) in showing.iter().copied().zip(slots.iter()) {
+        for (slot_index, (k, slot)) in showing.iter().copied().zip(slots.iter()).enumerate() {
             let param = &kind.kind.params[k];
-            let left = card.left() + 10.0 * zoom;
-            let width = card.width() - 20.0 * zoom;
+            // 这一行上挂了输出端口（顺序执行 / 遍历）：控件右侧留出徽标与序号的位置，
+            // 标签由 `draw_ports` 跟着端口圆点逐个绘制。
+            let has_panel_output = self.nodes[i]
+                .outputs
+                .iter()
+                .any(|port| port.panel_row == Some(slot_index));
+            let panel_gutter = if has_panel_output {
+                PANEL_OUT_GUTTER * zoom
+            } else {
+                0.0
+            };
             // 这个参数有没有可选输入端口 —— 有的话在参数名前面画一个类型徽标，
             // 接上之后控件就不可用了（值改从上游取）。
             let port = self.nodes[i]
@@ -184,7 +202,7 @@ impl Graph {
                     );
                 }
                 let switch = Rect::from_min_size(
-                    egui::pos2(row.right() - 30.0 * zoom, row.top()),
+                    egui::pos2(row.right() - 30.0 * zoom - panel_gutter, row.top()),
                     egui::vec2(30.0 * zoom, row.height()),
                 );
                 let event = control(
@@ -219,11 +237,20 @@ impl Graph {
                 );
             }
 
-            // 控件一行。
+            // 控件一行。没有标签行时，类型徽标没有地方放 —— 挤到控件左侧，
+            // 控件相应让出这点宽度（字面量的「值」就是这种无标签参数）。
+            let control_y = card.top() + slot.control_y * zoom;
             let height = slot.control_h * zoom;
+            let mut control_left = left;
+            if slot.label_y.is_none() {
+                if let Some(port) = &port {
+                    control_left +=
+                        type_chip(ui.painter(), port, left, control_y + height * 0.5, zoom);
+                }
+            }
             let control_rect = Rect::from_min_size(
-                egui::pos2(left, card.top() + slot.control_y * zoom),
-                egui::vec2(width, height),
+                egui::pos2(control_left, control_y),
+                egui::vec2(width - (control_left - left) - panel_gutter, height),
             );
             let event = control(
                 ui,
@@ -250,6 +277,27 @@ impl Graph {
                         theme::INK_3,
                     );
                 }
+            }
+        }
+
+        // ---- 参数区下方的输入行（「设定值」） ----
+        if !panel_inputs.is_empty() {
+            let top = card.top()
+                + (node_body_top(&self.nodes[i])
+                    + params_height(&kind, &self.nodes[i].params, &self.notes))
+                    * zoom;
+            for port in &panel_inputs {
+                let row = port.panel_input_row.unwrap_or(0);
+                let center = top + (row as f32 + 0.5) * PANEL_INPUT_H * zoom;
+                // 类型徽标 + 「设定值」；圆点由端口绘制负责（卡片左边缘）。
+                let chip = type_chip(ui.painter(), port, left, center, zoom);
+                ui.painter().text(
+                    egui::pos2(left + chip, center),
+                    Align2::LEFT_CENTER,
+                    &port.label,
+                    FontId::monospace(10.0 * zoom),
+                    theme::INK_3,
+                );
             }
         }
 

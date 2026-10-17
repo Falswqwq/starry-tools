@@ -3,11 +3,15 @@
 | 主题 | 讲什么 |
 | --- | --- |
 | [节点](nodes/) | 每个工具一篇：端口、参数、行为约定 |
+| [Blueprint v2 引擎](engine-blueprint.md) | Exec/Data、变量、Sequence/Loop、版本迁移与运行报告 |
 | [端口类型系统](types.md) | 类型怎么判、两趟检查分别在哪做 |
 | [界面与交互](interface.md) | 画布、节点库、右键划刀、参数控件 |
 | [配色与样式](theme.md) | 一套 token、类型颜色、组件层的取舍 |
 | [无损 PNG 优化](png-optimization.md) | 「图像压缩」无损模式的内核 |
 | [开发](development.md) | 环境与命令、数据放在哪、怎么加一个新工具、代码结构、性能与打包 |
+
+v2 用执行线触发副作用、数据线传值；仅支持同步串行。v1 需显式迁移，目前拒绝加载且保留原存档。
+文本 / 数字 / 布尔是节点本地变量，见[变量节点](variables.md)。
 
 ## 节点
 
@@ -20,13 +24,24 @@
 
 | 节点 | id | 一句话 |
 | --- | --- | --- |
+| [起点](nodes/start.md) | `start` | 显式执行入口（无输入，`out` 为 Exec） |
 | [读取](nodes/read.md) | `read` | 从硬盘读一个文件：图像按图像解码，文本按文本读，视频读成视频产物（输出类型自动推断） |
 | [读取目录](nodes/read_dir.md) | `read_dir` | 把一个目录里的文件读成一个列表（`List[Img]` / `List[Text]`） |
-| [文本](nodes/literal_text.md) | `literal_text` | 一段文本（字面量） |
-| [数字](nodes/literal_number.md) | `literal_number` | 一个数字（字面量） |
-| [布尔](nodes/literal_bool.md) | `literal_bool` | 一个开关（字面量） |
 
-字面量节点一个装一个值，接到别的节点的参数端口上就能把那个参数改从这里取。
+### 变量
+
+| 节点 | id | 一句话 |
+| --- | --- | --- |
+| [文本](nodes/literal_text.md) | `literal_text` | 保存一段文本，带 Get / Set 数据口 |
+| [数字](nodes/literal_number.md) | `literal_number` | 保存一个数字，带 Get / Set 数据口 |
+| [布尔](nodes/literal_bool.md) | `literal_bool` | 保存一个开关，带 Get / Set 数据口 |
+| [运算](nodes/operation.md) | `operation` | 两数加减乘除 / 取余 / 取整，或拼接两段文本（Exec 显式触发） |
+| [Set](nodes/set.md) | `set` | 把数字 / 文本 / 布尔送上执行线，再接到变量的 Set 口 |
+
+文本 / 数字 / 布尔没有执行线：Get 可以同时供多个下游读取，Set 可以接多个上游，
+按上游实际产生值的顺序以后写到的为准。写入先影响本次运行中的后续读取，成功运行后
+最终值写回节点参数，失败不提交。运算和 Set 是同一分类中的显式执行节点。
+Exec 线控制副作用，Data 线只传值，二者不可混接。
 
 ### 图像
 
@@ -45,12 +60,13 @@
 
 ### 逻辑
 
-排控制流：给分支定先后、把列表解包。它们的边线是**暗蓝色**（像紫色节点那样，一眼认出这一类）。
+控制流：给分支定先后、把列表解包。Exec 线与 Data 线始终分开。Sequence 固定为同步串行；
+Loop 当前也只支持同步执行。它们的边线是**暗蓝色**（像紫色节点那样，一眼认出这一类）。
 
 | 节点 | id | 一句话 |
 | --- | --- | --- |
 | [顺序执行](nodes/sequence.md) | `sequence` | 把接到各输出上的分支按序号从上到下依次执行（输出个数可增删） |
-| [遍历](nodes/iterate.md) | `iterate` | 对列表里的每个元素把下游那一支跑一遍（可设最大遍历数目） |
+| [遍历](nodes/iterate.md) | `iterate` | `body` 触发循环体、`item` 传值，成功后走 completed |
 
 ### 视频
 

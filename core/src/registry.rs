@@ -16,6 +16,30 @@ use crate::types::{self, TypeColor};
 
 pub type RunFn = Arc<dyn Fn(&mut NodeArgs<'_>) -> Result<ValueMap, NodeError> + Send + Sync>;
 pub type InteractiveFn = Arc<dyn Fn(&Params) -> bool + Send + Sync>;
+/// 按参数现算**输入**端口。给「运算」这类输入类型随模式变的节点用。
+pub type ResolveInputsFn = Arc<dyn Fn(&Params) -> Vec<PortDef> + Send + Sync>;
+
+/// 节点本地变量的端口协议。变量状态随一次运行存在，不进工作流存档。
+///
+/// Get 在消费时读取当前值；Set 是写入端口，可接多条线，按上游实际
+/// 产生值的顺序以后写到的为准。Set 不参与 Get 的求值依赖，因此不会成环。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariablePorts {
+    pub value_param: String,
+    pub get: String,
+    pub set: String,
+}
+
+impl VariablePorts {
+    pub fn new(value_param: &str, get: &str, set: &str) -> Self {
+        Self {
+            value_param: value_param.into(),
+            get: get.into(),
+            set: set.into(),
+        }
+    }
+}
 
 /// 引擎消费的控制流协议，不依赖任何内置节点 id。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -27,19 +51,27 @@ pub type InteractiveFn = Arc<dyn Fn(&Params) -> bool + Send + Sync>;
 pub enum ControlFlow {
     Sequence {
         output_prefix: String,
-        blocking_prefix: String,
     },
     Loop {
         list_input: String,
         item_output: String,
+        body_output: String,
         finally_output: String,
         max_param: String,
     },
 }
 
 pub struct NodeSpec {
+    /// Opt-in: callbacks must have no observable side effects.
+    pub pure: bool,
+    /// 节点本地变量的 Get/Set 端口协议；普通节点为 `None`。
+    pub variable: Option<VariablePorts>,
     pub kind: NodeKind,
     pub resolve_outputs: Option<ResolveOutputsFn>,
+    /// 输入端口的现算函数。`None` 表示认 `kind.inputs` 里写的声明。
+    ///
+    /// 返回的是**声明输入**；参数端口与空输入回退仍由 `NodeKind::inputs_with` 补上。
+    pub resolve_inputs: Option<ResolveInputsFn>,
     pub interactive: Option<InteractiveFn>,
     /// 这个节点属于哪类**专色**（颜色册里的 id，见 [`RegistryBuilder::register_accent`]）。
     ///
@@ -49,6 +81,12 @@ pub struct NodeSpec {
     pub model_param: Option<String>,
     pub requires_tool: Option<String>,
     pub control_flow: Option<ControlFlow>,
+    /// 这是不是新建工作流时默认放的**入口节点**（目前只有「起点」）。
+    pub entry: bool,
+    /// 输出是否自动写进工作流的产物目录。
+    ///
+    /// 默认 `true`；「读取」这类只是把外部文件读进来的节点关掉它，免得复制一份。
+    pub auto_artifact: bool,
     pub run: RunFn,
 }
 
@@ -60,11 +98,16 @@ impl NodeSpec {
         Self {
             kind,
             resolve_outputs: None,
+            resolve_inputs: None,
             interactive: None,
             accent: None,
             model_param: None,
             requires_tool: None,
             control_flow: None,
+            pure: false,
+            variable: None,
+            entry: false,
+            auto_artifact: true,
             run: Arc::new(run),
         }
     }
@@ -77,6 +120,44 @@ impl NodeSpec {
         let mut spec = Self::fixed(kind, run);
         spec.resolve_outputs = Some(Arc::new(resolve_outputs));
         spec
+    }
+
+    /// 让输入端口也随参数现算（如「运算」在数值 / 文本之间切换）。
+    ///
+    /// 函数返回**声明输入**；参数端口与空输入回退会自动补上。
+    pub fn resolve_inputs(
+        mut self,
+        resolve_inputs: impl Fn(&Params) -> Vec<PortDef> + Send + Sync + 'static,
+    ) -> Self {
+        self.resolve_inputs = Some(Arc::new(resolve_inputs));
+        self
+    }
+
+    /// 这个节点在给定参数下的输入端口（含推导出的参数端口与空输入回退）。
+    ///
+    /// 入口节点（「起点」）不接任何输入，所以不补空输入 —— 它只发出开始信号。
+    pub fn inputs_for(&self, params: &Params) -> Vec<PortDef> {
+        let declared = match &self.resolve_inputs {
+            Some(resolve) => resolve(params),
+            None => self.kind.inputs.clone(),
+        };
+        let mut ports = self.kind.inputs_with_options(declared, params, false);
+        if !self.pure && !self.entry && !ports.iter().any(|p| p.exec) {
+            ports.insert(0, PortDef::exec("exec", "执行"));
+        }
+        ports
+    }
+
+    pub fn pure(mut self) -> Self {
+        self.pure = true;
+        self.auto_artifact = false;
+        self
+    }
+
+    /// 声明这个节点是本地变量：`value_param` 是初始值参数，`get` / `set` 是端口 id。
+    pub fn variable(mut self, ports: VariablePorts) -> Self {
+        self.variable = Some(ports);
+        self
     }
 
     pub fn needs_model(mut self, param: impl Into<String>) -> Self {
@@ -108,15 +189,31 @@ impl NodeSpec {
         self
     }
 
+    /// 标记为新建工作流时默认放置的入口节点。
+    pub fn entry(mut self) -> Self {
+        self.entry = true;
+        self
+    }
+
+    /// 这个节点的输出不作为自动产物落盘（「读取」读进来的就是外部文件本身）。
+    pub fn without_auto_artifact(mut self) -> Self {
+        self.auto_artifact = false;
+        self
+    }
+
     pub fn is_interactive(&self, params: &Params) -> bool {
         self.interactive.as_ref().is_some_and(|is| is(params))
     }
 
     pub fn outputs_for(&self, params: &Params) -> Vec<PortDef> {
-        match &self.resolve_outputs {
+        let mut ports = match &self.resolve_outputs {
             Some(resolve) => resolve(params),
             None => self.kind.outputs.clone(),
+        };
+        if !self.pure && !ports.iter().any(|p| p.exec) {
+            ports.push(PortDef::exec("then", "继续"));
         }
+        ports
     }
 }
 
@@ -383,8 +480,15 @@ impl Registry {
             .map(|spec| {
                 let defaults = spec.kind.default_params();
                 NodeKindInfo {
-                    kind: spec.kind.clone(),
+                    kind: NodeKind {
+                        inputs: spec.inputs_for(&defaults),
+                        outputs: spec.outputs_for(&defaults),
+                        ..spec.kind.clone()
+                    },
+                    pure: spec.pure,
+                    variable: spec.variable.clone(),
                     interactive: spec.is_interactive(&defaults),
+                    entry: spec.entry,
                     accent: spec.accent.clone(),
                     model_param: spec.model_param.clone(),
                     requires_tool: spec.requires_tool.clone(),
@@ -432,8 +536,7 @@ mod tests {
             id: id.into(),
             name: format!("动态 {id}"),
             category: "extension".into(),
-            description: String::from("拥有字符串的扩展节点"),
-            is_source: true,
+            description: String::from("拥有扩展节点"),
             inputs: vec![],
             outputs: vec![PortDef::new("out", "值", PortType::Text)],
             params: vec![],
@@ -639,6 +742,10 @@ mod tests {
             registry.accent(crate::nodes::LOGIC_ACCENT).unwrap().color,
             TypeColor::rgb(0x1e, 0x40, 0xaf)
         );
+        assert_eq!(
+            registry.accent(crate::nodes::DATA_ACCENT).unwrap().color,
+            TypeColor::rgb(0x16, 0x65, 0x34)
+        );
         // 声明归属：只有逻辑节点带专色，其余节点走正常主题边线。
         for id in ["sequence", "iterate"] {
             assert_eq!(
@@ -657,7 +764,6 @@ mod tests {
             registry.get("sequence").unwrap().control_flow,
             Some(ControlFlow::Sequence {
                 output_prefix: "out".into(),
-                blocking_prefix: "block".into(),
             })
         );
         assert_eq!(
@@ -665,11 +771,64 @@ mod tests {
             Some(ControlFlow::Loop {
                 list_input: "list".into(),
                 item_output: "item".into(),
+                body_output: "body".into(),
                 finally_output: "finally".into(),
                 max_param: "max".into(),
             })
         );
         assert!(!registry.tool_available("not-a-registered-tool"));
+    }
+
+    #[test]
+    fn input_ports_obey_the_column_then_parameter_order() {
+        // 契约：端口列输入（声明输入 + 自动空输入）必须排在参数端口之前。
+        // 画布按「第几个非参数端口」定位圆点与徽标（`canvas/placement.rs::in_port`）。
+        let registry = RegistryBuilder::with_builtins().unwrap().freeze().unwrap();
+        for spec in registry.all() {
+            let params = spec.kind.default_params();
+            let ports = spec.inputs_for(&params);
+
+            let last_column = ports
+                .iter()
+                .rposition(|port| !port.is_param() && port.panel_input_row.is_none());
+            let first_param = ports.iter().position(PortDef::is_param);
+            if let (Some(last), Some(first)) = (last_column, first_param) {
+                assert!(
+                    last < first,
+                    "{} 的端口列输入必须排在参数端口之前：{ports:?}",
+                    spec.kind.id
+                );
+            }
+
+            // 参数端口的类型必须来自参数声明，不能由节点另写一份。
+            for port in ports.iter().filter(|port| port.is_param()) {
+                let id = port.param.as_deref().expect("参数端口必须带参数 id");
+                let def = spec
+                    .kind
+                    .params
+                    .iter()
+                    .find(|def| def.id == id)
+                    .unwrap_or_else(|| panic!("{}：未知参数 {id}", spec.kind.id));
+                assert_eq!(
+                    port.ty,
+                    def.spec.input_type().expect("参数端口意味着可喂值"),
+                    "{}：{id} 的端口类型必须来自参数声明",
+                    spec.kind.id
+                );
+            }
+
+            // 入口节点不接输入；其余没有声明输入、但有输出的节点恰好一个空输入。
+            if spec.entry {
+                assert!(ports.is_empty(), "{} 是入口节点，不该有输入", spec.kind.id);
+            } else if !spec.pure {
+                let voids = ports.iter().filter(|port| port.exec).count();
+                assert_eq!(
+                    voids, 1,
+                    "{} 该恰好有一个自动空输入：{ports:?}",
+                    spec.kind.id
+                );
+            }
+        }
     }
 
     #[test]

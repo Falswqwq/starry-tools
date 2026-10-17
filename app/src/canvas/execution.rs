@@ -5,8 +5,41 @@ use crate::state::run::LiveRun;
 use crate::ui::controls::color_rgba;
 use eframe::egui;
 use starrytools_core::engine::{NodeRunResult, RunReport};
+use starrytools_core::model::node_kind::NodeKindInfo;
 
 impl Graph {
+    /// 把成功运行的变量节点状态写回节点参数。
+    ///
+    /// 状态只随工作流存档保存，不会另建全局变量表；下一次运行从这里的值开始。
+    pub fn apply_variable_states(
+        &mut self,
+        states: &std::collections::BTreeMap<String, serde_json::Value>,
+        kinds: &[NodeKindInfo],
+    ) -> bool {
+        let mut changed = false;
+        for node in &mut self.nodes {
+            let Some(variable) = kinds
+                .iter()
+                .find(|kind| kind.kind.id == node.kind)
+                .and_then(|kind| kind.variable.as_ref())
+            else {
+                continue;
+            };
+            let Some(value) = states.get(&node.id) else {
+                continue;
+            };
+            if node.params.get(&variable.value_param) != Some(value) {
+                node.params
+                    .insert(variable.value_param.clone(), value.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_content();
+        }
+        changed
+    }
+
     /// 点过空白处之后，上一次运行的高亮该收起来了。外壳据此把 `Marks` 里那几个
     /// 「跑过了」的集合清掉。
     pub fn run_marks_hidden(&self) -> bool {
@@ -32,7 +65,11 @@ impl Graph {
         }
         // 报告到了：再整体对一遗（幂等 —— 缩略图只传一次，其余值一样）。
         if let Some(report) = report {
+            let mut latest = std::collections::HashMap::new();
             for result in &report.nodes {
+                latest.insert(&result.node_id, result);
+            }
+            for result in latest.values() {
                 self.apply_result(ctx, result);
             }
         }

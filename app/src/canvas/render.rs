@@ -325,8 +325,27 @@ impl Graph {
             false,
             Color32::TRANSPARENT,
             Stroke::new(
-                (1.5 * self.view.zoom).max(1.0),
-                if ran { theme::ACCENT } else { theme::WIRE },
+                ((if self.nodes[wire.from]
+                    .outputs
+                    .iter()
+                    .any(|port| port.id == wire.from_port && port.exec)
+                {
+                    2.5
+                } else {
+                    1.5
+                }) * self.view.zoom)
+                    .max(1.0),
+                if ran {
+                    theme::ACCENT
+                } else if self.nodes[wire.from]
+                    .outputs
+                    .iter()
+                    .any(|port| port.id == wire.from_port && port.exec)
+                {
+                    theme::INK_2
+                } else {
+                    theme::WIRE
+                },
             ),
         ));
     }
@@ -637,8 +656,6 @@ impl Graph {
         // 这两项都在 `refresh_ports` 里缓存好了 —— 绘制路径上不再碰磁盘。
         let model_missing = node.requirements.model_missing;
         let tool_missing = node.requirements.tool_missing;
-        // 是不是流程的起点 —— 只看元数据，不靠「有没有输入端口」猜。
-        let is_source = kind_of(kinds, node).is_some_and(|kind| kind.kind.is_source);
         // 节点专色：拦住运行的节点用框架的「交互」专色（紫），
         // 其余按节点自己**声明**的节点类（如逻辑类）取色；没声明的走正常主题边线。
         let accent = if interactive {
@@ -687,46 +704,21 @@ impl Graph {
 
         let title =
             painter.layout_no_wrap(node.title.clone(), FontId::monospace(12.0 * z), theme::INK);
-        let mut x = r.left() + 10.0 * z;
-        let title_w = title.size().x;
+        let x = r.left() + 10.0 * z;
         painter.galley(egui::pos2(x, cy - title.size().y * 0.5), title, theme::INK);
-        x += title_w + 6.0 * z;
-
-        // 「起点」标签：流程从它开始。
-        if is_source {
-            let tag = painter.layout_no_wrap(
-                "起点".to_string(),
-                FontId::monospace(9.0 * z),
-                theme::INK_3,
-            );
-            let pad = 4.0 * z;
-            let box_rect = Rect::from_min_size(
-                egui::pos2(x, cy - (tag.size().y + 2.0 * z) * 0.5),
-                egui::vec2(tag.size().x + pad * 2.0, tag.size().y + 2.0 * z),
-            );
-            painter.rect_stroke(
-                box_rect,
-                CornerRadius::same((3.0 * z) as u8),
-                Stroke::new(1.0, theme::HAIRLINE),
-                StrokeKind::Inside,
-            );
-            painter.galley(
-                egui::pos2(
-                    box_rect.center().x - tag.size().x * 0.5,
-                    box_rect.center().y - tag.size().y * 0.5,
-                ),
-                tag,
-                theme::INK_3,
-            );
-        }
 
         // 状态 + 工具（鼠标悬停或选中才露出工具）。
         let hovered =
             pointer.is_some_and(|p| r.contains(p)) && self.hovered_node(kinds, pointer) == Some(i);
         let show_tools = hovered || self.selected == Some(i);
         let (play_rect, del_rect) = self.node_tool_rects(kinds, i);
+        let can_run = self.can_run_node(kinds, i);
         let right_edge = if show_tools {
-            play_rect.left() - 6.0 * z
+            (if can_run {
+                play_rect.left()
+            } else {
+                del_rect.left()
+            }) - 6.0 * z
         } else {
             r.right() - 8.0 * z
         };
@@ -796,6 +788,9 @@ impl Graph {
                 (play_rect, icons::play as IconFn),
                 (del_rect, icons::x as IconFn),
             ] {
+                if rect == play_rect && !can_run {
+                    continue;
+                }
                 let hot = pointer.is_some_and(|p| rect.contains(p));
                 if hot {
                     painter.rect_filled(
@@ -1178,7 +1173,11 @@ impl Graph {
         } else {
             theme::ACCENT_LIGHT
         };
-        let type_ink = theme::badge_color(port.ty);
+        let type_ink = if port.exec {
+            theme::INK_2
+        } else {
+            theme::badge_color(port.ty)
+        };
 
         // 拉线的**起点**和它可能落下的**落点** —— 两端都用同一套「正要连上」的动画
         // （同一个 `port_pending`），看起来才是一件东西。
@@ -1194,25 +1193,56 @@ impl Graph {
         // 以及只是被悬停的端点，圈的大小都一样，只有「正要连上」多一圈搏动的描边。
         let pending = is_source || valid;
         if pending || hovering {
-            port_halo(painter, p, z, now, pending);
+            port_halo(painter, p, z, now, pending, port.exec);
         }
 
-        // 圆点：白圈里一个蓝点（对应 Handle 的 2px surface 描边）。
-        let scale = self.port_scale(here);
-        painter.circle_filled(p, 5.0 * z * scale, theme::SURFACE);
-        painter.circle_filled(p, 3.0 * z * scale, dot);
+        // 圆点 / 三角形随强调状态轻微呼吸；光晕与本体用同一个节奏。
+        let pulse = 0.5 + 0.5 * (now * easing::BREATH).sin() as f32;
+        let scale = self.port_scale(here)
+            * if pending || hovering {
+                1.0 + pulse * 0.10
+            } else {
+                1.0
+            };
+        if port.exec {
+            let radius = 5.0 * z * scale;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    p + egui::vec2(-radius, -radius),
+                    p + egui::vec2(radius, 0.0),
+                    p + egui::vec2(-radius, radius),
+                ],
+                dot,
+                Stroke::new(1.0, theme::SURFACE),
+            ));
+        } else {
+            painter.circle_filled(p, 5.0 * z * scale, theme::SURFACE);
+            painter.circle_filled(p, 3.0 * z * scale, dot);
+        }
         if bad {
-            painter.circle_stroke(p, 6.0 * z * scale, Stroke::new(1.0, theme::DANGER));
+            stroke_port_shape(
+                painter,
+                p,
+                6.0 * z * scale,
+                Stroke::new(1.0, theme::DANGER),
+                port.exec,
+            );
         }
 
-        // 参数端口 / 挂在参数栏上的输出：只出小圆点，徽标与标签由参数那一行自己画。
-        if port.is_param() || (!input && port.panel_row.is_some()) {
+        // 参数端口 / 参数区下方的输入：只出小圆点，徽标与标签由参数那一行自己画。
+        // 挂在参数栏上的**输出**不提前返回：每一行都要有自己的 Exec 徽标和序号，
+        // 位置跟着端口圆点走，而不是在参数块中间画一次。
+        if port.is_param() || port.panel_input_row.is_some() {
             return;
         }
 
         // 徽标（chip）：带色的小框。
         let badge = painter.layout_no_wrap(
-            port.badge().to_owned(),
+            if port.exec {
+                "Exec".to_owned()
+            } else {
+                port.badge().to_owned()
+            },
             FontId::monospace(8.0 * z),
             type_ink,
         );
@@ -1357,26 +1387,85 @@ fn draw_palette(painter: &egui::Painter, band: Rect, palette: &[[u8; 4]], z: f32
     }
 }
 
-/// 区别只在「正要连上」（`pending`）时多一圈搏动的描边。要改这份动画，只改这里一处。
-fn port_halo(painter: &egui::Painter, p: Pos2, z: f32, now: f64, pending: bool) {
+/// 端点光晕：形状跟端口一致（圆点用圆，Exec 三角用三角），并随呼吸伸缩。
+///
+/// `pending`（拉线起点 / 可落点）时外扩更明显并带一圈描边；普通悬停只做轻微呼吸。
+/// 要改这份动画，只改这里一处。
+fn port_halo(painter: &egui::Painter, p: Pos2, z: f32, now: f64, pending: bool, exec: bool) {
+    let pulse = 0.5 + 0.5 * (now * easing::BREATH).sin() as f32;
+    let base = 8.5 * z;
     if pending {
-        pending_halo(painter, p, 8.5 * z, now);
+        paint_port_shape(
+            painter,
+            p,
+            base * (1.0 + pulse * 0.24),
+            theme::accent_alpha(0.18),
+            exec,
+        );
+        stroke_port_shape(
+            painter,
+            p,
+            base * 0.88,
+            Stroke::new(1.5, theme::ACCENT),
+            exec,
+        );
     } else {
-        painter.circle_filled(p, 8.5 * z, theme::accent_alpha(0.20));
+        paint_port_shape(
+            painter,
+            p,
+            base * (1.0 + pulse * 0.10),
+            theme::accent_alpha(0.12 + pulse * 0.08),
+            exec,
+        );
     }
 }
 
-/// 「活性」光晕：一圈会**伸缩**的柔光 + 一道定住的描边。看点、落点、悬停的端点都走它。
-///
-/// 半径在 `base` 到 `base * 1.24` 之间呼吸，看着就是「活的」。
-fn pending_halo(painter: &egui::Painter, center: Pos2, base: f32, now: f64) {
-    let pulse = 0.5 + 0.5 * (now * easing::BREATH).sin() as f32;
-    painter.circle_filled(
-        center,
-        base * (1.0 + pulse * 0.24),
-        theme::accent_alpha(0.18),
-    );
-    painter.circle_stroke(center, base * 0.88, Stroke::new(1.5, theme::ACCENT));
+/// Exec 端口标记是朝右的三角形；数据端口是圆。光晕必须用同一轮廓。
+fn port_outline(center: Pos2, radius: f32, exec: bool) -> Vec<Pos2> {
+    if exec {
+        vec![
+            center + egui::vec2(-radius, -radius),
+            center + egui::vec2(radius, 0.0),
+            center + egui::vec2(-radius, radius),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+fn paint_port_shape(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    color: egui::Color32,
+    exec: bool,
+) {
+    if exec {
+        painter.add(egui::Shape::convex_polygon(
+            port_outline(center, radius, true),
+            color,
+            Stroke::NONE,
+        ));
+    } else {
+        painter.circle_filled(center, radius, color);
+    }
+}
+
+fn stroke_port_shape(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    stroke: Stroke,
+    exec: bool,
+) {
+    if exec {
+        painter.add(egui::Shape::closed_line(
+            port_outline(center, radius, true),
+            stroke,
+        ));
+    } else {
+        painter.circle_stroke(center, radius, stroke);
+    }
 }
 
 /// 一条「胶片」进度条：一条实心蓝条，里面一条条细白纹随进度向右流动，

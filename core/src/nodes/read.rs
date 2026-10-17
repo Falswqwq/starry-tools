@@ -108,7 +108,6 @@ pub fn spec() -> NodeSpec {
             description: "从硬盘上读一个文件：图像按图像解码，文本按文本读进来，\
                           视频读成视频产物。类型跟着文件自动推断。"
                 .into(),
-            is_source: true,
             inputs: vec![],
             // 声明里放泛化的 `Any`（卡片上显示 `ANY`）；真正的类型由 `output_ports` 现算。
             outputs: vec![PortDef::new("out", "值", PortType::Any)],
@@ -118,6 +117,8 @@ pub fn spec() -> NodeSpec {
         output_ports,
         run,
     )
+    // 读进来的就是外部文件本身，不再自动复制一份到产物目录。
+    .without_auto_artifact()
 }
 
 /// 输出类型：图像按文件头的真实格式，文本就是 `Text`，视频按容器格式，

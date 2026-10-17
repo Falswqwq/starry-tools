@@ -110,7 +110,14 @@ fn link_revalidates_stale_nodes_types_and_occupied_inputs_before_touching_revisi
             },
         );
     }
-    graph.link(from, PortRef { node: 2, ..to });
+    graph.link(
+        from,
+        PortRef {
+            node: 2,
+            port: 1,
+            ..to
+        },
+    );
     assert!(graph.wires.is_empty());
     assert_eq!(graph.revision, 0);
     graph.link(from, to);
@@ -151,7 +158,7 @@ fn dynamic_read_ports_use_a_placeholder_until_the_check_snapshot_arrives() {
         .insert("valueType".into(), serde_json::json!("text"));
     refresh_ports(&mut graph.nodes[0]);
     // The resolver would immediately return TXT; UI must not invoke it here.
-    assert_eq!(graph.nodes[0].outputs[0].badge(), "ANY");
+    assert!(graph.nodes[0].outputs.iter().any(|port| !port.exec));
     resolve_ports(&mut graph);
     assert_eq!(graph.nodes[0].outputs[0].badge(), "TXT");
     assert_eq!(graph.revision, 0);
@@ -333,7 +340,7 @@ fn a_wires_id_is_stable_and_matches_its_ports() {
     graph.link(
         PortRef {
             node: 0,
-            port: 0,
+            port: 1,
             input: false,
         },
         PortRef {
@@ -464,7 +471,7 @@ fn input(node: usize, port: usize) -> PortRef {
 fn an_output_links_to_an_input() {
     let mut graph = canvas(&["read", "crop_image"]);
     let from = out(0, 0);
-    let to = input(1, 0);
+    let to = input(1, 1);
 
     assert!(graph.can_link(from, to), "输出应当能接到同类输入上");
     graph.link(from, to);
@@ -474,7 +481,7 @@ fn an_output_links_to_an_input() {
     assert_eq!(graph.wires[0].to, 1);
     // 记的是**端口 id**，不是下标 —— 端口会随参数增减。
     assert_eq!(graph.wires[0].from_port, graph.nodes[0].outputs[0].id);
-    assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[0].id);
+    assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[1].id);
     assert_eq!(graph.revision, 1, "接上一条线要算改动");
     assert_eq!(graph.selected, Some(1), "接完顺手选上落点那个节点");
 }
@@ -502,13 +509,106 @@ fn a_link_needs_one_input_and_one_output() {
 #[test]
 fn an_input_port_takes_only_one_wire() {
     let mut graph = canvas(&["read", "read", "crop_image"]);
-    graph.link(out(0, 0), input(2, 0));
+    graph.link(out(0, 0), input(2, 1));
     assert_eq!(graph.wires.len(), 1);
 
     assert!(
-        !graph.can_link(out(1, 0), input(2, 0)),
+        !graph.can_link(out(1, 0), input(2, 1)),
         "输入端口已经被占了，第二条该被拒"
     );
+}
+
+#[test]
+fn exec_outputs_are_single_and_exec_inputs_allow_multiple_sources() {
+    let mut graph = canvas(&["sequence", "sequence", "sequence"]);
+    graph.link(out(0, 0), input(2, 0));
+    assert!(!graph.can_link(out(0, 0), input(1, 0)));
+    assert!(graph.can_link(out(1, 0), input(2, 0)));
+    graph.link(out(1, 0), input(2, 0));
+    assert_eq!(graph.wires.len(), 2);
+}
+
+#[test]
+fn variable_nodes_live_in_their_category_and_accept_multiple_sets() {
+    let kinds = crate::catalog::all();
+    for id in ["literal_number", "literal_text", "literal_bool"] {
+        let kind = kinds.iter().find(|kind| kind.kind.id == id).unwrap();
+        assert_eq!(kind.kind.category, "变量");
+        assert!(!kind.pure || kind.kind.inputs.iter().any(|p| p.id == "set"));
+    }
+    let mut graph = canvas(&["literal_number", "literal_number", "literal_number"]);
+    assert_eq!(graph.nodes[0].inputs[0].label, "Set");
+    assert_eq!(graph.nodes[0].outputs[0].label, "Get");
+    graph.link(out(0, 0), input(1, 0));
+    assert!(
+        graph.can_link(out(2, 0), input(1, 0)),
+        "Set 口应该允许接多个上游"
+    );
+    graph.link(out(2, 0), input(1, 0));
+    assert_eq!(graph.wires.len(), 2);
+}
+
+#[test]
+fn variable_category_contains_literals_operation_and_set() {
+    let kinds = crate::catalog::all();
+    for id in [
+        "literal_text",
+        "literal_number",
+        "literal_bool",
+        "operation",
+        "set",
+    ] {
+        let kind = kinds.iter().find(|kind| kind.kind.id == id).unwrap();
+        assert_eq!(kind.kind.category, "变量", "{id}");
+    }
+    let set = kinds.iter().find(|kind| kind.kind.id == "set").unwrap();
+    assert!(!set.pure, "Set 必须走执行线");
+    assert!(set.kind.inputs.iter().any(|port| port.exec));
+    assert!(set.kind.outputs.iter().any(|port| port.exec));
+}
+
+#[test]
+fn hovering_a_port_requests_animation_frames() {
+    let mut graph = canvas(&["literal_number"]);
+    graph.interaction.hovered_port = Some(input(0, 0));
+    assert!(graph.is_animating(), "悬停光晕需要持续重绘");
+    graph.interaction.hovered_port = None;
+    assert!(!graph.is_animating());
+}
+
+#[test]
+fn successful_run_states_are_written_back_to_variable_params() {
+    let kinds = crate::catalog::all();
+    let mut graph = canvas(&["literal_number"]);
+    let id = graph.nodes[0].id.clone();
+    let before = graph.check_revision();
+    assert!(graph.apply_variable_states(
+        &std::collections::BTreeMap::from([(id, serde_json::json!(5.0))]),
+        &kinds,
+    ));
+    assert_eq!(graph.nodes[0].params["value"], serde_json::json!(5.0));
+    assert!(graph.check_revision() > before);
+    // 值没变时不应继续把画布标成脏。
+    assert!(!graph.apply_variable_states(
+        &std::collections::BTreeMap::from([(graph.nodes[0].id.clone(), serde_json::json!(5.0))]),
+        &kinds,
+    ));
+}
+
+#[test]
+fn exec_never_connects_to_data_even_any_or_void() {
+    use starrytools_core::model::port_type::PortType;
+    let mut graph = canvas(&["sequence", "operation"]);
+    let operand = graph.nodes[1]
+        .inputs
+        .iter()
+        .position(|port| !port.exec)
+        .expect("运算节点有数据输入");
+    for ty in [PortType::Any, PortType::Void] {
+        graph.nodes[1].inputs[operand].ty = ty;
+        assert!(!graph.can_link(out(0, 0), input(1, operand)));
+        assert!(!graph.can_link(input(1, operand), out(0, 0)));
+    }
 }
 
 /// 类型对不上就接不上：文本输出进不了图像输入。
@@ -528,8 +628,8 @@ fn a_type_mismatch_is_rejected() {
 #[test]
 fn deleting_a_node_drops_its_wires_and_reindexes_the_rest() {
     let mut graph = canvas(&["read", "read", "crop_image"]);
-    graph.link(out(0, 0), input(2, 1));
-    graph.link(out(1, 0), input(2, 0));
+    graph.link(out(0, 1), input(2, 0));
+    graph.link(out(1, 0), input(2, 1));
     assert_eq!(graph.wires.len(), 2);
 
     graph.delete_node(0);
@@ -542,7 +642,7 @@ fn deleting_a_node_drops_its_wires_and_reindexes_the_rest() {
     assert_eq!(graph.selected, None);
     // 挪完还得指得对端口 —— 指错就会接到别的端口上去。
     assert_eq!(graph.wires[0].from_port, graph.nodes[0].outputs[0].id);
-    assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[0].id);
+    assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[1].id);
 }
 
 /// 复制一个节点：新 id、参数照搬、端口重算。
@@ -566,34 +666,50 @@ fn duplicating_a_node_gives_it_a_new_id_and_keeps_its_params() {
 
 // ---- 字面量节点与参数端口 ----
 
-/// 字面量节点是起点：只有输出，没有输入，也没有参数端口
-/// （它自己就是喂参数的那一端）。名字要能一眼分清。
 #[test]
-fn literal_nodes_are_sources_without_param_ports() {
-    // 名字要能一眼分清 —— 「文本」和「数字」不能都叫一个含糊的名。
-    for (id, name) in [
-        ("literal_text", "文本"),
-        ("literal_number", "数字"),
-        ("literal_bool", "布尔"),
-    ] {
-        let kind = crate::catalog::all()
-            .into_iter()
-            .find(|kind| kind.kind.id == id)
-            .unwrap_or_else(|| panic!("该有「{id}」这个节点"));
-        assert_eq!(kind.kind.name, name, "{id} 的名字该是「{name}」");
-
-        let (inputs, outputs) = crate::catalog::ports_for(id, &kind.defaults);
-        // 起点节点没有数据输入 —— 只带一个「空输入」，用来排先后。
-        assert_eq!(inputs.len(), 1, "{id} 只该有那个空输入");
-        assert_eq!(inputs[0].badge(), "-", "{id} 的空输入徽标该是 -");
-        assert_eq!(outputs.len(), 1, "{id} 该只有一个输出");
-        // 输出端口的类型徽标让三种字面量一眼分得开。
-        assert!(
-            matches!(outputs[0].badge(), "TXT" | "NUM" | "BOOL"),
-            "{id} 的输出该带一个类型徽标，实际是「{}」",
-            outputs[0].badge()
-        );
+fn literals_are_variables_with_get_and_set_but_no_exec() {
+    let kinds = crate::catalog::all();
+    for id in ["literal_text", "literal_number", "literal_bool"] {
+        let graph = canvas(&[id]);
+        assert_eq!(graph.nodes[0].inputs.len(), 1);
+        assert_eq!(graph.nodes[0].inputs[0].id, "set");
+        assert!(graph.nodes[0].inputs[0].multi);
+        assert!(!graph.nodes[0].inputs[0].exec);
+        assert_eq!(graph.nodes[0].outputs.len(), 1);
+        assert_eq!(graph.nodes[0].outputs[0].id, "out");
+        assert!(!graph.nodes[0].outputs[0].exec);
+        assert!(graph.can_run_node(&kinds, 0));
     }
+    let graph = canvas(&["start", "sequence", "iterate", "read", "operation"]);
+    for i in 0..5 {
+        assert!(!graph.can_run_node(&kinds, i));
+    }
+}
+
+/// 「运算」的输入端口跟着运算方式走：数值模式是 NUM，拼接模式是 TXT。
+#[test]
+fn operation_ports_follow_the_selected_mode() {
+    let mut params = crate::catalog::all()
+        .into_iter()
+        .find(|kind| kind.kind.id == "operation")
+        .expect("该有「运算」节点")
+        .defaults;
+    let (inputs, _) = crate::catalog::ports_for("operation", &params);
+    let data: Vec<_> = inputs.iter().filter(|port| !port.exec).collect();
+    assert_eq!(data.len(), 2, "{inputs:?}");
+    assert!(
+        data.iter().all(|port| port.badge() == "NUM"),
+        "默认是数值运算：{inputs:?}"
+    );
+
+    params.insert("op".into(), serde_json::json!("concat"));
+    let (inputs, _) = crate::catalog::ports_for("operation", &params);
+    let data: Vec<_> = inputs.iter().filter(|port| !port.exec).collect();
+    assert_eq!(data.len(), 2, "{inputs:?}");
+    assert!(
+        data.iter().all(|port| port.badge() == "TXT"),
+        "切到拼接后端口该变成文本：{inputs:?}"
+    );
 }
 
 /// 动态输出节点：「顺序执行」的端口跟着 `outs` 参数走；它还带一个空输入。
@@ -613,6 +729,15 @@ fn dynamic_output_nodes_expose_numbered_ports() {
         outputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
         vec!["out1", "out2"]
     );
+    assert!(outputs.iter().all(|port| port.exec), "每个输出都该是 Exec");
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|port| port.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["1", "2"],
+        "每个 Exec 输出都带自己的序号"
+    );
     assert_eq!(inputs.len(), 1, "只该有一个空输入");
     assert_eq!(inputs[0].badge(), "-");
 
@@ -621,9 +746,9 @@ fn dynamic_output_nodes_expose_numbered_ports() {
     let (inputs, outputs) = checked_ports("iterate", &iter.defaults);
     assert_eq!(
         outputs.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-        vec!["item", "finally"]
+        vec!["body", "item", "finally"]
     );
-    assert_eq!(inputs[0].badge(), "[ANY]", "列表输入徽标带方括号");
+    assert_eq!(inputs[1].badge(), "[ANY]", "列表输入徽标带方括号");
 }
 
 /// 动态输出挂在参数栏里，顶部端口列里不再有输出 —— 卡片高度不随输出个数涨。
@@ -685,7 +810,7 @@ fn param_ports_are_derived_marked_and_kept_out_of_the_port_column() {
     let graph = canvas(&["upscale"]);
     assert_eq!(
         node_body_top(&graph.nodes[0]),
-        HEADER_H + PORT_ROW_H,
+        HEADER_H + PORT_ROW_H * 2.0,
         "端口列只数非参数端口（这里只有一个图像输入）"
     );
 }
@@ -744,7 +869,7 @@ fn the_params_panel_lines_up_with_where_the_controls_are_drawn() {
     // upscale 只声明了一个图像输入；参数端口 `param:percent` 不该算进端口列。
     assert_eq!(
         panel_top,
-        HEADER_H + PORT_ROW_H,
+        HEADER_H + PORT_ROW_H * 2.0,
         "端口区高度只按声明端口算，参数端口不占一席"
     );
 }
@@ -972,4 +1097,70 @@ fn failed_previews_are_cached_until_the_url_changes_or_run_resets() {
     assert_eq!(graph.textures.failed.len(), 1);
     graph.reset_run_marks();
     assert!(graph.textures.failed.is_empty());
+}
+
+#[test]
+fn resolved_exec_and_layout_metadata_changes_cancel_port_interactions() {
+    let mut graph = canvas(&["operation"]);
+    let mut resolved =
+        starrytools_core::engine::resolve(&graph.to_workflow(&Workflow::new("元数据")));
+    let here = input(0, 0);
+    graph.interaction.hovered_port = Some(here);
+    graph.interaction.connect = Some(Connect {
+        from: here,
+        to: Pos2::ZERO,
+        target: None,
+    });
+    let before = resolved.nodes[0].inputs[0].exec;
+    let port = &mut resolved.nodes[0].inputs[0];
+    port.exec = !before;
+    port.label = "执行".into();
+    port.required = false;
+    port.hint = Some("hint".into());
+    port.param = None;
+    port.panel_input_row = None;
+    graph.sync_resolved_ports(0, &resolved);
+    assert_eq!(graph.nodes[0].inputs[0].exec, !before);
+    assert_eq!(graph.nodes[0].inputs[0].label, "执行");
+    assert!(graph.interaction.connect.is_none());
+    assert!(graph.interaction.hovered_port.is_none());
+    assert_eq!(graph.revision, 0);
+    assert_eq!(graph.check_revision(), 0);
+}
+
+#[test]
+fn exec_ports_precede_data_even_when_declared_last() {
+    let kinds = crate::catalog::all();
+    let mut graph = canvas(&["crop_image"]);
+    graph.nodes[0].inputs.reverse();
+    graph.nodes[0].outputs.reverse();
+    let rect = graph.flow_rect(&kinds, 0);
+    for (input_side, ports) in [
+        (true, &graph.nodes[0].inputs),
+        (false, &graph.nodes[0].outputs),
+    ] {
+        let exec = ports.iter().position(|port| port.exec).unwrap();
+        let data = ports
+            .iter()
+            .position(|port| !port.exec && !port.is_param() && port.panel_row.is_none())
+            .unwrap();
+        let point = graph.port_pos(
+            &kinds,
+            PortRef {
+                node: 0,
+                port: exec,
+                input: input_side,
+            },
+        );
+        let data_point = graph.port_pos(
+            &kinds,
+            PortRef {
+                node: 0,
+                port: data,
+                input: input_side,
+            },
+        );
+        assert_eq!(point.y, rect.top() + HEADER_H + PORT_ROW_H * 0.5);
+        assert!(data_point.y > point.y);
+    }
 }

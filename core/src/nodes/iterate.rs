@@ -1,18 +1,4 @@
-//! 「遍历」节点 —— 对列表里的**每个元素**跑一遍下游那一支。
-//!
-//! 它只有一个（循环体）输出 `item`：接在它下游的整段子图会**按元素逐个跑一遍**，
-//! 每次把当前元素喂给 `item`。结构像：
-//!
-//! ```text
-//! for item in list {
-//!     下游那一支（item 是当前元素）
-//! }
-//! finally { … }
-//! ```
-//!
-//! 另有可选的「结束」输出 —— 所有元素跑完才发出一个空信号，用来接收尾的节点。
-//!
-//! 「最多跑几个」由参数 `max` 决定，0 表示不限制（把列表跑完为止）。
+//! 同步 Loop：exec 输入、body 执行输出、item 数据输出及 finally 完成输出。数据连线不扩张循环作用域。
 
 use crate::error::NodeError;
 use crate::model::node_kind::{NodeKind, ParamDef, ParamSpec, PortDef};
@@ -36,11 +22,11 @@ pub fn spec() -> NodeSpec {
             description: "对列表里的每个元素跑一遍下游那一支：接在它后面的整段子图会\
                           逐个元素执行一次，当前元素从「元素」这个输出喂进去。"
                 .into(),
-            is_source: false,
             inputs: vec![PortDef::new("list", "列表", PortType::any_list()).required()],
             outputs: vec![
+                PortDef::exec("body", "循环体"),
                 PortDef::new(ITEM_PORT, "元素", PortType::Any).required(),
-                PortDef::new(FINALLY_PORT, "结束", PortType::Void),
+                PortDef::exec(FINALLY_PORT, "结束"),
             ],
             params: vec![ParamDef::new(
                 "max",
@@ -55,20 +41,14 @@ pub fn spec() -> NodeSpec {
                 },
             )
             .described("最多跑多少个元素。填 0 表示不限制，把列表跑完为止。")],
-            notes: vec![
-                "接在它下游的整段子图会**按元素逐个跑一遍**，每次「元素」输出就是当前那个。".into(),
-                "「最大遍历数目」是 0 时跑完整个列表；大于 0 时最多跑这么多个（列表更短就跑列表那个数）。".into(),
-                "「结束」在所有元素跑完之后给出一个空信号 —— 相当于 `finally`，用来接收尾的节点。\
-                 它是**可选**的：不接也没关系，但一直在、删不掉。"
-                    .into(),
-                "元素类型是 `ANY`（编译期不知道列表里装的是什么，运行期再核对）。".into(),
-            ],
+            notes: vec!["同步 Loop：exec 输入、body 执行输出、item 数据输出及 finally 完成输出。数据连线不扩张循环作用域。".into()],
         },
         run,
     )
     .control_flow(crate::registry::ControlFlow::Loop {
         list_input: "list".into(),
         item_output: ITEM_PORT.into(),
+        body_output: "body".into(),
         finally_output: FINALLY_PORT.into(),
         max_param: "max".into(),
     })

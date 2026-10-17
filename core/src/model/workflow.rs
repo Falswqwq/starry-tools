@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::params::Params;
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Position {
@@ -58,7 +58,7 @@ pub struct Workflow {
 }
 
 fn default_version() -> u32 {
-    CURRENT_VERSION
+    1
 }
 
 impl Workflow {

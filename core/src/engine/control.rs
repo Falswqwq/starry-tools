@@ -1,295 +1,223 @@
-//! 由注册表控制流协议驱动的串行调度与嵌套循环。
+//! Explicit synchronous Exec dispatch. Data edges never schedule effectful nodes.
 use super::*;
+use crate::error::NodeError;
 use crate::registry::ControlFlow;
 
-pub(super) fn sequence_ordering<'a>(
+pub(super) fn validate(
     registry: &Registry,
-    workflow: &'a Workflow,
-) -> Vec<(&'a str, &'a str)> {
-    let mut extra = Vec::new();
+    workflow: &Workflow,
+    resolved: &[ResolvedNode],
+    issues: &mut Vec<Issue>,
+) {
+    let mut entries = 0;
     for node in &workflow.nodes {
         let Some(spec) = registry.get(&node.kind) else {
             continue;
         };
-        let Some(ControlFlow::Sequence {
-            output_prefix,
-            blocking_prefix,
-        }) = &spec.control_flow
-        else {
+        entries += usize::from(spec.entry);
+        let Some(ports) = resolved.iter().find(|r| r.node_id == node.id) else {
             continue;
         };
-        let mut ports: Vec<_> = spec
-            .outputs_for(&node.params)
-            .into_iter()
-            .filter_map(|port| {
-                let index = port.id.strip_prefix(output_prefix)?.parse::<usize>().ok()?;
-                Some((index, port.id))
-            })
-            .collect();
-        ports.sort_by_key(|(index, _)| *index);
-        for pair in ports.windows(2) {
-            if !node
-                .params
-                .get(&format!("{blocking_prefix}{}", pair[0].0))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true)
-            {
-                continue;
-            }
-            for from in workflow
-                .edges
+        if spec.pure
+            && (ports.inputs.iter().chain(&ports.outputs).any(|p| p.exec)
+                || spec.control_flow.is_some()
+                || spec.entry)
+        {
+            issues.push(Issue::error("pure 节点不能具有 Exec/入口/控制流契约").at_node(&node.id));
+        }
+        if let Some(variable) = &spec.variable {
+            let get = ports
+                .outputs
                 .iter()
-                .filter(|edge| edge.source == node.id && edge.source_port == pair[0].1)
-            {
-                for to in workflow
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.source == node.id && edge.source_port == pair[1].1)
-                {
-                    extra.push((from.target.as_str(), to.target.as_str()));
-                }
+                .find(|p| p.id == variable.get && !p.exec);
+            let set = ports
+                .inputs
+                .iter()
+                .find(|p| p.id == variable.set && !p.exec);
+            let param = spec
+                .kind
+                .params
+                .iter()
+                .any(|p| p.id == variable.value_param);
+            let typed = get.zip(set).is_some_and(|(get, set)| get.ty == set.ty);
+            if !typed || !param {
+                issues.push(Issue::error("变量注册契约与端口/参数声明不一致").at_node(&node.id));
             }
         }
-    }
-    extra
-}
-
-pub(super) struct LoopSets {
-    pub(super) reach: HashSet<String>,
-    pub(super) direct: HashSet<String>,
-}
-
-pub(super) fn loop_sets(registry: &Registry, workflow: &Workflow) -> HashMap<String, LoopSets> {
-    let mut reach = HashMap::new();
-    for node in &workflow.nodes {
-        let Some(ControlFlow::Loop { item_output, .. }) = registry
-            .get(&node.kind)
-            .and_then(|spec| spec.control_flow.as_ref())
-        else {
-            continue;
-        };
-        reach.insert(
-            node.id.clone(),
-            downstream_of(workflow, &node.id, item_output),
-        );
-    }
-    reach
-        .iter()
-        .map(|(id, own)| {
-            let mut direct = own.clone();
-            for (inner, inner_reach) in &reach {
-                if inner != id && own.contains(inner) {
-                    direct.retain(|node| !inner_reach.contains(node));
+        if let Some(flow) = &spec.control_flow {
+            let valid = match flow {
+                ControlFlow::Sequence { output_prefix, .. } => {
+                    ports.outputs.iter().filter(|p| p.exec).all(|p| {
+                        p.id.strip_prefix(output_prefix)
+                            .is_some_and(|i| i.parse::<usize>().is_ok())
+                    })
                 }
-            }
-            (
-                id.clone(),
-                LoopSets {
-                    reach: own.clone(),
-                    direct,
-                },
-            )
-        })
-        .collect()
-}
-
-pub(super) struct Program {
-    direct: HashMap<String, Vec<String>>,
-    reach: HashMap<String, HashSet<String>>,
-    loops: HashSet<String>,
-    pub(super) controlled: HashSet<String>,
-}
-
-pub(super) fn build_program(
-    registry: &Registry,
-    workflow: &Workflow,
-    execution: &[String],
-) -> Program {
-    let sets = loop_sets(registry, workflow);
-    Program {
-        loops: sets.keys().cloned().collect(),
-        controlled: sets
-            .values()
-            .flat_map(|set| set.reach.iter().cloned())
-            .collect(),
-        direct: sets
-            .iter()
-            .map(|(id, set)| {
-                (
-                    id.clone(),
-                    execution
+                ControlFlow::Loop {
+                    list_input,
+                    item_output,
+                    body_output,
+                    finally_output,
+                    ..
+                } => {
+                    ports
+                        .inputs
                         .iter()
-                        .filter(|node| set.direct.contains(*node))
-                        .cloned()
-                        .collect(),
-                )
-            })
-            .collect(),
-        reach: sets.into_iter().map(|(id, set)| (id, set.reach)).collect(),
-    }
-}
-
-fn downstream_of(workflow: &Workflow, node_id: &str, port: &str) -> HashSet<String> {
-    let mut seen = HashSet::new();
-    let mut stack: Vec<_> = workflow
-        .edges
-        .iter()
-        .filter(|edge| edge.source == node_id && edge.source_port == port)
-        .map(|edge| edge.target.clone())
-        .collect();
-    while let Some(id) = stack.pop() {
-        if seen.insert(id.clone()) {
-            stack.extend(
-                workflow
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.source == id)
-                    .map(|edge| edge.target.clone()),
+                        .any(|p| p.id == *list_input && !p.exec && p.ty.is_list())
+                        && ports
+                            .outputs
+                            .iter()
+                            .any(|p| p.id == *item_output && !p.exec)
+                        && ports.outputs.iter().any(|p| p.id == *body_output && p.exec)
+                        && ports
+                            .outputs
+                            .iter()
+                            .any(|p| p.id == *finally_output && p.exec)
+                        && body_output != finally_output
+                }
+            };
+            if !valid {
+                issues.push(Issue::error("控制流注册契约与端口声明不一致").at_node(&node.id));
+            }
+        }
+        if spec.control_flow.is_none() && ports.outputs.iter().filter(|p| p.exec).count() > 1 {
+            issues.push(
+                Issue::error("多个 Exec 输出必须声明 Sequence/Loop 控制流协议").at_node(&node.id),
             );
         }
-    }
-    seen
-}
-
-pub(super) fn loop_ordering<'a>(
-    registry: &Registry,
-    workflow: &'a Workflow,
-) -> Vec<(&'a str, &'a str)> {
-    let sets = loop_sets(registry, workflow);
-    let mut extra = Vec::new();
-    for node in &workflow.nodes {
-        let Some(group) = sets.get(&node.id) else {
-            continue;
-        };
-        // 内层循环用到的外部输入也必须在外层开始之前就绪。
-        for edge in &workflow.edges {
-            if group.reach.contains(&edge.target)
-                && edge.source != node.id
-                && !group.reach.contains(&edge.source)
+        for port in ports.outputs.iter().filter(|p| p.exec) {
+            if workflow
+                .outgoing(&node.id)
+                .filter(|e| e.source_port == port.id)
+                .count()
+                > 1
             {
-                extra.push((edge.source.as_str(), node.id.as_str()));
+                issues.push(
+                    Issue::error("每个 Exec 输出仅允许一条线；请使用 Sequence 显式排序")
+                        .at_port(&node.id, &port.id),
+                );
             }
         }
     }
-    extra
-}
-
-/// 只运行目标祖先；消费 finally 时包含完整循环体，但 item 分支不扩张到兄弟分支。
-pub(super) fn ancestors_of(
-    registry: &Registry,
-    workflow: &Workflow,
-    target: &str,
-    order: &[String],
-) -> Vec<String> {
-    let sets = loop_sets(registry, workflow);
-    let mut needed = HashSet::new();
-    let mut stack = vec![target.to_string()];
-    while let Some(id) = stack.pop() {
-        if !needed.insert(id.clone()) {
-            continue;
-        }
-        for edge in workflow.incoming(&id) {
-            stack.push(edge.source.clone());
-            let source = workflow
-                .node(&edge.source)
-                .and_then(|node| registry.get(&node.kind));
-            if let Some(ControlFlow::Loop { finally_output, .. }) =
-                source.and_then(|spec| spec.control_flow.as_ref())
-            {
-                if edge.source_port == *finally_output {
-                    stack.extend(sets[&edge.source].reach.iter().cloned());
-                }
-            }
-        }
+    if entries == 0
+        && workflow
+            .nodes
+            .iter()
+            .any(|n| registry.get(&n.kind).is_some_and(|s| !s.pure))
+    {
+        issues.push(Issue::warning("没有入口；未被 Exec 触发的节点不会运行"));
     }
-    order
-        .iter()
-        .filter(|id| needed.contains(*id))
-        .cloned()
-        .collect()
+    if entries > 1 {
+        issues.push(Issue::error("只允许一个入口；多个入口的顺序不明确"));
+    }
 }
 
 impl Exec<'_> {
-    pub(super) fn run_scope(&mut self, ids: &[String], path: &[usize], aggregate: bool) {
-        for id in ids {
-            if self.program.loops.contains(id) {
-                let scope = self.program.direct.get(id).cloned().unwrap_or_default();
-                self.run_loop(id, &scope, path, aggregate);
-            } else {
-                self.run_node(id, path, aggregate);
-            }
+    fn fail_control(&mut self, id: &str, message: impl Into<String>) {
+        let mut result = self.start_result(id);
+        result.status = NodeStatus::Failed;
+        result.error = Some(message.into());
+        self.finish_result(result, false);
+    }
+
+    fn emit(&mut self, id: &str, port: &str, path: &[usize]) {
+        let targets: Vec<_> = self
+            .workflow
+            .outgoing(id)
+            .filter(|e| e.source_port == port)
+            .map(|e| e.target.clone())
+            .collect();
+        for target in targets {
+            self.trigger(&target, path);
         }
     }
 
-    fn reset_loop_scope(&mut self, node_id: &str) {
-        if let Some(reach) = self.program.reach.get(node_id) {
-            for id in reach {
-                self.failed.remove(id);
-                self.values.remove(id);
-            }
-        }
-    }
-
-    fn run_loop(&mut self, node_id: &str, scope: &[String], path: &[usize], aggregate: bool) {
-        let mut result = self.start_result(node_id);
-        let started = Instant::now();
-        self.reset_loop_scope(node_id);
-        self.values.remove(node_id);
-        self.failed.remove(node_id);
-        let prepared = self.collect_inputs(node_id);
-        let workflow = self.workflow;
-        let registry = self.registry;
-        let node = workflow.node(node_id).expect("analyzed node");
-        let spec = registry.get(&node.kind).expect("analyzed kind");
-        let Some(ControlFlow::Loop {
-            list_input,
-            item_output,
-            finally_output,
-            max_param,
-        }) = &spec.control_flow
-        else {
+    pub(super) fn trigger(&mut self, id: &str, path: &[usize]) {
+        self.steps += 1;
+        if self.steps > 100_000 || self.active.len() >= 256 || !self.active.insert(id.to_owned()) {
+            self.fail_control(id, "Exec 环或执行预算/嵌套深度超限");
             return;
-        };
-        let prepared = prepared.and_then(|(params, inputs)| {
-            let list = inputs
-                .get(list_input)
-                .ok_or_else(|| (NodeStatus::Failed, format!("缺少列表输入：{list_input}")))?
-                .as_list()
-                .map_err(|error| (NodeStatus::Failed, error.0))?
-                .to_vec();
-            Ok((params, list))
-        });
-        match prepared {
-            Err((status, error)) => {
-                result.status = status;
-                result.error = Some(error);
-                self.failed.insert(node_id.to_string());
-                self.run_scope(scope, path, true);
-            }
-            Ok((params, list)) => {
-                let max = crate::model::params::integer(&params, max_param, 0);
-                let limit = if max > 0 {
-                    usize::try_from(max).unwrap_or(usize::MAX).min(list.len())
-                } else {
-                    list.len()
-                };
-                let mut outputs = ValueMap::new();
-                outputs.insert(finally_output.clone(), Value::Void);
-                self.values.insert(node_id.to_string(), outputs);
-                for (index, element) in list.into_iter().take(limit).enumerate() {
-                    self.reset_loop_scope(node_id);
-                    self.values
-                        .get_mut(node_id)
-                        .unwrap()
-                        .insert(item_output.clone(), element);
-                    let mut child_path = path.to_vec();
-                    child_path.push(index);
-                    self.run_scope(scope, &child_path, true);
+        }
+        let node = self.workflow.node(id).unwrap();
+        let spec = self.registry.get(&node.kind).unwrap();
+        let flow = spec.control_flow.clone();
+        match flow {
+            Some(ControlFlow::Loop {
+                list_input,
+                item_output,
+                body_output,
+                finally_output,
+                max_param,
+            }) => {
+                self.trace.push(id.to_owned());
+                let prepared = self.collect_inputs(id);
+                match prepared {
+                    Err((_, error)) => self.fail_control(id, error),
+                    Ok((params, inputs)) => {
+                        match inputs
+                            .get(&list_input)
+                            .ok_or_else(|| NodeError("Loop 缺少列表".into()))
+                            .and_then(Value::as_list)
+                        {
+                            Err(error) => self.fail_control(id, error.0),
+                            Ok(items) => {
+                                let max = crate::model::params::integer(&params, &max_param, 0)
+                                    .max(0) as usize;
+                                let items: Vec<_> = items
+                                    .iter()
+                                    .take(if max == 0 { usize::MAX } else { max })
+                                    .cloned()
+                                    .collect();
+                                let result = self.start_result(id);
+                                self.finish_result(result, false);
+                                for (i, item) in items.into_iter().enumerate() {
+                                    // Restore the enclosing frame, never leak inner iteration data.
+                                    let saved = self.values.clone();
+                                    self.values.insert(
+                                        id.to_owned(),
+                                        [(item_output.clone(), item)].into_iter().collect(),
+                                    );
+                                    let mut inner = path.to_vec();
+                                    inner.push(i);
+                                    self.emit(id, &body_output, &inner);
+                                    self.values = saved;
+                                    if self.results.iter().any(|r| r.status != NodeStatus::Ok) {
+                                        break;
+                                    }
+                                }
+                                self.values.remove(id);
+                                if self.results.iter().all(|r| r.status == NodeStatus::Ok) {
+                                    self.emit(id, &finally_output, path);
+                                }
+                            }
+                        }
+                    }
                 }
-                result.warnings.push(format!("遍历了 {limit} 个元素"));
+            }
+            flow => {
+                self.run_node(id, path, false);
+                if !self.failed.contains(id) {
+                    let mut ports: Vec<_> = spec
+                        .outputs_for(&node.params)
+                        .into_iter()
+                        .filter(|p| p.exec)
+                        .collect();
+                    if let Some(ControlFlow::Sequence { output_prefix, .. }) = flow {
+                        ports.retain(|p| p.id.starts_with(&output_prefix));
+                        ports.sort_by_key(|p| {
+                            p.id.strip_prefix(&output_prefix)
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(usize::MAX)
+                        });
+                    }
+                    for port in ports {
+                        self.emit(id, &port.id, path);
+                        if self.results.iter().any(|r| r.status != NodeStatus::Ok) {
+                            break;
+                        }
+                    }
+                }
             }
         }
-        result.elapsed_ms = started.elapsed().as_millis() as u64;
-        self.finish_result(result, aggregate);
+        self.active.remove(id);
     }
 }

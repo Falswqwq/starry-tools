@@ -34,7 +34,6 @@ pub fn spec() -> NodeSpec {
             category: "图像".into(),
             description: "翻转（左右 / 上下）与旋转（90° / 180° / 270°），逐像素搬运，PNG 无损。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "PNG 图像", PortType::Image(ImageFormat::Png)).required(),
             ],

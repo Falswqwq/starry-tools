@@ -49,7 +49,6 @@ pub fn spec() -> NodeSpec {
                           逐行滤波和压缩级别，只留最小的那一份；有损模式转 JPEG，\
                           或者把颜色数压到调色板里。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "图像", PortType::Image(ImageFormat::Any))
                     .required()

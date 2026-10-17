@@ -28,7 +28,6 @@ pub fn spec() -> NodeSpec {
             description: "把接进来的产物写到指定目录，输出是最终写下的路径。\
                           不改内容也不换格式，只是把产物放到你想要的地方。"
                 .into(),
-            is_source: false,
             inputs: vec![PortDef::new("file", "产物", PortType::File)
                 .required()
                 .hint("任何能写盘的产物（图像、视频……）")],

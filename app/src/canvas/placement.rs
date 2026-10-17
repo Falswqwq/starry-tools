@@ -1,7 +1,7 @@
 //! 节点、端口、操作按钮与连线的坐标定位、命中测试及视野适配。
 use super::{Graph, HEADER_H, NODE_W, PORT_HIT, PORT_ROW_H, RUN_ACTIONS_H};
 use crate::canvas::geometry::Cubic;
-use crate::canvas::layout::{height_of_node, panel_output_offset, param_slots};
+use crate::canvas::layout::{height_of_node, panel_input_offset, panel_output_offset, param_slots};
 use crate::canvas::node::{kind_of, port_index, PortRef, Wire, TOOL_SIZE};
 use eframe::egui::{self, Pos2, Rect};
 use starrytools_core::model::node_kind::NodeKindInfo;
@@ -24,19 +24,63 @@ impl Graph {
     /// 参数端口不在端口列里 —— 它跟着那个参数的行走（浅蓝的小圆点）。
     pub(super) fn in_port(&self, kinds: &[NodeKindInfo], i: usize, k: usize) -> Pos2 {
         let r = self.flow_rect(kinds, i);
-        let param_id = self.nodes[i]
-            .inputs
-            .get(k)
-            .and_then(|port| port.param.as_deref());
+        let node = &self.nodes[i];
+        if node.inputs.get(k).is_some_and(|port| port.exec) {
+            let column = node.inputs[..k]
+                .iter()
+                .filter(|candidate| candidate.exec)
+                .count();
+
+            return egui::pos2(
+                r.left(),
+                r.top() + HEADER_H + PORT_ROW_H * (column as f32 + 0.5),
+            );
+        }
+        // 参数区下方的输入行（「设定值」）：位置读 layout，和绘制共用一份排版。
+        if let Some(row) = node.inputs.get(k).and_then(|port| port.panel_input_row) {
+            if let Some(kind) = kind_of(kinds, node) {
+                return egui::pos2(
+                    r.left(),
+                    r.top() + panel_input_offset(node, kind, &self.notes, row),
+                );
+            }
+        }
+        let param_id = node.inputs.get(k).and_then(|port| port.param.as_deref());
         match param_id.and_then(|id| self.param_port_offset(kinds, i, id)) {
             Some(offset) => egui::pos2(r.left(), r.top() + offset),
-            None => egui::pos2(r.left(), r.top() + HEADER_H + PORT_ROW_H * (k as f32 + 0.5)),
+            None => {
+                // 端口列只数**非参数端口**（对称于 `out_port`）：
+                // 即使参数端口夹在中间，位置也不会错。
+                let column = node.inputs[..k.min(node.inputs.len())]
+                    .iter()
+                    .filter(|port| !port.exec && !port.is_param() && port.panel_input_row.is_none())
+                    .count()
+                    + node.inputs.iter().filter(|port| port.exec).count();
+                egui::pos2(
+                    r.left(),
+                    r.top() + HEADER_H + PORT_ROW_H * (column as f32 + 0.5),
+                )
+            }
         }
     }
 
     pub(super) fn out_port(&self, kinds: &[NodeKindInfo], i: usize, k: usize) -> Pos2 {
         let r = self.flow_rect(kinds, i);
         let node = &self.nodes[i];
+        if node
+            .outputs
+            .get(k)
+            .is_some_and(|port| port.exec && port.panel_row.is_none())
+        {
+            let column = node.outputs[..k]
+                .iter()
+                .filter(|port| port.exec && port.panel_row.is_none())
+                .count();
+            return egui::pos2(
+                r.right(),
+                r.top() + HEADER_H + PORT_ROW_H * (column as f32 + 0.5),
+            );
+        }
         // 挂在参数栏上的输出（动态端口）：位置跟着参数那一行。
         if let Some(row) = node.outputs.get(k).and_then(|port| port.panel_row) {
             if let Some(kind) = kind_of(kinds, node) {
@@ -48,8 +92,13 @@ impl Graph {
         // 常规输出：按顶部端口列里**非面板**输出的序号排。
         let column = node.outputs[..k.min(node.outputs.len())]
             .iter()
-            .filter(|port| port.panel_row.is_none())
-            .count();
+            .filter(|port| !port.exec && port.panel_row.is_none())
+            .count()
+            + node
+                .outputs
+                .iter()
+                .filter(|port| port.exec && port.panel_row.is_none())
+                .count();
         egui::pos2(
             r.right(),
             r.top() + HEADER_H + PORT_ROW_H * (column as f32 + 0.5),
@@ -101,6 +150,13 @@ impl Graph {
         (0..self.nodes.len())
             .rev()
             .find(|&i| self.flow_rect(kinds, i).contains(flow))
+    }
+
+    pub(crate) fn can_run_node(&self, kinds: &[NodeKindInfo], i: usize) -> bool {
+        self.nodes
+            .get(i)
+            .and_then(|node| kind_of(kinds, node))
+            .is_some_and(|kind| kind.pure)
     }
 
     /// 卡片右上角两个工具按钮的矩形（屏幕坐标）：返回 `(运行至此, 删除)`。

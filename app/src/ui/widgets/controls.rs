@@ -17,7 +17,6 @@ use starrytools_core::model::node_kind::{ParamDef, ParamSpec, SelectOption};
 
 /// 单个控件一行的高度（流坐标）—— 取色条也用它。
 pub(crate) use theme::CONTROL_H as PARAM_CONTROL_H;
-use theme::SWITCH_H;
 pub(crate) use theme::{PORTS_ADD_H, PORTS_GAP, PORTS_ROW_H};
 
 /// 动态端口控件里第 `row` 行（0 起）的中心相对控件顶部的高度。
@@ -50,8 +49,6 @@ pub(crate) fn ports_height(rows: usize) -> f32 {
 pub(crate) enum ControlEvent {
     /// 本参数被改了。
     Changed(Value),
-    /// 改了**另一个**参数（动态端口行上的阻塞开关使用注册前缀）。
-    SetOther { param: String, value: Value },
     /// 用户点了文件 / 目录框，要开一个选择框。
     PickFile {
         title: String,
@@ -173,10 +170,10 @@ pub(crate) fn control(
 }
 
 /// 一排动态端口：一列带序号的输出，每行一个删除叉（和前 `min` 行不给），
-/// 开了 `blocking` 时每行还带一个**阻塞开关**；底部一个加号。
+/// 底部一个加号。
 ///
-/// 返回的 `Changed` 是新**个数**；行上的阻塞开关返回 `SetOther`（使用注册前缀）。
-/// 真正多一个 / 少一个端口由 `refresh_ports` 重算 —— 控件本身不知道端口长什么样。
+/// 返回的 `Changed` 是新**个数**；真正多一个 / 少一个端口由 `refresh_ports`
+/// 重算 —— 控件本身不知道端口长什么样。
 fn ports_field(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -186,14 +183,7 @@ fn ports_field(
     zoom: f32,
     disabled: bool,
 ) -> Option<ControlEvent> {
-    let ParamSpec::Ports {
-        min,
-        max,
-        blocking,
-        blocking_prefix,
-        ..
-    } = &param.spec
-    else {
+    let ParamSpec::Ports { min, max, .. } = &param.spec else {
         unreachable!("ports_field requires a Ports parameter");
     };
     let (min, max) = (*min as usize, *max as usize);
@@ -226,35 +216,6 @@ fn ports_field(
             FontId::monospace(11.0 * zoom),
             theme::INK_2,
         );
-
-        // 开关参数由注册元数据指定，缺省当真。
-        // 开关右边是删除叉，所以先给它留出位置，再往左摆一个「阻塞」标签。
-        if *blocking {
-            let key = format!("{blocking_prefix}{}", k + 1);
-            let mut value = params.get(&key).and_then(Value::as_bool).unwrap_or(true);
-            let switch = Rect::from_min_size(
-                egui::pos2(
-                    row.right() - 56.0 * zoom,
-                    row.center().y - SWITCH_H * 0.5 * zoom,
-                ),
-                egui::vec2(30.0 * zoom, SWITCH_H * zoom),
-            );
-            painter.text(
-                egui::pos2(switch.left() - 6.0 * zoom, row.center().y),
-                Align2::RIGHT_CENTER,
-                "阻塞".to_string(),
-                FontId::monospace(theme::FONT_CONTROL * zoom),
-                theme::INK_3,
-            );
-            if disabled {
-                toggle_disabled(&painter, switch, value);
-            } else if widgets::switch(ui, id.with(("block", k)), switch, &mut value) {
-                event = Some(ControlEvent::SetOther {
-                    param: key,
-                    value: serde_json::json!(value),
-                });
-            }
-        }
 
         // 前 `min` 个是必留的，不给删除按钮。
         if !disabled && k >= min {
@@ -1513,7 +1474,7 @@ mod tests {
             for param in &info.kind.params {
                 let height = crate::canvas::layout::control_height(param, &info.defaults);
                 let expected = match &param.spec {
-                    ParamSpec::Bool { .. } => theme::SWITCH_H,
+                    ParamSpec::Bool { .. } => crate::canvas::graph::PARAM_BOOL_H,
                     ParamSpec::Color { .. } => color_height(),
                     ParamSpec::Ports { .. } => ports_height(ports_count(&info.defaults, param)),
                     ParamSpec::Text {
@@ -1554,7 +1515,7 @@ mod tests {
         ];
         for spec in specs {
             let expected = if matches!(spec, ParamSpec::Bool { .. }) {
-                theme::SWITCH_H
+                crate::canvas::graph::PARAM_BOOL_H
             } else {
                 theme::CONTROL_H
             };
@@ -1615,82 +1576,9 @@ mod tests {
                 default: 5.0,
                 min: 2.0,
                 max: 9.0,
-                blocking: false,
-                blocking_prefix: String::new(),
             },
         );
         assert_eq!(ports_count(&Params::new(), &custom), 5);
-    }
-
-    #[test]
-    fn custom_blocking_prefix_is_read_and_written_by_the_control() {
-        let param = ParamDef::new(
-            "count",
-            "输出",
-            ParamSpec::Ports {
-                default: 1.0,
-                min: 1.0,
-                max: 8.0,
-                blocking: true,
-                blocking_prefix: "wait".into(),
-            },
-        );
-        let params = [
-            ("wait1".into(), serde_json::json!(false)),
-            ("block1".into(), serde_json::json!(true)),
-        ]
-        .into_iter()
-        .collect();
-        let ctx = egui::Context::default();
-        let rect = Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(200.0, ports_height(1)));
-        let pos = egui::pos2(rect.right() - 41.0, rect.top() + PORTS_ROW_H * 0.5);
-        let mut event = None;
-        for pressed in [None, Some(true), Some(false)] {
-            let mut input = egui::RawInput::default();
-            input.events.push(egui::Event::PointerMoved(pos));
-            if let Some(pressed) = pressed {
-                input.events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                });
-            }
-            ctx.run_ui(input, |ui| {
-                if let Some(next) = control(ui, "custom", &param, rect, &params, 1.0, false) {
-                    event = Some(next);
-                }
-            })
-            .drop_without_applying_deltas();
-        }
-        match event {
-            Some(ControlEvent::SetOther { param, value }) => {
-                assert_eq!(param, "wait1");
-                assert_eq!(value, serde_json::json!(true));
-            }
-            _ => panic!("expected custom blocking toggle"),
-        }
-        let info = crate::catalog::all()
-            .into_iter()
-            .find(|info| info.kind.id == "sequence")
-            .unwrap();
-        let starrytools_core::registry::ControlFlow::Sequence {
-            blocking_prefix, ..
-        } = info.control_flow.unwrap()
-        else {
-            panic!("sequence control flow");
-        };
-        let ports = info
-            .kind
-            .params
-            .iter()
-            .find(|param| matches!(param.spec, ParamSpec::Ports { .. }))
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(ports).unwrap()["blockingPrefix"],
-            blocking_prefix
-        );
-        assert_eq!(serde_json::to_value(ports).unwrap()["blocking"], true);
     }
 
     #[test]
@@ -1702,8 +1590,6 @@ mod tests {
                 default: 3.0,
                 min: 1.0,
                 max: 8.0,
-                blocking: true,
-                blocking_prefix: "wait".into(),
             },
         );
         let params: Params = [("count".to_string(), serde_json::json!(3.0))]

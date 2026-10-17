@@ -43,6 +43,8 @@ pub(crate) const PARAM_NOTE_GAP: f32 = 4.0;
 pub(crate) const PARAM_GAP: f32 = 8.0;
 /// 开关是「标签 + 开关」一行放。
 pub(crate) const PARAM_BOOL_H: f32 = 20.0;
+/// 参数区下方一行「设定值」输入的高度（流坐标）。
+pub(crate) const PANEL_INPUT_H: f32 = 22.0;
 /// 多行文本框每行的估高。
 pub(crate) const PARAM_TEXT_LINE: f32 = 16.0;
 /// 端口和参数之间留的那条缝。
@@ -194,7 +196,7 @@ impl Graph {
 
     /// 记一笔**语义**改动：增删节点、改参数、改连线。除了 dirty，还让静态检查失效 ——
     /// 那个检查会读输入文件头、跑全图拓扑，不能因为挪一下节点就重算。
-    fn touch_content(&mut self) {
+    pub(crate) fn touch_content(&mut self) {
         self.revision += 1;
         self.check_revision += 1;
     }
@@ -246,6 +248,8 @@ impl Graph {
         self.interaction.slash.is_some()
             || !self.anim.severing.is_empty()
             || self.interaction.connect.is_some()
+            // 悬停光晕在呼吸；不持续重绘就会停在一帧上。
+            || self.interaction.hovered_port.is_some()
             || !self.anim.entering.is_empty()
             || self.downloads.any()
     }

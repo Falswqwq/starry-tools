@@ -27,7 +27,6 @@ pub fn spec() -> NodeSpec {
             description: "给流过的值起个名字，接在它后面的输出节点就用这个名字写盘。\
                           不挑类型：图像、文本、数字都原样透传。"
                 .into(),
-            is_source: false,
             inputs: vec![PortDef::new("in", "值", PortType::Any)
                 .required()
                 .hint("任何类型的值")],

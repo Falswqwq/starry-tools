@@ -3,7 +3,8 @@
 //! 这是第一个产出 `List[T]` 的节点，和「[遍历](iterate.rs)」正好配上：
 //! 读一个装满图的目录 → 拿到 `List[Img]` → 交给「遍历」一项项解包。
 //!
-//! 和「读取」一样是**起点**节点（因此自动带一个空输入，可以挂到逻辑输出上排先后）。
+//! 和「读取」一样是普通节点：没有声明输入，所以自动带一个空输入，
+//! 可以挂到逻辑输出上排先后。
 //! 工作流里只记目录路径，不存文件内容 —— 目录变了重新跑就行。
 
 use std::path::{Path, PathBuf};
@@ -33,7 +34,6 @@ pub fn spec() -> NodeSpec {
             description: "把一个目录里的文件读成一个列表：图像装成 `List[Img]`，\
                           文本装成 `List[Text]`。接给「遍历」就能一项项处理。"
                 .into(),
-            is_source: true,
             inputs: vec![],
             // 声明里给泛化的样子（节点库卡片）；真正的元素类型由 `output_ports` 现算。
             outputs: vec![PortDef::new("out", "列表", PortType::any_list())],

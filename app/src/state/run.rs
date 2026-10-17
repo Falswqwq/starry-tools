@@ -52,7 +52,7 @@ impl Marks {
 
         if let Some(report) = report {
             for node in &report.nodes {
-                marks.node_ms.insert(node.node_id.clone(), node.elapsed_ms);
+                *marks.node_ms.entry(node.node_id.clone()).or_default() += node.elapsed_ms;
                 match node.status {
                     NodeStatus::Ok => {
                         marks.ok_nodes.insert(node.node_id.clone());
@@ -65,6 +65,7 @@ impl Marks {
             }
         }
 
+        marks.ok_nodes.retain(|id| !marks.failed_nodes.contains(id));
         marks
     }
 }
@@ -311,6 +312,8 @@ pub struct Runner {
     live: Option<LiveRun>,
     /// 用户把运行记录清空了：画布该把上一次运行的痕迹也抹掉。
     reset_requested: bool,
+    /// 成功运行的变量状态，等待写回节点参数。
+    variable_states: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 struct Job {
@@ -355,13 +358,22 @@ impl Runner {
         self.finish();
         self.report = None;
         self.error = None;
+        self.variable_states.clear();
     }
 
     /// 清掉上一次的运行结果（运行记录上的「清空」）。
     pub fn clear(&mut self) {
         self.report = None;
         self.error = None;
+        self.variable_states.clear();
         self.reset_requested = true;
+    }
+
+    /// 取走成功运行的变量状态；失败运行不提交。
+    pub fn take_variable_states(
+        &mut self,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        std::mem::take(&mut self.variable_states)
     }
 
     /// 外壳读一下「该重置画布痕迹了」—— 读到就清零。
@@ -428,6 +440,7 @@ impl Runner {
 
         self.report = None;
         self.error = None;
+        self.variable_states.clear();
         self.job = Some(Job { rx });
         self.requests = Some(request_rx);
         self.responses = Some(response_tx);
@@ -491,6 +504,9 @@ impl Runner {
         };
         match job.rx.try_recv() {
             Ok(Ok(report)) => {
+                if report.ok {
+                    self.variable_states = report.variable_states.clone();
+                }
                 self.report = Some(report);
                 self.finish();
             }
@@ -550,6 +566,29 @@ fn forward_progress_with_wake(
 mod tests {
     use super::*;
     use starrytools_core::engine::Issue;
+
+    #[test]
+    fn variable_states_are_committed_only_after_success() {
+        for ok in [true, false] {
+            let mut report =
+                engine::run(&Workflow::new("states"), None, &std::env::temp_dir()).unwrap();
+            report.ok = ok;
+            report
+                .variable_states
+                .insert("counter".into(), serde_json::json!(7));
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ok(report)).unwrap();
+            let mut runner = Runner::default();
+            runner.job = Some(Job { rx });
+            runner.poll();
+            let states = runner.take_variable_states();
+            assert_eq!(
+                states.get("counter").cloned(),
+                if ok { Some(serde_json::json!(7)) } else { None }
+            );
+            assert!(runner.take_variable_states().is_empty());
+        }
+    }
 
     #[test]
     fn stale_check_is_discarded_and_pending_cannot_run() {
@@ -865,6 +904,7 @@ mod tests {
                     order: vec!["complete".into()],
                     nodes: Vec::new(),
                     issues: Vec::new(),
+                    variable_states: Default::default(),
                     output_dir: None,
                     finished_at: 42,
                 }))

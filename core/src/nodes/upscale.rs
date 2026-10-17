@@ -33,7 +33,6 @@ pub fn spec() -> NodeSpec {
             description: "把 PNG 图像缩放到原来的百分之 n。像素画常配「邻近」插值做整数倍放大，\
                           放大后每个像素还是干净的方块。"
                 .into(),
-            is_source: false,
             inputs: vec![
                 PortDef::new("image", "PNG 图像", PortType::Image(ImageFormat::Png)).required(),
             ],
