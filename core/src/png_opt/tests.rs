@@ -91,6 +91,48 @@ fn every_scheme_gives_the_same_pixels() {
 }
 
 #[test]
+fn progress_reports_analysis_candidates_and_verification() {
+    let image = rich_rgba();
+    let source = encode_png(&image);
+    let mut stages = Vec::new();
+    optimize_with_progress(
+        &image,
+        Some(&source),
+        &Options::new(Scheme::Balanced, Strip::Safe),
+        &mut |stage| stages.push(stage),
+    )
+    .expect("优化成功");
+
+    assert_eq!(stages.first(), Some(&Stage::Analyze));
+    assert_eq!(stages.last(), Some(&Stage::Verify));
+    let last_candidate = stages
+        .iter()
+        .filter_map(|stage| match stage {
+            Stage::Candidates { done, total } => Some((*done, *total)),
+            _ => None,
+        })
+        .next_back()
+        .expect("应该有候选进度");
+    assert!(last_candidate.1 > 0);
+    assert_eq!(last_candidate.0, last_candidate.1, "候选进度应该走完");
+}
+
+#[test]
+fn zopfli_progress_reports_an_indeterminate_stage() {
+    let image = rgba_image(8, 8, |x, y| [(x * 20) as u8, (y * 20) as u8, 40, 255]);
+    let source = encode_png(&image);
+    let mut seen = false;
+    optimize_with_progress(
+        &image,
+        Some(&source),
+        &Options::new(Scheme::Zopfli, Strip::Safe),
+        &mut |stage| seen |= stage == Stage::Zopfli,
+    )
+    .expect("优化成功");
+    assert!(seen, "Zopfli 档应该报告 Zopfli 阶段");
+}
+
+#[test]
 fn zopfli_scheme_keeps_pixels_and_does_not_grow() {
     let image = rgba_image(24, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, 90, 255]);
     let optimized = run(&image, Scheme::Zopfli);

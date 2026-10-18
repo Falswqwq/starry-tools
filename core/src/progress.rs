@@ -23,8 +23,10 @@ pub struct NodeStep {
     pub fraction: Option<f32>,
     /// 已经处理的帧数。
     pub frame: Option<u64>,
-    /// 总帧数（估不出来就是 `None`）。
+    /// 总数（估不出来就是 `None`）。
     pub total_frames: Option<u64>,
+    /// 计数的单位，比如 `"帧"` / `"候选"` / `"轮"`。缺省按帧显示。
+    pub unit: Option<String>,
     /// 一句附注，比如 `"24 帧/s"`。
     pub text: Option<String>,
 }

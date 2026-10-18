@@ -217,10 +217,13 @@ let spec = NodeSpec::fixed(kind, move |_args| {
 - 输入类型随参数变的节点（如「运算」）用 `NodeSpec::resolve_inputs` 声明；
   它只返回声明输入；参数端口由 `NodeKind` 补齐，执行引脚由 `NodeSpec` 补齐。
   `ParamSpec::Ports` 的数量按注册的 default / min / max 取整约束，异常存档不能触发无界绘制；
+  行的注释名存在 `{labelPrefix}{序号}` 参数里，不参与执行语义。
   Sequence 固定为同步串行，动态输出行没有阻塞开关。
 - 需要询问用户的节点用 `.interactive(predicate)` 与 `args.ask(...)`；缺少界面时返回错误。
   外部程序先 `register_tool(ToolSpec::new(id, probe))`，节点再 `.needs_tool(id)`，
-  执行回调仍须检查可用性。长任务可用 `args.report(NodeStep { ... })` 报进度。
+  执行回调仍须检查可用性。长任务可用 `args.report(NodeStep { ... })` 报进度；
+  PNG 优化用 `png_opt::optimize_with_progress` 获取阶段回调，调色板聚类用
+  `palette::extract_with_progress` 获取迭代回调。
   `Progress::new` 接收 `SyncSender`；app 两级进度队列各最多 512 项，只有后台生产者背压，
   UI 每帧非阻塞收取。detach / 关闭会断开接收端，解除堵塞；这不是计算任务取消功能。
 - 图像节点保留 `inherit_provenance` 与 `with_name_hint`，使下游保存继续使用源文件名。
@@ -266,13 +269,16 @@ app/src/
 ```
 
 布局、命中和端口定位共用 `layout`，参数和端口语义始终从 core 获取。引擎按
-`NodeSpec::control_flow(ControlFlow::Sequence / Loop { ... })` 调度，不靠内置节点 ID
+`NodeSpec::control_flow(ControlFlow::Sequence / Repeat / Loop { ... })` 调度，不靠内置节点 ID
 写特例；新增普通数据节点不需要改控制流模块。
 
 执行由显式 Exec 控制链同步串行调度，Data 只传值；纯节点按需重新求值。
-Sequence 固定为同步串行并等待完整分支；Loop 分开 body / item / completed。
+Sequence 固定为同步串行并等待完整分支；Repeat 按次数重复 body 并输出 index；
+Loop 分开 body / item / completed。
 变量节点通过 `.variable(VariablePorts::new(value_param, get, set))` 注册；
 Set 口需声明为 `PortDef::multi()`，状态在单次运行内由引擎维护。
+类型之间的隐式转换在 `types::RegistryBuilder::register_conversion` 中声明；
+静态检查和运行期取值都会使用同一张转换表。
 单节点调试仅支持纯节点及其纯数据依赖。v1 需要显式迁移，app 当前拒绝加载。
 完整契约见 [Blueprint v2 引擎](engine-blueprint.md)。
 

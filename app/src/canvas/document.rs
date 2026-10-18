@@ -159,13 +159,12 @@ impl Graph {
             check_revision: 0,
             tool_revision: None,
             ports_revision: None,
-            selected: None,
+            selected: std::collections::BTreeSet::new(),
             interaction: Interaction::default(),
             textures: Textures::default(),
             anim: Anim::default(),
             pending_run: None,
-            clipboard: None,
-            save_requested: false,
+            clipboard: Vec::new(),
             notes: HashMap::new(),
             run_marks_hidden: false,
             downloads: Downloads::default(),
@@ -187,6 +186,7 @@ impl Graph {
         node.pos = self.view.to_flow(screen) - egui::vec2(NODE_W, height) * 0.5;
         self.anim.entering.insert(node.id.clone(), now);
         self.nodes.push(node);
+        self.select_only(self.nodes.len() - 1);
         self.interaction.grabbed = Some(self.nodes.len() - 1);
         self.touch_content();
     }
@@ -232,17 +232,20 @@ impl Graph {
     pub fn from_workflow(workflow: &Workflow, kinds: &[NodeKindInfo]) -> Self {
         let mut nodes: Vec<Node> = Vec::with_capacity(workflow.nodes.len());
         for instance in &workflow.nodes {
-            let title = kinds
-                .iter()
-                .find(|kind| kind.kind.id == instance.kind)
+            let kind = kinds.iter().find(|kind| kind.kind.id == instance.kind);
+            let title = kind
                 .map(|kind| kind.kind.name.clone())
                 .unwrap_or_else(|| instance.kind.clone());
+            // 老存档缺少后来新增的参数时，用注册默认值补齐 —— 否则带 visibleWhen
+            // 的新参数会把整组旧控件藏起来。存档里已有的值始终优先。
+            let mut params = kind.map(|kind| kind.defaults.clone()).unwrap_or_default();
+            params.extend(instance.params.clone());
             let node = Node::new(
                 instance.id.clone(),
                 egui::pos2(instance.position.x as f32, instance.position.y as f32),
                 instance.kind.clone(),
                 title,
-                instance.params.clone(),
+                params,
             );
             nodes.push(node);
         }
@@ -284,13 +287,12 @@ impl Graph {
             check_revision: 0,
             tool_revision: None,
             ports_revision: None,
-            selected: None,
+            selected: std::collections::BTreeSet::new(),
             interaction: Interaction::default(),
             textures: Textures::default(),
             anim: Anim::default(),
             pending_run: None,
-            clipboard: None,
-            save_requested: false,
+            clipboard: Vec::new(),
             notes: HashMap::new(),
             run_marks_hidden: false,
             downloads: Downloads::default(),
@@ -320,15 +322,19 @@ impl Graph {
                 wire.to -= 1;
             }
         }
-        if let Some(selected) = self.selected {
-            self.selected = Some(if selected == index {
-                last
-            } else if selected > index {
-                selected - 1
-            } else {
-                selected
-            });
-        }
+        self.selected = self
+            .selected
+            .iter()
+            .map(|&selected| {
+                if selected == index {
+                    last
+                } else if selected > index {
+                    selected - 1
+                } else {
+                    selected
+                }
+            })
+            .collect();
         last
     }
 
@@ -351,12 +357,32 @@ impl Graph {
                 wire.to -= 1;
             }
         }
-        self.selected = None;
+        self.selected = self
+            .selected
+            .iter()
+            .filter_map(|&selected| {
+                if selected == index {
+                    None
+                } else if selected > index {
+                    Some(selected - 1)
+                } else {
+                    Some(selected)
+                }
+            })
+            .collect();
         self.interaction.menu = None;
         // 交互里记着的下标也要跟着挪 —— 否则拖拽中删掉节点会拖到错的对象，
         // 删的恰好是最后一个还会越界 panic。
         self.interaction.fixup_after_removal(index);
         self.touch_content();
+    }
+
+    /// 删掉所有选中的节点。从后往前删，下标才不会互相影响。
+    pub(super) fn delete_selected(&mut self) {
+        let indices: Vec<_> = self.selected.iter().rev().copied().collect();
+        for index in indices {
+            self.delete_node(index);
+        }
     }
 
     /// 复制一个节点，错开一点免得盖住原件。
@@ -369,26 +395,36 @@ impl Graph {
         copy.pos += egui::vec2(28.0, 28.0);
         refresh_ports(&mut copy);
         self.nodes.push(copy);
-        self.selected = Some(self.nodes.len() - 1);
+        self.select_only(self.nodes.len() - 1);
         self.interaction.menu = None;
         self.touch_content();
     }
 
-    /// 粘贴一个节点：换新 id、清掉上次运行的痕迹，落在 `at`（流坐标）。
-    pub(super) fn paste_node(&mut self, mut node: Node, at: Pos2) {
-        node.id = new_id();
-        node.pos = at;
-        node.run = None;
-        node.preview = false;
-        refresh_ports(&mut node);
-        self.nodes.push(node);
-        self.selected = Some(self.nodes.len() - 1);
+    /// 粘贴一组节点：换新 id、清掉上次运行的痕迹，并保持它们之间的相对位置。
+    pub(super) fn paste_nodes(&mut self, nodes: Vec<Node>, at: Pos2) {
+        if nodes.is_empty() {
+            return;
+        }
+        let min_x = nodes
+            .iter()
+            .map(|node| node.pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let min_y = nodes
+            .iter()
+            .map(|node| node.pos.y)
+            .fold(f32::INFINITY, f32::min);
+        let origin = egui::pos2(min_x, min_y);
+        self.selected.clear();
+        for mut node in nodes {
+            node.id = new_id();
+            node.pos = at + (node.pos - origin);
+            node.run = None;
+            node.preview = false;
+            refresh_ports(&mut node);
+            self.nodes.push(node);
+            self.selected.insert(self.nodes.len() - 1);
+        }
         self.interaction.menu = None;
         self.touch_content();
-    }
-
-    /// 外壳读一下有没有 Ctrl+S 的请求，读到就清零。
-    pub fn take_save_request(&mut self) -> bool {
-        std::mem::take(&mut self.save_requested)
     }
 }

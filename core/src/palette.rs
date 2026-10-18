@@ -45,9 +45,22 @@ impl Algorithm {
 ///
 /// 全透明的像素不算；半透明的按 RGB 算。颜色本来就不多于 `colors` 时原样列出。
 pub fn extract(image: &DynamicImage, colors: usize, algorithm: Algorithm) -> Vec<[u8; 3]> {
+    extract_with_progress(image, colors, algorithm, &mut |_, _| {})
+}
+
+/// 和 [`extract`] 相同，并按迭代次数回调进度：`(已完成迭代, 总迭代)`。
+pub fn extract_with_progress(
+    image: &DynamicImage,
+    colors: usize,
+    algorithm: Algorithm,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Vec<[u8; 3]> {
     // Median Cut 走老的量化器 —— 一模一样的东西没必要写两遍。
     if algorithm == Algorithm::MedianCut {
-        return png_quant::representative_colors(image, colors);
+        progress(0, 1);
+        let colors = png_quant::representative_colors(image, colors);
+        progress(1, 1);
+        return colors;
     }
 
     let sample = weighted_colors(image);
@@ -61,12 +74,12 @@ pub fn extract(image: &DynamicImage, colors: usize, algorithm: Algorithm) -> Vec
     match algorithm {
         Algorithm::KMedoids => {
             // medoid 本身就是原图里的点，直接把它的 RGB 拿回来。
-            k_medoids(&points, &weights, k)
+            k_medoids(&points, &weights, k, progress)
                 .into_iter()
                 .map(|index| sample[index].0)
                 .collect()
         }
-        _ => k_means(&points, &weights, k)
+        _ => k_means(&points, &weights, k, progress)
             .into_iter()
             .map(oklab_to_rgb)
             .collect(),
@@ -124,7 +137,12 @@ fn weighted_colors(image: &DynamicImage) -> Vec<([u8; 3], f32)> {
 }
 
 /// K-Means：一堆点、带权重，聚成 `k` 簇，返回每簇的质心（OKLab）。
-fn k_means(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<[f32; 3]> {
+fn k_means(
+    points: &[[f32; 3]],
+    weights: &[f32],
+    k: usize,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Vec<[f32; 3]> {
     let mut centroids: Vec<[f32; 3]> = seeded_indices(points, weights, k)
         .into_iter()
         .map(|index| points[index])
@@ -134,7 +152,8 @@ fn k_means(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<[f32; 3]> {
     }
 
     let mut assignment = vec![usize::MAX; points.len()];
-    for _ in 0..MAX_ITER {
+    for iteration in 0..MAX_ITER {
+        progress(iteration, MAX_ITER);
         let mut changed = false;
         for (index, point) in points.iter().enumerate() {
             let nearest = nearest_centroid(point, &centroids);
@@ -164,6 +183,7 @@ fn k_means(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<[f32; 3]> {
             }
         }
 
+        progress(iteration + 1, MAX_ITER);
         if !changed {
             break;
         }
@@ -172,13 +192,19 @@ fn k_means(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<[f32; 3]> {
 }
 
 /// K-Medoids：和 K-Means 一样迭代，但每簇的代表是簇里**真实存在**的那个点。
-fn k_medoids(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<usize> {
+fn k_medoids(
+    points: &[[f32; 3]],
+    weights: &[f32],
+    k: usize,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Vec<usize> {
     let mut medoids = seeded_indices(points, weights, k);
     if medoids.is_empty() {
         return medoids;
     }
 
-    for _ in 0..MAX_ITER {
+    for iteration in 0..MAX_ITER {
+        progress(iteration, MAX_ITER);
         // 每个点归到最近的 medoid。
         let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); medoids.len()];
         for (index, point) in points.iter().enumerate() {
@@ -219,6 +245,7 @@ fn k_medoids(points: &[[f32; 3]], weights: &[f32], k: usize) -> Vec<usize> {
                 changed = true;
             }
         }
+        progress(iteration + 1, MAX_ITER);
         if !changed {
             break;
         }
@@ -492,6 +519,23 @@ mod tests {
             let second = extract(&colors, 8, algorithm);
             assert_eq!(first, second, "{algorithm:?} 得是确定的");
         }
+    }
+
+    #[test]
+    fn extraction_reports_iteration_progress() {
+        let colors: Vec<([u8; 3], usize)> = (0..32)
+            .map(|i| ([i as u8 * 7, (i * 11) as u8, (i * 13) as u8], i + 1))
+            .collect();
+        let image = DynamicImage::ImageRgba8(image_of(&colors));
+        let mut updates = Vec::new();
+        let palette =
+            super::extract_with_progress(&image, 4, Algorithm::KMeans, &mut |done, total| {
+                updates.push((done, total))
+            });
+        assert!(!palette.is_empty());
+        assert!(!updates.is_empty());
+        assert!(updates.iter().all(|(_, total)| *total == MAX_ITER));
+        assert!(updates.windows(2).all(|pair| pair[0].0 <= pair[1].0));
     }
 
     #[test]

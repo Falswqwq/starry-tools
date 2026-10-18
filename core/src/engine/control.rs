@@ -52,6 +52,32 @@ pub(super) fn validate(
                             .is_some_and(|i| i.parse::<usize>().is_ok())
                     })
                 }
+                ControlFlow::Repeat {
+                    count_param,
+                    index_output,
+                    body_output,
+                    finally_output,
+                } => {
+                    let count_exists = spec.kind.params.iter().any(|param| {
+                        param.id == *count_param
+                            && matches!(
+                                param.spec,
+                                crate::model::node_kind::ParamSpec::Number { integer: true, .. }
+                            )
+                    });
+                    count_exists
+                        && ports.outputs.iter().any(|p| {
+                            p.id == *index_output
+                                && !p.exec
+                                && p.ty == crate::model::port_type::PortType::Number
+                        })
+                        && ports.outputs.iter().any(|p| p.id == *body_output && p.exec)
+                        && ports
+                            .outputs
+                            .iter()
+                            .any(|p| p.id == *finally_output && p.exec)
+                        && body_output != finally_output
+                }
                 ControlFlow::Loop {
                     list_input,
                     item_output,
@@ -189,6 +215,45 @@ impl Exec<'_> {
                                     self.emit(id, &finally_output, path);
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            Some(ControlFlow::Repeat {
+                count_param,
+                index_output,
+                body_output,
+                finally_output,
+            }) => {
+                self.trace.push(id.to_owned());
+                match self.collect_inputs(id) {
+                    Err((_, error)) => self.fail_control(id, error),
+                    Ok((params, _)) => {
+                        // 上限只是防御异常存档；正常参数控件已经限制得更小。
+                        let count = crate::model::params::integer(&params, &count_param, 0)
+                            .clamp(0, 100_000) as usize;
+                        let result = self.start_result(id);
+                        self.finish_result(result, false);
+                        for i in 0..count {
+                            // 每轮隔离数据帧，结束后恢复外层值。
+                            let saved = self.values.clone();
+                            self.values.insert(
+                                id.to_owned(),
+                                [(index_output.clone(), Value::Number(i as f64))]
+                                    .into_iter()
+                                    .collect(),
+                            );
+                            let mut inner = path.to_vec();
+                            inner.push(i);
+                            self.emit(id, &body_output, &inner);
+                            self.values = saved;
+                            if self.results.iter().any(|r| r.status != NodeStatus::Ok) {
+                                break;
+                            }
+                        }
+                        self.values.remove(id);
+                        if self.results.iter().all(|r| r.status == NodeStatus::Ok) {
+                            self.emit(id, &finally_output, path);
                         }
                     }
                 }

@@ -2,13 +2,18 @@
 //! 类型 ID 和展示文本在启动期统一去重驻留，使 `PortType` 保持 `Copy` 和零分配查询。
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
+use crate::error::NodeError;
 use crate::model::port_type::ImageFormat;
+use crate::model::value::Value;
 use crate::registry::RegistrationError;
+
+/// 一次隐式类型转换。只接收已经确认属于 `from` 的值。
+pub type ConvertFn = Arc<dyn Fn(&Value) -> Result<Value, NodeError> + Send + Sync>;
 
 /// GUI 无关的 RGB 值；扩展可以直接贡献新颜色，无需增加枚举分支。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +61,7 @@ fn intern(text: &str) -> &'static str {
 #[derive(Default)]
 pub struct RegistryBuilder {
     entries: BTreeMap<&'static str, TypeInfo>,
+    conversions: BTreeMap<(&'static str, &'static str), ConvertFn>,
 }
 
 impl RegistryBuilder {
@@ -121,6 +127,39 @@ impl RegistryBuilder {
         })
     }
 
+    /// 声明 `from` 可以隐式转换为 `to`。
+    ///
+    /// 只支持标量具体类型；列表和接口不参与隐式转换。转换失败会阻止该节点运行。
+    pub fn register_conversion(
+        &mut self,
+        from: PortType,
+        to: PortType,
+        convert: impl Fn(&Value) -> Result<Value, NodeError> + Send + Sync + 'static,
+    ) -> Result<(), RegistrationError> {
+        if from.list
+            || to.list
+            || from.is_trait
+            || to.is_trait
+            || from.id == to.id
+            || !self.entries.contains_key(from.id)
+            || !self.entries.contains_key(to.id)
+        {
+            return Err(RegistrationError::InvalidConversion {
+                from: from.id.to_owned(),
+                to: to.id.to_owned(),
+            });
+        }
+        let key = (from.id, to.id);
+        if self.conversions.contains_key(&key) {
+            return Err(RegistrationError::Duplicate {
+                kind: "conversion",
+                id: format!("{} -> {}", from.id, to.id),
+            });
+        }
+        self.conversions.insert(key, Arc::new(convert));
+        Ok(())
+    }
+
     pub fn freeze(self) -> Result<Registry, RegistrationError> {
         for info in self.entries.values() {
             for parent in &info.traits {
@@ -138,6 +177,7 @@ impl RegistryBuilder {
         }
         let registry = Registry {
             entries: self.entries,
+            conversions: self.conversions,
         };
         // 继承图必须无环，否则“最具体的共同接口”没有明确含义。
         for info in registry.entries.values() {
@@ -153,6 +193,7 @@ impl RegistryBuilder {
 
 pub struct Registry {
     entries: BTreeMap<&'static str, TypeInfo>,
+    conversions: BTreeMap<(&'static str, &'static str), ConvertFn>,
 }
 
 impl Registry {
@@ -194,6 +235,30 @@ impl Registry {
         trait_id == "any" || (!ty.list && self.implements_id(ty.id, trait_id))
     }
 
+    /// 是否存在一条 `from -> to` 的隐式转换。只认直接声明的规则。
+    pub fn can_convert(&self, from: PortType, to: PortType) -> bool {
+        !from.list
+            && !to.list
+            && !from.is_trait
+            && !to.is_trait
+            && self.conversions.contains_key(&(from.id, to.id))
+    }
+
+    /// 尝试把 `value` 从 `from` 转成 `to`。
+    ///
+    /// `Ok(None)` 表示没有这条规则；`Err` 表示规则存在但值无法转换。
+    pub fn convert_value(
+        &self,
+        from: PortType,
+        to: PortType,
+        value: &Value,
+    ) -> Result<Option<Value>, NodeError> {
+        if !self.can_convert(from, to) {
+            return Ok(None);
+        }
+        self.conversions[&(from.id, to.id)](value).map(Some)
+    }
+
     /// 同型保留具体类型；否则选共同接口中不再有更具体候选的那个。
     /// 不可比较的多个最具体接口用 ID 字典序打破平局，避免 HashMap 顺序影响结果。
     pub fn common_type(&self, types: &[PortType]) -> PortType {
@@ -229,14 +294,47 @@ pub fn types() -> &'static Registry {
     crate::registry::registry().types()
 }
 
+/// 两个端口类型之间是否存在隐式转换。
+pub fn can_convert(from: PortType, to: PortType) -> bool {
+    types().can_convert(from, to)
+}
+
+/// 按已注册规则转换一个值。`Ok(None)` 表示没有可用规则。
+pub fn convert_value(
+    from: PortType,
+    to: PortType,
+    value: &Value,
+) -> Result<Option<Value>, NodeError> {
+    types().convert_value(from, to, value)
+}
+
 pub(crate) fn register_builtin(registry: &mut RegistryBuilder) -> Result<(), RegistrationError> {
     registry.register_trait("any", "任意值", "ANY", TypeColor::UNKNOWN, &[])?;
     registry.register_trait("file", "文件", "FILE", TypeColor::UNKNOWN, &[])?;
     registry.register_trait("img", "图像", "IMG", TypeColor::IMAGE, &["file"])?;
-    registry.register_type("text", "文本", "TXT", TypeColor::TEXT, &[], None)?;
-    registry.register_type("number", "数字", "NUM", TypeColor::NUMBER, &[], None)?;
+    let text = registry.register_type("text", "文本", "TXT", TypeColor::TEXT, &[], None)?;
+    let number = registry.register_type("number", "数字", "NUM", TypeColor::NUMBER, &[], None)?;
     registry.register_type("bool", "布尔", "BOOL", TypeColor::BOOL, &[], None)?;
     registry.register_type("void", "空", "-", TypeColor::UNKNOWN, &[], None)?;
+
+    registry.register_conversion(number, text, |value| match value.inner() {
+        Value::Number(number) => Ok(Value::text(number.to_string())),
+        other => Err(NodeError::new(format!(
+            "数字转文本失败：拿到的是{}",
+            other.port_type().label()
+        ))),
+    })?;
+    registry.register_conversion(text, number, |value| match value.inner() {
+        Value::Text(text) => text
+            .trim()
+            .parse::<f64>()
+            .map(Value::Number)
+            .map_err(|_| NodeError::new(format!("「{text}」不是一个数字"))),
+        other => Err(NodeError::new(format!(
+            "文本转数字失败：拿到的是{}",
+            other.port_type().label()
+        ))),
+    })?;
     for format in ImageFormat::CONCRETE {
         registry.register_type(
             format.name(),
@@ -779,6 +877,93 @@ mod tests {
         // 徽标带方括号，一眼看出是列表。
         assert_eq!(list_png.badge(), "[PNG]");
         assert_eq!(list_any.badge(), "[ANY]");
+    }
+
+    #[test]
+    fn builtin_number_text_conversions_are_declared_and_fallible() {
+        let mut builder = RegistryBuilder::default();
+        register_builtin(&mut builder).unwrap();
+        let registry = builder.freeze().unwrap();
+
+        assert!(registry.can_convert(PortType::Number, PortType::Text));
+        assert!(registry.can_convert(PortType::Text, PortType::Number));
+        assert!(!registry.can_convert(PortType::Bool, PortType::Text));
+        assert!(!registry.can_convert(PortType::Text, PortType::Bool));
+
+        let text = registry
+            .convert_value(PortType::Number, PortType::Text, &Value::Number(42.0))
+            .unwrap()
+            .expect("有转换规则");
+        assert_eq!(text.as_text().unwrap(), "42");
+
+        let number = registry
+            .convert_value(PortType::Text, PortType::Number, &Value::text(" 3.5 "))
+            .unwrap()
+            .expect("有转换规则");
+        assert_eq!(number.as_number().unwrap(), 3.5);
+
+        assert!(registry
+            .convert_value(PortType::Text, PortType::Number, &Value::text("不是数字"))
+            .is_err());
+    }
+
+    #[test]
+    fn custom_types_can_register_conversions() {
+        let mut builder = RegistryBuilder::default();
+        register_builtin(&mut builder).unwrap();
+        let source = builder
+            .register_type("custom/source", "源", "SRC", TypeColor::UNKNOWN, &[], None)
+            .unwrap();
+        let target = builder
+            .register_type(
+                "custom/target",
+                "目标",
+                "DST",
+                TypeColor::UNKNOWN,
+                &[],
+                None,
+            )
+            .unwrap();
+        builder
+            .register_conversion(source, target, |value| {
+                Ok(Value::text(format!("target:{}", value.as_text()?)))
+            })
+            .unwrap();
+        let registry = builder.freeze().unwrap();
+
+        assert!(registry.can_convert(source, target));
+        let converted = registry
+            .convert_value(source, target, &Value::text("x"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.as_text().unwrap(), "target:x");
+        assert!(!registry.can_convert(target, source), "方向必须显式登记");
+    }
+
+    #[test]
+    fn conversions_reject_traits_lists_and_duplicates() {
+        let mut builder = RegistryBuilder::default();
+        register_builtin(&mut builder).unwrap();
+        assert!(matches!(
+            builder.register_conversion(PortType::Any, PortType::Text, |_| Ok(Value::Void)),
+            Err(RegistrationError::InvalidConversion { .. })
+        ));
+        let list = PortType::list_of(PortType::Text);
+        assert!(matches!(
+            builder.register_conversion(list, PortType::Text, |_| Ok(Value::Void)),
+            Err(RegistrationError::InvalidConversion { .. })
+        ));
+        assert_eq!(
+            builder.register_conversion(PortType::Bool, PortType::Text, |_| Ok(Value::Void)),
+            Ok(())
+        );
+        assert!(matches!(
+            builder.register_conversion(PortType::Bool, PortType::Text, |_| Ok(Value::Void)),
+            Err(RegistrationError::Duplicate {
+                kind: "conversion",
+                ..
+            })
+        ));
     }
 
     /// 空信号只能接空信号（通配除外）。

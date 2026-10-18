@@ -1014,6 +1014,92 @@ fn operation_rejects_division_by_zero() {
 }
 
 #[test]
+fn number_is_implicitly_converted_to_text() {
+    let mut workflow = Workflow::new("数字转文本");
+    let mut number = defaults(crate::nodes::literal::KIND_NUMBER);
+    number.insert("value".into(), serde_json::json!(42));
+    workflow
+        .nodes
+        .push(node("n", crate::nodes::literal::KIND_NUMBER, number));
+    let mut text = defaults(crate::nodes::literal::KIND_TEXT);
+    text.insert("value".into(), serde_json::json!("x"));
+    workflow
+        .nodes
+        .push(node("t", crate::nodes::literal::KIND_TEXT, text));
+    let mut params = defaults(crate::nodes::operation::KIND);
+    params.insert("op".into(), serde_json::json!("concat"));
+    workflow
+        .nodes
+        .push(node("op", crate::nodes::operation::KIND, params));
+    workflow.edges.push(edge("e1", "n", "out", "op", "a"));
+    workflow.edges.push(edge("e2", "t", "out", "op", "b"));
+
+    let report = run_pipeline(&workflow, None, &workspace("implicit-number-text")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let result = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "op")
+        .unwrap();
+    assert_eq!(result.outputs[0].summary, "42x");
+}
+
+#[test]
+fn text_is_implicitly_converted_to_number_and_bad_text_fails() {
+    let dir = workspace("implicit-text-number");
+    let png = image_fixture(&dir, "png", 2, 2);
+
+    for (value, expected) in [("250", Some((5, 5))), ("不是数字", None)] {
+        let mut workflow = Workflow::new("文本转数字");
+        workflow.nodes.push(input_node("in", &png));
+        let mut text = defaults(crate::nodes::literal::KIND_TEXT);
+        text.insert("value".into(), serde_json::json!(value));
+        workflow
+            .nodes
+            .push(node("t", crate::nodes::literal::KIND_TEXT, text));
+        workflow.nodes.push(node(
+            "up",
+            crate::nodes::upscale::KIND,
+            defaults(crate::nodes::upscale::KIND),
+        ));
+        workflow.edges.push(edge("e1", "in", "out", "up", "image"));
+        workflow.edges.push(edge(
+            "e2",
+            "t",
+            "out",
+            "up",
+            &crate::model::node_kind::param_port_id("percent"),
+        ));
+
+        let report = run_pipeline(&workflow, None, &dir.join(value)).unwrap();
+        let result = report
+            .nodes
+            .iter()
+            .find(|result| result.node_id == "up")
+            .unwrap();
+        match expected {
+            Some((width, height)) => {
+                assert!(report.ok, "{:?}", result);
+                let path = result.outputs[0].path.clone().unwrap();
+                let output = image::open(path).unwrap();
+                assert_eq!((output.width(), output.height()), (width, height));
+            }
+            None => {
+                assert_eq!(result.status, NodeStatus::Failed);
+                assert!(
+                    result
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("不是一个数字")),
+                    "{:?}",
+                    result.error
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_linked_param_port_overrides_the_param() {
     // 「数字」节点接到「缩放图像」的 percent 端口上：真正生效的是上游那个数字，
     // 节点自己存的那个值被盖掉。
@@ -1432,6 +1518,65 @@ fn transform_with_default_params_is_a_no_op() {
     assert!(
         result.warnings.iter().any(|w| w.contains("原样通过")),
         "什么都没选时会提示原样通过：{:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn transform_stretches_width_and_height_independently() {
+    use crate::nodes::transform as tf;
+
+    let dir = workspace("transform-stretch");
+    let png = image_fixture(&dir, "png", 4, 4);
+
+    let mut workflow = Workflow::new("拉伸");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(tf::KIND);
+    params.insert("mode".into(), serde_json::json!("stretch"));
+    params.insert("stretchWidth".into(), serde_json::json!(200));
+    params.insert("stretchHeight".into(), serde_json::json!(50));
+    workflow.nodes.push(node("tf", tf::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
+
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let path = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "tf")
+        .unwrap()
+        .outputs[0]
+        .path
+        .clone()
+        .unwrap();
+    let out = image::open(path).unwrap();
+    assert_eq!((out.width(), out.height()), (8, 2), "长宽分别按百分比缩放");
+}
+
+#[test]
+fn transform_stretch_at_100_percent_is_a_no_op() {
+    use crate::nodes::transform as tf;
+
+    let dir = workspace("transform-stretch-noop");
+    let png = image_fixture(&dir, "png", 3, 2);
+
+    let mut workflow = Workflow::new("拉伸不变");
+    workflow.nodes.push(input_node("in", &png));
+    let mut params = defaults(tf::KIND);
+    params.insert("mode".into(), serde_json::json!("stretch"));
+    workflow.nodes.push(node("tf", tf::KIND, params));
+    workflow.edges.push(edge("e1", "in", "out", "tf", "image"));
+
+    let report = run_pipeline(&workflow, None, &dir.join("out")).unwrap();
+    assert!(report.ok, "{:?}", report.nodes);
+    let result = report
+        .nodes
+        .iter()
+        .find(|result| result.node_id == "tf")
+        .unwrap();
+    assert!(
+        result.warnings.iter().any(|w| w.contains("原样通过")),
+        "两个方向都是 100% 时应提示原样通过：{:?}",
         result.warnings
     );
 }

@@ -34,9 +34,11 @@ pub fn spec() -> NodeSpec {
                     default: 1.0,
                     min: 1.0,
                     max: MAX_OUTPUTS as f64,
+                    label_prefix: "branch".into(),
+                    default_label: "分支".into(),
                 },
             )
-            .described("接在这个输出上的分支会先跑。按加号增加一个输出，从上到下依次执行。")],
+            .described("接在这个输出上的分支会先跑。左侧文本只是分支注释，不参与运行。")],
             notes: vec![
                 "同步 Sequence：按数字输出序号执行，每个完整分支返回后才开始下一分支。".into(),
             ],

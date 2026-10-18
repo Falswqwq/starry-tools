@@ -148,7 +148,9 @@ impl App {
     }
 
     fn select(&mut self, node_id: &str) {
-        self.graph.selected = self.graph.nodes.iter().position(|node| node.id == node_id);
+        if let Some(index) = self.graph.nodes.iter().position(|node| node.id == node_id) {
+            self.graph.select_only(index);
+        }
     }
 
     /// 成功运行后，把变量节点的最新值写回节点参数，下一轮从这里继续。
@@ -194,6 +196,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         state::bind_ui(&ctx);
+        // 全局 Ctrl/Cmd+S：不依赖画布焦点，文本框里也能直接保存。
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.workspace.save(&self.graph);
+            self.chrome.invalidate_workflows();
+        }
         self.pacer
             .pace(ctx.cumulative_frame_nr(), self.settings.clamped_fps());
         self.runner.poll();
@@ -263,11 +270,6 @@ impl eframe::App for App {
         };
         if let Some(node_id) = self.graph.ui(ui, rect, &self.kinds, &marks, view) {
             self.start_run(Some(node_id), &ctx);
-        }
-        // Ctrl+S：画布把请求挂出来，这里执行落盘。
-        if self.graph.take_save_request() {
-            self.workspace.save(&self.graph);
-            self.chrome.invalidate_workflows();
         }
 
         // ---- 左上 / 右上：浮动控件 ----

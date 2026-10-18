@@ -14,6 +14,7 @@ pub mod read;
 pub mod read_dir;
 pub mod remove_color;
 pub mod rename;
+pub mod repeat;
 pub mod save;
 pub mod sequence;
 pub mod set;
@@ -65,6 +66,7 @@ pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistrationError>
         split::spec(),
         sequence::spec(),
         iterate::spec(),
+        repeat::spec(),
     ] {
         registry.register_node(spec)?;
     }

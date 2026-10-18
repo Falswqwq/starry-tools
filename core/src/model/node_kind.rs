@@ -217,7 +217,7 @@ pub enum ParamSpec {
     Color {
         default: String,
     },
-    /// 一排**动态端口**的参数：存的是**个数**，控件画成一列带序号的端口 + 每行一个删除按钮
+    /// 一排**动态端口**的参数：存的是**个数**，控件画成一列端口 + 每行一个删除按钮
     /// + 底部一个加号。节点的 `outputs_for` 读它，把 `{prefix}{序号}` 一个个列出来。
     ///
     /// 节点**不再手写**这一排输出，而是用这个参数声明 —— 于是加/删输出的交互只写一次，
@@ -228,7 +228,22 @@ pub enum ParamSpec {
         min: f64,
         /// 最多几个 —— 手滑点多了不把版面撑爆。
         max: f64,
+        /// 行首注释文本的参数前缀；为空时不显示可编辑名称。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        label_prefix: String,
+        /// 新增行没有保存过名称时显示的默认前缀，后面会补行号。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        default_label: String,
     },
+}
+
+/// 动态端口行没有保存过名称时的默认注释，例如「分支 1」。
+pub fn ports_row_default_label(default_label: &str, index: usize) -> String {
+    if default_label.is_empty() {
+        index.to_string()
+    } else {
+        format!("{default_label} {index}")
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -453,6 +468,23 @@ impl NodeKind {
                 ParamSpec::Ports { default, .. } => serde_json::json!(default),
             };
             params.insert(def.id.clone(), value);
+
+            if let ParamSpec::Ports {
+                default,
+                label_prefix,
+                default_label,
+                ..
+            } = &def.spec
+            {
+                if !label_prefix.is_empty() {
+                    for index in 1..=(default.round().max(0.0) as usize) {
+                        params.insert(
+                            format!("{label_prefix}{index}"),
+                            serde_json::json!(ports_row_default_label(default_label, index)),
+                        );
+                    }
+                }
+            }
         }
         params
     }

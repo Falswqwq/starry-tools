@@ -55,13 +55,43 @@ Exec 不携带值，不能连接 Data，即使 Data 类型是 `ANY` / `VOID`。
 Data 输入默认最多一条边，`PortDef.multi` 的端口（如变量 Set）可接多条；Data 输出可扇出。
 Exec 输出最多一条边、输入可接受多个来源并分别触发。
 
-Sequence 执行完整分支后才进入下一分支；Loop 用 `body` 控制循环体、`item` 传值、
-`finally` 表示成功完成。调度基于注册的控制流协议，详见 [Blueprint v2](engine-blueprint.md)。
+Sequence 执行完整分支后才进入下一分支；Repeat 用 `body` 重复执行、`index` 传当前轮次；
+Loop 用 `body` 控制循环体、`item` 传值、`finally` 表示成功完成。
+调度基于注册的控制流协议，详见 [Blueprint v2](engine-blueprint.md)。
+
+## 隐式类型转换
+
+两个具体类型之间可以登记一条有方向的转换规则。连线时编辑器与静态检查会认可这条规则，
+运行到该端口时引擎先把值转换过去，再交给节点。没有规则就仍然按类型不匹配报错。
+
+内置规则：
+
+| 源 | 目标 | 说明 |
+| --- | --- | --- |
+| `NUMBER` | `TEXT` | 按普通十进制文本输出 |
+| `TEXT` | `NUMBER` | 去除首尾空白后解析为 `f64`；失败则节点运行失败 |
+
+转换只支持标量具体类型；接口、列表以及“自己转自己”不能登记。方向是显式的，
+注册 `TEXT -> NUMBER` 不会自动产生 `NUMBER -> TEXT`。
+
+扩展通过类型注册器声明自己的转换：
+
+```rust
+registry
+    .types_mut()
+    .register_conversion(from, to, |value| {
+        // value 已经是 from 类型的值；返回 to 类型的值或 NodeError
+        Ok(converted)
+    })?;
+```
+
+转换函数必须是 `Send + Sync`，可以捕获纯数据状态。运行时转换失败会停止该节点，
+不会回退到节点参数里的本地值。
 
 ## 启动期注册
 
 通过 `registry::RegistryBuilder::with_builtins()` 建表，向 `types_mut()` 返回的类型构建器
-调用 `register_trait` / `register_type`。视频的完整示例在
+调用 `register_trait` / `register_type` / `register_conversion`。视频的完整示例在
 `core/src/features/video/mod.rs::register`：同时登记类别、工具、接口、具体类型与节点。
 
 注册输入可以来自 owned 动态 `String`；类型 ID、标签、徽标及扩展名在构建期统一去重驻留，

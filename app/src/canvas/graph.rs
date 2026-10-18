@@ -12,7 +12,7 @@ use crate::state::{dialog, models::Downloads};
 use eframe::egui::{self, Pos2, Rect, Sense};
 use starrytools_core::engine::RunReport;
 use starrytools_core::model::node_kind::NodeKindInfo;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// 节点的显示尺寸（流坐标，不含缩放）。
 pub(crate) const NODE_W: f32 = 216.0;
@@ -92,11 +92,23 @@ pub(crate) const NOTICE_STACK: f32 = 5.0;
 /// 收刀时刀尖再往前送多远（屏幕像素）。
 const OVERTAKE_REACH: f32 = 160.0;
 
+/// 空白处拉出的选择框。
+struct Marquee {
+    start: Pos2,
+    current: Pos2,
+    /// 按 Ctrl 时保留拖动前的选择。
+    base: BTreeSet<usize>,
+}
+
 /// 交互瞬态：这一帧正被抓住的东西、正在拉的线、右键菜单、刀光。
 #[derive(Default)]
 struct Interaction {
-    /// 这一帧被抓住的节点。`None` 表示抓的是空白处（= 平移画布）。
+    /// 这一帧被抓住的节点（组拖动的起点）。
     grabbed: Option<usize>,
+    /// 空白处正在拉的选择框。
+    marquee: Option<Marquee>,
+    /// 中键拖动平移中。
+    panning: bool,
     /// 指针底下的端口，用来放大高亮。
     hovered_port: Option<PortRef>,
     /// 正在从某个端口往外拉线。
@@ -105,6 +117,12 @@ struct Interaction {
     menu: Option<(usize, Pos2)>,
     /// 一道刀光。
     slash: Option<Slash>,
+    /// 上一帧的指针位置。
+    ///
+    /// 手势的跟手不能用 `Response::drag_delta()`：egui 把「一次拖拽」绑在整只指针上，
+    /// 同时按住中键和左键时，任意一键松开都会结束那次拖拽，之后左键还按着也收不到
+    /// 位移。这里自己记一帧位置，增量只取决于指针真的走了多远。
+    pointer_trail: Option<Pos2>,
 }
 
 /// 按节点 id 索引的贴图缓存。
@@ -143,8 +161,8 @@ pub struct Graph {
     /// 后台快照版本，不参与文档 dirty/语义检查。
     tool_revision: Option<u64>,
     ports_revision: Option<u64>,
-    /// 当前选中的节点（`运行至此` 认它）。
-    pub selected: Option<usize>,
+    /// 当前选中的节点集合。顺序按节点层级下标排列，便于稳定遍历。
+    pub selected: BTreeSet<usize>,
     /// 交互瞬态（抓住的节点 / 端口 / 菜单 / 刀光）。
     interaction: Interaction,
     /// 按节点 id 索引的贴图缓存。
@@ -154,9 +172,7 @@ pub struct Graph {
     /// 点了卡片上的「运行至此」：这个节点 id 要交给调用方去跑。
     pending_run: Option<String>,
     /// Ctrl+C 复制的节点。
-    clipboard: Option<Node>,
-    /// Ctrl+S：交给外壳去落盘。
-    save_requested: bool,
+    clipboard: Vec<Node>,
     /// 参数说明 / 运行提示的**折行结果**（流坐标），键是原文。
     ///
     /// 折行在缩放前就定死，画的时候只按 `zoom` 缩放 —— 否则每换一个字号就要
@@ -204,6 +220,40 @@ impl Graph {
     /// 静态检查的缓存键（只有语义改动会变）。
     pub fn check_revision(&self) -> u64 {
         self.check_revision
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
+    }
+
+    /// 清空选择。
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+    }
+
+    /// 只选中一个节点。
+    pub fn select_only(&mut self, index: usize) {
+        self.selected.clear();
+        self.selected.insert(index);
+    }
+
+    /// Ctrl 点击：在选中集合里切换。
+    pub fn toggle_selection(&mut self, index: usize) {
+        if !self.selected.remove(&index) {
+            self.selected.insert(index);
+        }
+    }
+
+    /// 把拖动位移套到所有选中节点上。
+    fn move_selected_by(&mut self, delta: egui::Vec2) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let selected: Vec<_> = self.selected.iter().copied().collect();
+        for index in selected {
+            self.nodes[index].pos += delta;
+        }
+        self.touch();
     }
 
     pub fn ui(

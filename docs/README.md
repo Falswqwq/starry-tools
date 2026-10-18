@@ -54,7 +54,7 @@ Exec 线控制副作用，Data 线只传值，二者不可混接。
 | [色彩分析](nodes/palette.md) | `color_analysis` | 抽色板：按主色归类，或数每种颜色多少像素（输出是一段 hex 文本） |
 | [颜色剔除](nodes/remove_color.md) | `remove_color` | 把跟目标色相近的像素抠成透明 |
 | [背景移除](nodes/background_removal.md) | `background_removal` | 用 AI 模型抠背景（仅 onnx feature，模型按需下载） |
-| [图像变换](nodes/transform.md) | `transform_image` | 翻转（左右 / 上下）与旋转（90° / 180° / 270°） |
+| [图像变换](nodes/transform.md) | `transform_image` | 翻转、旋转，或按长宽比例分别拉伸 |
 | [缩放图像](nodes/upscale.md) | `upscale` | 缩放到原来的百分之 n，像素画配「邻近」插值 |
 | [图像分割](nodes/split.md) | `split_image` | 按透明部分把 sprite 图切成多张（输出 `List[Png]`） |
 
@@ -67,6 +67,7 @@ Loop 当前也只支持同步执行。它们的边线是**暗蓝色**（像紫�
 | --- | --- | --- |
 | [顺序执行](nodes/sequence.md) | `sequence` | 把接到各输出上的分支按序号从上到下依次执行（输出个数可增删） |
 | [遍历](nodes/iterate.md) | `iterate` | `body` 触发循环体、`item` 传值，成功后走 completed |
+| [重复执行](nodes/repeat.md) | `repeat` | 按次数重复循环体，`index` 输出当前轮次，成功后走 completed |
 
 ### 视频
 

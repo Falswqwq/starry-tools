@@ -23,6 +23,7 @@ use crate::model::port_type::{ImageFormat, PortType};
 use crate::model::value::{human_size, one_output, NodeArgs, Value, ValueMap};
 use crate::png_opt;
 use crate::png_quant;
+use crate::progress::NodeStep;
 use crate::registry::NodeSpec;
 
 pub const KIND: &str = "compress_image";
@@ -239,7 +240,48 @@ fn lossless(
 
     // 输入本来就是 PNG 的话，把原始字节给它：既能搬颜色相关的块，也能比大小。
     let source_png = (source.format() == ImageFormat::Png).then(|| source.bytes());
-    let optimized = png_opt::optimize(decoded, source_png, &png_opt::Options::new(scheme, strip))?;
+    let mut progress = |stage| match stage {
+        png_opt::Stage::Analyze => args.report(NodeStep {
+            fraction: Some(0.02),
+            text: Some("分析图像".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Candidates { done, total } => {
+            let fraction = if total == 0 {
+                0.05
+            } else {
+                0.05 + 0.75 * done as f32 / total as f32
+            };
+            args.report(NodeStep {
+                fraction: Some(fraction),
+                frame: Some(done as u64),
+                total_frames: Some(total as u64),
+                unit: Some("候选".into()),
+                text: Some("尝试 PNG 编码方案".into()),
+            });
+        }
+        png_opt::Stage::Zopfli => args.report(NodeStep {
+            fraction: None,
+            text: Some("Zopfli 压缩中…".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Metadata => args.report(NodeStep {
+            fraction: Some(0.85),
+            text: Some("搬运元数据".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Verify => args.report(NodeStep {
+            fraction: Some(0.95),
+            text: Some("逐像素校验".into()),
+            ..Default::default()
+        }),
+    };
+    let optimized = png_opt::optimize_with_progress(
+        decoded,
+        source_png,
+        &png_opt::Options::new(scheme, strip),
+        &mut progress,
+    )?;
 
     match optimized.saved_ratio() {
         Some(ratio) if optimized.improved => args.warn(format!(
@@ -296,13 +338,55 @@ fn palette(
     decoded: &DynamicImage,
 ) -> Result<ImageValue, NodeError> {
     let limit = params::integer(args.params, PARAM_COLORS, 64).clamp(2, 256) as usize;
+    args.report(NodeStep {
+        fraction: None,
+        text: Some("量化颜色…".into()),
+        ..Default::default()
+    });
     let quantized = png_quant::quantize(decoded, limit);
 
     // 量化之后颜色很少，无损优化会自己挑中索引色编码。
-    let optimized = png_opt::optimize(
+    let mut progress = |stage| match stage {
+        png_opt::Stage::Analyze => args.report(NodeStep {
+            fraction: Some(0.55),
+            text: Some("分析量化结果".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Candidates { done, total } => {
+            let fraction = if total == 0 {
+                0.55
+            } else {
+                0.55 + 0.35 * done as f32 / total as f32
+            };
+            args.report(NodeStep {
+                fraction: Some(fraction),
+                frame: Some(done as u64),
+                total_frames: Some(total as u64),
+                unit: Some("候选".into()),
+                text: Some("编码索引色 PNG".into()),
+            });
+        }
+        png_opt::Stage::Zopfli => args.report(NodeStep {
+            fraction: None,
+            text: Some("Zopfli 压缩中…".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Metadata => args.report(NodeStep {
+            fraction: Some(0.92),
+            text: Some("搬运元数据".into()),
+            ..Default::default()
+        }),
+        png_opt::Stage::Verify => args.report(NodeStep {
+            fraction: Some(0.97),
+            text: Some("逐像素校验".into()),
+            ..Default::default()
+        }),
+    };
+    let optimized = png_opt::optimize_with_progress(
         &quantized,
         None,
         &png_opt::Options::new(png_opt::Scheme::Balanced, png_opt::Strip::Safe),
+        &mut progress,
     )?;
 
     args.warn(format!(

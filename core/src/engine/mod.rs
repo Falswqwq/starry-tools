@@ -296,9 +296,9 @@ fn analyze(registry: &Registry, workflow: &Workflow) -> Analysis {
             .iter()
             .find(|p| p.id == edge.source_port)
             .unwrap();
-        if source_port.exec != target_port.exec
-            || (!target_port.exec && !target_port.ty.accepts(source_type))
-        {
+        let type_ok = target_port.ty.accepts(source_type)
+            || registry.types().can_convert(source_type, target_port.ty);
+        if source_port.exec != target_port.exec || (!target_port.exec && !type_ok) {
             issues.push(
                 Issue::error(format!(
                     "类型不匹配：「{}」需要{}，而连过来的是{}",
@@ -430,10 +430,10 @@ impl Exec<'_> {
     ///
     /// 多条 Set 连线按上游实际运行的顺序写入，后到的覆盖先到的；
     /// 写入不会反向触发任何节点。
-    fn publish_variable_writes(&mut self, node_id: &str, outputs: &ValueMap) {
+    fn publish_variable_writes(&mut self, node_id: &str, outputs: &ValueMap) -> Result<(), String> {
         let edges: Vec<_> = self.workflow.outgoing(node_id).cloned().collect();
         for edge in edges {
-            let Some(value) = outputs.get(&edge.source_port) else {
+            let Some(source_value) = outputs.get(&edge.source_port) else {
                 continue;
             };
             let Some(target) = self.workflow.node(&edge.target) else {
@@ -450,16 +450,31 @@ impl Exec<'_> {
             }
             let mut params = spec.kind.default_params();
             params.extend(target.params.clone());
-            let accepted = spec
+            let Some(port) = spec
                 .inputs_for(&params)
                 .into_iter()
                 .find(|port| port.id == variable.set)
-                .is_some_and(|port| port.ty.strictly_accepts(value.port_type()));
-            if accepted {
-                self.variable_values
-                    .insert(edge.target.clone(), value.clone());
-            }
+            else {
+                continue;
+            };
+            let value = if port.ty.strictly_accepts(source_value.port_type()) {
+                source_value.clone()
+            } else {
+                match self.registry.types().convert_value(
+                    source_value.port_type(),
+                    port.ty,
+                    source_value,
+                ) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        return Err(format!("变量 Set 隐式转换失败：{}", error.0));
+                    }
+                }
+            };
+            self.variable_values.insert(edge.target.clone(), value);
         }
+        Ok(())
     }
 
     /// 参数连线与普通输入共用失败传播和运行期类型检查。
@@ -495,7 +510,7 @@ impl Exec<'_> {
                 self.run_node(&edge.source, &[], false);
                 self.evaluating.remove(&edge.source);
             }
-            let value = self
+            let source_value = self
                 .values
                 .get(&edge.source)
                 .and_then(|v| v.get(&edge.source_port))
@@ -505,12 +520,34 @@ impl Exec<'_> {
                         format!("数据源 {} 未执行或已离开循环作用域", edge.source),
                     )
                 })?;
-            if !port.ty.strictly_accepts(value.port_type()) {
-                return Err((
-                    NodeStatus::Failed,
-                    format!("输入 {} 运行时类型不匹配", port.id),
-                ));
-            }
+            let value = if port.ty.strictly_accepts(source_value.port_type()) {
+                source_value.clone()
+            } else {
+                match self.registry.types().convert_value(
+                    source_value.port_type(),
+                    port.ty,
+                    source_value,
+                ) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => {
+                        return Err((
+                            NodeStatus::Failed,
+                            format!(
+                                "输入 {} 运行时类型不匹配（{} → {}）",
+                                port.label,
+                                source_value.port_type().label(),
+                                port.ty.label()
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err((
+                            NodeStatus::Failed,
+                            format!("输入 {} 隐式转换失败：{}", port.label, error.0),
+                        ));
+                    }
+                }
+            };
             if let Some(param) = &port.param {
                 params.insert(
                     param.clone(),
@@ -519,7 +556,7 @@ impl Exec<'_> {
                         .ok_or_else(|| (NodeStatus::Failed, "参数值不可序列化".into()))?,
                 );
             } else {
-                inputs.insert(port.id.clone(), value.clone());
+                inputs.insert(port.id.clone(), value);
             }
         }
         Ok((params, inputs))
@@ -627,8 +664,15 @@ impl Exec<'_> {
                         palette,
                     });
                 }
-                self.publish_variable_writes(node_id, &outputs);
-                self.values.insert(node_id.to_string(), outputs);
+                match self.publish_variable_writes(node_id, &outputs) {
+                    Ok(()) => {
+                        self.values.insert(node_id.to_string(), outputs);
+                    }
+                    Err(error) => {
+                        result.status = NodeStatus::Failed;
+                        result.error = Some(error);
+                    }
+                }
             }
             Err(error) => {
                 result.status = NodeStatus::Failed;

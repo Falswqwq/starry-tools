@@ -20,6 +20,7 @@ use crate::model::params;
 use crate::model::port_type::{ImageFormat, PortType};
 use crate::model::value::{one_output, palette_text, NodeArgs, Value, ValueMap};
 use crate::palette::{self, Algorithm};
+use crate::progress::NodeStep;
 use crate::registry::NodeSpec;
 
 pub const KIND: &str = "color_analysis";
@@ -137,6 +138,11 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
     let mode = params::string(args.params, PARAM_MODE, MODE_EXTRACT);
     let colors = match mode.as_str() {
         MODE_COUNT => {
+            args.report(NodeStep {
+                fraction: None,
+                text: Some("统计颜色…".into()),
+                ..Default::default()
+            });
             let threshold = params::integer(args.params, PARAM_THRESHOLD, 16).clamp(0, 255) as u8;
             counted_colors(&rgba, threshold)
         }
@@ -145,7 +151,26 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
                 params::integer(args.params, PARAM_COLORS, 8).clamp(2, MAX_COLORS) as usize;
             let algorithm =
                 Algorithm::parse(&params::string(args.params, PARAM_ALGORITHM, "kmeans"));
-            palette::extract(&decoded, wanted, algorithm)
+            args.report(NodeStep {
+                fraction: None,
+                text: Some("分析颜色…".into()),
+                ..Default::default()
+            });
+            let mut progress = |done: usize, total: usize| {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                args.report(NodeStep {
+                    fraction: Some(fraction),
+                    frame: Some(done as u64),
+                    total_frames: Some(total as u64),
+                    unit: Some("轮".into()),
+                    text: Some("聚类迭代".into()),
+                });
+            };
+            palette::extract_with_progress(&decoded, wanted, algorithm, &mut progress)
         }
     };
 

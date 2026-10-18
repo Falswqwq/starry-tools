@@ -123,6 +123,9 @@ impl Graph {
             self.touch_content();
         }
 
+        // ---- 空白处框选 ----
+        self.draw_marquee(&painter);
+
         // ---- 刀光在最上面 ----
         self.draw_slash(&painter, now);
 
@@ -611,6 +614,24 @@ impl Graph {
         }
     }
 
+    /// 空白处拉出的选择框。
+    fn draw_marquee(&self, painter: &egui::Painter) {
+        let Some(marquee) = &self.interaction.marquee else {
+            return;
+        };
+        let rect = Rect::from_two_pos(marquee.start, marquee.current);
+        if rect.width() < 1.0 && rect.height() < 1.0 {
+            return;
+        }
+        painter.rect_filled(rect, CornerRadius::same(2), theme::accent_alpha(0.08));
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(2),
+            Stroke::new(1.0, theme::accent_alpha(0.7)),
+            StrokeKind::Inside,
+        );
+    }
+
     /// 只画卡片的投影。单独一遍，为了不和别的卡片的填色打架。
     pub(super) fn draw_node_shadow(
         &self,
@@ -710,7 +731,7 @@ impl Graph {
         // 状态 + 工具（鼠标悬停或选中才露出工具）。
         let hovered =
             pointer.is_some_and(|p| r.contains(p)) && self.hovered_node(kinds, pointer) == Some(i);
-        let show_tools = hovered || self.selected == Some(i);
+        let show_tools = hovered || (self.is_selected(i) && self.selected.len() == 1);
         let (play_rect, del_rect) = self.node_tool_rects(kinds, i);
         let can_run = self.can_run_node(kinds, i);
         let right_edge = if show_tools {
@@ -909,9 +930,10 @@ impl Graph {
                     Some(fraction) => format!("{}%", (fraction * 100.0).round() as i32),
                     None => "…".to_string(),
                 };
+                let unit = step.unit.as_deref().unwrap_or("帧");
                 let left_text = match (step.frame, step.total_frames) {
-                    (Some(frame), Some(total)) => format!("帧 {frame}/{total}"),
-                    (Some(frame), None) => format!("帧 {frame}"),
+                    (Some(frame), Some(total)) => format!("{unit} {frame}/{total}"),
+                    (Some(frame), None) => format!("{unit} {frame}"),
                     _ => "处理中".to_string(),
                 };
                 let right_text = match &step.text {
@@ -1098,7 +1120,7 @@ impl Graph {
 
         // 卡片边线最后画 —— 否则会被参数区那层铺满整宽的灰底盖住（失败时尤其明显）。
         painter.rect_stroke(r, cr, Stroke::new(border_width, border), StrokeKind::Inside);
-        if self.selected == Some(i) {
+        if self.is_selected(i) {
             painter.rect_stroke(
                 r.expand(2.5),
                 CornerRadius::same(theme::R_CARD + 2),

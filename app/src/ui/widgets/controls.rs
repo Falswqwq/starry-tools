@@ -49,6 +49,8 @@ pub(crate) fn ports_height(rows: usize) -> f32 {
 pub(crate) enum ControlEvent {
     /// 本参数被改了。
     Changed(Value),
+    /// 改了**另一个**参数（动态端口行上的注释名等）。
+    SetOther { param: String, value: Value },
     /// 用户点了文件 / 目录框，要开一个选择框。
     PickFile {
         title: String,
@@ -183,7 +185,14 @@ fn ports_field(
     zoom: f32,
     disabled: bool,
 ) -> Option<ControlEvent> {
-    let ParamSpec::Ports { min, max, .. } = &param.spec else {
+    let ParamSpec::Ports {
+        min,
+        max,
+        label_prefix,
+        default_label,
+        ..
+    } = &param.spec
+    else {
         unreachable!("ports_field requires a Ports parameter");
     };
     let (min, max) = (*min as usize, *max as usize);
@@ -208,14 +217,68 @@ fn ports_field(
                 theme::SURFACE
             },
         );
-        // 序号（从上到下 1、2、3……）。
-        painter.text(
-            egui::pos2(row.left() + 9.0 * zoom, row.center().y),
-            Align2::LEFT_CENTER,
-            format!("{}", k + 1),
-            FontId::monospace(11.0 * zoom),
-            theme::INK_2,
-        );
+        // 行首：可编辑的分支注释名。没有注册名称前缀时退回序号。
+        if label_prefix.is_empty() {
+            painter.text(
+                egui::pos2(row.left() + 9.0 * zoom, row.center().y),
+                Align2::LEFT_CENTER,
+                format!("{}", k + 1),
+                FontId::monospace(11.0 * zoom),
+                theme::INK_2,
+            );
+        } else {
+            let key = format!("{label_prefix}{}", k + 1);
+            let saved = params
+                .get(&key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    starrytools_core::model::node_kind::ports_row_default_label(
+                        default_label,
+                        k + 1,
+                    )
+                });
+            let right = if !disabled && k >= min {
+                row.right() - 26.0 * zoom
+            } else {
+                row.right() - 8.0 * zoom
+            };
+            let field = Rect::from_min_max(
+                egui::pos2(row.left() + 8.0 * zoom, row.top() + 2.0 * zoom),
+                egui::pos2(right, row.bottom() - 2.0 * zoom),
+            );
+            if disabled {
+                painter.text(
+                    egui::pos2(field.left(), field.center().y),
+                    Align2::LEFT_CENTER,
+                    saved,
+                    FontId::monospace(theme::FONT_CONTROL * zoom),
+                    theme::INK_3,
+                );
+            } else {
+                let mut draft = saved;
+                let hint = starrytools_core::model::node_kind::ports_row_default_label(
+                    default_label,
+                    k + 1,
+                );
+                let resp = ui.put(
+                    field,
+                    egui::TextEdit::singleline(&mut draft)
+                        .id(id.with(("branch", k)))
+                        .frame(egui::Frame::NONE)
+                        .font(FontId::monospace(theme::FONT_CONTROL * zoom))
+                        .text_color(theme::INK_2)
+                        .hint_text(hint)
+                        .desired_width(field.width()),
+                );
+                if resp.changed() {
+                    event = Some(ControlEvent::SetOther {
+                        param: key,
+                        value: serde_json::json!(draft),
+                    });
+                }
+            }
+        }
 
         // 前 `min` 个是必留的，不给删除按钮。
         if !disabled && k >= min {
@@ -484,6 +547,13 @@ pub(crate) fn text_field(
 
     let mut value = value.to_string();
     let inner = theme::control_inner(rect, zoom);
+    let font = FontId::monospace(theme::FONT_CONTROL * zoom);
+    // 多行文本按字符断行（等价于 CSS 的 break-all），长串 ASCII / 路径也能在框内折开。
+    let text_color = ui.visuals().text_color();
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let job = multiline_layout(text.as_str(), font.clone(), text_color, wrap_width);
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
+    };
     // 内容超过最多行数：框不再长高，改成框内滚动。
     let scrolling = multiline && crate::canvas::layout::multiline_scrolls(&value);
     // 滚动时右侧要让出一条滚动条的位置，文字按窄一点折行，免得被挡。
@@ -503,11 +573,14 @@ pub(crate) fn text_field(
     if let Some(hint) = placeholder {
         widget = widget.hint_text(hint);
     }
-    let widget = widget
+    let mut widget = widget
         .id(id)
         .frame(egui::Frame::NONE)
-        .font(FontId::monospace(theme::FONT_CONTROL * zoom))
+        .font(font.clone())
         .desired_width(text_width);
+    if multiline {
+        widget = widget.layouter(&mut layouter);
+    }
     let resp = if scrolling {
         // 把文本框放进一个纵向滚动区，高度定死在框的大小 —— 内容再多就在框内滚。
         ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -527,6 +600,20 @@ pub(crate) fn text_field(
     } else {
         None
     }
+}
+
+/// 多行文本框的布局：强制按字符断行，而不是等一个单词结束。
+fn multiline_layout(
+    text: &str,
+    font: FontId,
+    color: Color32,
+    wrap_width: f32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, wrap_width);
+    job.wrap.break_anywhere = true;
+    // 和 TextEdit 默认布局一致：行尾空格保留，输入过程中不跳。
+    job.keep_trailing_whitespace = true;
+    job
 }
 
 /// 颜色控件（收起时）那条色条的高度（流坐标）。
@@ -1576,9 +1663,23 @@ mod tests {
                 default: 5.0,
                 min: 2.0,
                 max: 9.0,
+                label_prefix: String::new(),
+                default_label: String::new(),
             },
         );
         assert_eq!(ports_count(&Params::new(), &custom), 5);
+    }
+
+    #[test]
+    fn multiline_layout_breaks_anywhere() {
+        let job = multiline_layout(
+            "averylongunbrokenpath/without/spaces",
+            FontId::monospace(12.0),
+            Color32::WHITE,
+            40.0,
+        );
+        assert!(job.wrap.break_anywhere, "长单词也必须能折行");
+        assert!(job.keep_trailing_whitespace);
     }
 
     #[test]
@@ -1590,6 +1691,8 @@ mod tests {
                 default: 3.0,
                 min: 1.0,
                 max: 8.0,
+                label_prefix: String::new(),
+                default_label: String::new(),
             },
         );
         let params: Params = [("count".to_string(), serde_json::json!(3.0))]

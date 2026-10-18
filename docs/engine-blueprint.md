@@ -32,13 +32,16 @@
 变量节点通常配 `.pure()`；引擎用参数初始化状态，Get 返回当前状态，Set 由数据写入。
 Set 端口的 `PortDef.multi` 必须为真，才允许一个输入接多条线。
 
-`ControlFlow::Sequence { output_prefix }` 与 `ControlFlow::Loop { list_input, item_output, body_output, finally_output, max_param }` 描述自定义端口协议。引擎仅消费协议，不识别具体 kind。普通节点最多一个 Exec 输出；多个输出必须声明控制协议。端口与控制声明不一致在 resolve 时诊断。
+`ControlFlow::Sequence { output_prefix }`、`ControlFlow::Repeat { count_param, index_output, body_output, finally_output }`
+与 `ControlFlow::Loop { list_input, item_output, body_output, finally_output, max_param }` 描述自定义端口协议。引擎仅消费协议，不识别具体 kind。普通节点最多一个 Exec 输出；多个输出必须声明控制协议。端口与控制声明不一致在 resolve 时诊断。
 
 ## 运行语义和限制
 
 纯节点每次消费重新计算，无跨消费者缓存；变量 Get 读取的是当前运行状态，因此后续读取能看到已写入的新值。已连接的 Data 缺失或类型错误必须失败，不回退到本地参数值；未连接可选参数才使用默认/本地值。
 
-Loop 每轮保存并恢复父运行帧；变量状态不随帧回滚。嵌套循环能读外层 item，循环内数据产物离开该帧后不可消费。数据边从不扩张执行作用域。作用域逃逸目前在运行时诊断，而非完整静态支配分析；跨循环传值应使用变量节点。
+Repeat 按 `count_param` 重复循环体，每轮通过 `index_output` 提供 0 起序号；
+`finally` 只在全部轮次成功后触发。Loop 每轮保存并恢复父运行帧；变量状态不随帧回滚。
+嵌套循环能读外层 item，循环内数据产物离开该帧后不可消费。数据边从不扩张执行作用域。作用域逃逸目前在运行时诊断，而非完整静态支配分析；跨循环传值应使用变量节点。
 
 执行完全同步串行；Sequence 本身固定按分支顺序阻塞执行，没有行内开关或非阻塞模式。失败停止后续分支/轮次，不继续产生副作用。Exec 活跃路径环、深度超过 256、触发数超过 100000 会失败；纯数据环及过深依赖也失败。回调自身的阻塞/超时仍由回调负责。没有异步取消、事务回滚或自动重试。
 

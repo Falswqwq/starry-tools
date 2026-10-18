@@ -202,6 +202,16 @@ impl Optimized {
 // 入口
 // ---------------------------------------------------------------------------
 
+/// 优化过程中的粗粒度阶段，用于界面进度条。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Analyze,
+    Candidates { done: usize, total: usize },
+    Zopfli,
+    Metadata,
+    Verify,
+}
+
 /// 把一张图编成尽可能小的无损 PNG。
 ///
 /// `source_png` 是输入本来就是 PNG 时的原始字节：只用来搬运颜色相关的元数据块，
@@ -211,10 +221,23 @@ pub fn optimize(
     source_png: Option<&[u8]>,
     options: &Options,
 ) -> Result<Optimized, NodeError> {
+    optimize_with_progress(image, source_png, options, &mut |_| {})
+}
+
+/// 和 [`optimize`] 相同，但在关键阶段回调一次进度。
+///
+/// 回调粒度是「分析 / 每个候选 / Zopfli / 元数据 / 校验」，不会逐像素打扰 UI。
+pub fn optimize_with_progress(
+    image: &DynamicImage,
+    source_png: Option<&[u8]>,
+    options: &Options,
+    progress: &mut dyn FnMut(Stage),
+) -> Result<Optimized, NodeError> {
     if image.width() == 0 || image.height() == 0 {
         return Err(NodeError::new("图像是空的，没法编码"));
     }
 
+    progress(Stage::Analyze);
     let before = source_png.map(<[u8]>::len);
     let analysis = Analysis::of(image);
     let mut specs = analysis.specs();
@@ -225,13 +248,19 @@ pub fn optimize(
 
     let filters = options.scheme.filters();
     let compression = options.scheme.compression();
+    let total = specs.len() * filters.len();
+    let mut done = 0usize;
+    progress(Stage::Candidates { done, total });
 
     // 每个颜色方案 × 每种 filter 都真的编一遍，留最小的那个。
     let mut best: Option<(Vec<u8>, String)> = None;
     for spec in &specs {
         let candidate = analysis.materialize(spec);
         for filter in filters {
-            let Ok(bytes) = encode(&candidate, *filter, compression) else {
+            let encoded = encode(&candidate, *filter, compression);
+            done += 1;
+            progress(Stage::Candidates { done, total });
+            let Ok(bytes) = encoded else {
                 continue;
             };
             let better = best
@@ -253,6 +282,7 @@ pub fn optimize(
 
     // 极限档：把 IDAT 整条解出来交给 zopfli 重压。
     if options.scheme.uses_zopfli() {
+        progress(Stage::Zopfli);
         if let Ok(packed) = recompress_with_zopfli(&best) {
             if packed.len() < best.len() {
                 best = packed;
@@ -261,10 +291,12 @@ pub fn optimize(
         }
     }
 
+    progress(Stage::Metadata);
     // 搬元数据。
     best = splice_metadata(&best, source_png, options.strip);
 
     // 最后一道保险：逐像素比对。
+    progress(Stage::Verify);
     let verified = verify(image, &best);
     if options.verify && !verified {
         return Err(NodeError::new("优化后的像素和原图对不上，这次优化已放弃"));

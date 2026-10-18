@@ -204,6 +204,27 @@ fn a_cjk_note_is_estimated_as_multiple_lines() {
     assert!(estimate_wrapped_height("越大越慢越小。", NODE_W - 20.0) < 26.0);
 }
 
+#[test]
+fn multiline_text_grows_with_content_then_scrolls_at_the_cap() {
+    let short = "hello";
+    let taller = "hello\nworld\nagain\nand\nagain";
+    assert!(multiline_rows(taller) > multiline_rows(short));
+    assert!(multiline_height(taller) > multiline_height(short));
+    assert!(!multiline_scrolls(taller));
+
+    // 没有空格的超长串也必须按字符折行，并在超过上限后改为滚动。
+    let long = "verylongunbrokenstring".repeat(400);
+    let longer = "verylongunbrokenstring".repeat(800);
+    assert!(multiline_rows(&long) > multiline_rows(taller));
+    assert!(multiline_scrolls(&long));
+    assert_eq!(multiline_rows(&long), multiline_rows(&longer));
+    assert_eq!(
+        multiline_height(&long),
+        multiline_height(&longer),
+        "到达上限后高度不再增长"
+    );
+}
+
 /// 换目标格式之后，节点的输出端口必须跟着变。
 ///
 /// 这条是实际踩过的坑：端口原本是在建节点时从 catalog 抄一份，之后再也
@@ -413,13 +434,12 @@ fn canvas(kind_ids: &[&str]) -> Graph {
         check_revision: 0,
         tool_revision: None,
         ports_revision: None,
-        selected: None,
+        selected: std::collections::BTreeSet::new(),
         interaction: Interaction::default(),
         textures: Textures::default(),
         anim: Anim::default(),
         pending_run: None,
-        clipboard: None,
-        save_requested: false,
+        clipboard: Vec::new(),
         notes: HashMap::new(),
         run_marks_hidden: false,
         downloads: Downloads::default(),
@@ -483,7 +503,7 @@ fn an_output_links_to_an_input() {
     assert_eq!(graph.wires[0].from_port, graph.nodes[0].outputs[0].id);
     assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[1].id);
     assert_eq!(graph.revision, 1, "接上一条线要算改动");
-    assert_eq!(graph.selected, Some(1), "接完顺手选上落点那个节点");
+    assert!(graph.is_selected(1), "接完顺手选上落点那个节点");
 }
 
 /// 一个节点不能给自己接线。
@@ -622,6 +642,107 @@ fn a_type_mismatch_is_rejected() {
     );
 }
 
+#[test]
+fn declared_implicit_conversions_are_linkable_in_both_directions() {
+    let number_to_text = canvas(&["literal_number", "literal_text"]);
+    assert!(number_to_text.can_link(out(0, 0), input(1, 0)));
+
+    let text_to_number = canvas(&["literal_text", "literal_number"]);
+    assert!(text_to_number.can_link(out(0, 0), input(1, 0)));
+}
+
+#[test]
+fn marquee_touches_one_way_and_contains_the_other() {
+    let kinds = crate::catalog::all();
+    let mut graph = canvas(&["read", "read"]);
+    let first = graph.screen_rect(&kinds, 0);
+    let second = graph.screen_rect(&kinds, 1);
+
+    // 起点在左侧：碰到就算。
+    graph.interaction.marquee = Some(Marquee {
+        start: egui::pos2(first.left() - 5.0, first.top() - 5.0),
+        current: egui::pos2(second.right() + 5.0, second.bottom() + 5.0),
+        base: Default::default(),
+    });
+    graph.update_marquee_selection(&kinds);
+    assert!(graph.is_selected(0) && graph.is_selected(1));
+
+    // 起点在右侧：只选完全包含；把终点拖进第一个节点内部，两个都不完整。
+    graph.interaction.marquee = Some(Marquee {
+        start: egui::pos2(second.right() + 5.0, second.bottom() + 5.0),
+        current: egui::pos2(first.left() + 30.0, first.center().y),
+        base: Default::default(),
+    });
+    graph.update_marquee_selection(&kinds);
+    assert!(graph.selected.is_empty());
+
+    // 从右往左完整框住两个节点。
+    graph.interaction.marquee = Some(Marquee {
+        start: egui::pos2(second.right() + 5.0, second.bottom() + 5.0),
+        current: egui::pos2(first.left() - 5.0, first.top() - 5.0),
+        base: Default::default(),
+    });
+    graph.update_marquee_selection(&kinds);
+    assert!(graph.is_selected(0) && graph.is_selected(1));
+}
+
+#[test]
+fn ctrl_marquee_keeps_the_selection_it_started_with() {
+    let kinds = crate::catalog::all();
+    let mut graph = canvas(&["read", "read", "read"]);
+    graph.select_only(0);
+    let third = graph.screen_rect(&kinds, 2);
+
+    // 框只罩住第三个；base 里已有的第一个应该保留，没碰到的第二个不该被选中。
+    let base = graph.selected.clone();
+    graph.interaction.marquee = Some(Marquee {
+        start: egui::pos2(third.left() - 5.0, third.top() - 5.0),
+        current: egui::pos2(third.right() + 5.0, third.bottom() + 5.0),
+        base,
+    });
+    graph.update_marquee_selection(&kinds);
+    assert!(graph.is_selected(0) && graph.is_selected(2));
+    assert!(!graph.is_selected(1));
+}
+
+#[test]
+fn bringing_a_selected_node_to_front_keeps_the_whole_selection() {
+    let mut graph = canvas(&["read", "read", "read"]);
+    let ids: Vec<_> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    graph.select_only(0);
+    graph.toggle_selection(2);
+
+    let moved = graph.bring_to_front(0);
+
+    assert_eq!(moved, 2);
+    assert_eq!(graph.nodes[2].id, ids[0], "被拖的节点到了最上层");
+    assert!(graph.is_selected(1) && graph.is_selected(2));
+    assert_eq!(
+        graph.nodes[1].id, ids[2],
+        "另一个选中节点的下标也要跟着换算"
+    );
+    assert!(!graph.is_selected(0));
+    assert_eq!(graph.nodes[0].id, ids[1], "未选中节点不受影响");
+}
+
+#[test]
+fn ctrl_toggle_and_group_move_follow_the_selection_set() {
+    let mut graph = canvas(&["read", "read", "read"]);
+    graph.select_only(0);
+    graph.toggle_selection(1);
+    assert!(graph.is_selected(0) && graph.is_selected(1));
+    graph.toggle_selection(0);
+    assert!(!graph.is_selected(0) && graph.is_selected(1));
+
+    let before: Vec<_> = graph.nodes.iter().map(|node| node.pos).collect();
+    graph.select_only(0);
+    graph.toggle_selection(2);
+    graph.move_selected_by(egui::vec2(10.0, 5.0));
+    assert_eq!(graph.nodes[0].pos, before[0] + egui::vec2(10.0, 5.0));
+    assert_eq!(graph.nodes[2].pos, before[2] + egui::vec2(10.0, 5.0));
+    assert_eq!(graph.nodes[1].pos, before[1], "未选中节点不该移动");
+}
+
 // ---- 节点右键菜单的两件事 ----
 
 /// 删掉一个节点，接在它身上的连线要一起断，剩下连线的下标要跟着往前挪。
@@ -639,7 +760,8 @@ fn deleting_a_node_drops_its_wires_and_reindexes_the_rest() {
     // 原 1→2 的那条，两个下标都该减一。
     assert_eq!(graph.wires[0].from, 0, "剩下的连线下标要往前挪");
     assert_eq!(graph.wires[0].to, 1);
-    assert_eq!(graph.selected, None);
+    assert!(graph.is_selected(1), "选中下标也要跟着往前挪");
+    assert_eq!(graph.selected.len(), 1);
     // 挪完还得指得对端口 —— 指错就会接到别的端口上去。
     assert_eq!(graph.wires[0].from_port, graph.nodes[0].outputs[0].id);
     assert_eq!(graph.wires[0].to_port, graph.nodes[1].inputs[1].id);
@@ -661,7 +783,7 @@ fn duplicating_a_node_gives_it_a_new_id_and_keeps_its_params() {
     assert_ne!(graph.nodes[0].id, graph.nodes[1].id, "复制体要有自己的 id");
     assert_eq!(graph.nodes[1].params, want, "参数要一起复制过去");
     assert_eq!(graph.nodes[1].outputs.len(), graph.nodes[0].outputs.len());
-    assert_eq!(graph.selected, Some(1), "复制完选中新的那个");
+    assert!(graph.is_selected(1), "复制完选中新的那个");
 }
 
 // ---- 字面量节点与参数端口 ----
@@ -751,7 +873,55 @@ fn dynamic_output_nodes_expose_numbered_ports() {
     assert_eq!(inputs[1].badge(), "[ANY]", "列表输入徽标带方括号");
 }
 
+#[test]
+fn repeat_node_exposes_body_index_and_completion() {
+    let kinds = crate::catalog::all();
+    let repeat = kinds
+        .iter()
+        .find(|kind| kind.kind.id == "repeat")
+        .expect("该有「重复执行」");
+    assert_eq!(repeat.kind.category, "逻辑");
+    let (inputs, outputs) = checked_ports("repeat", &repeat.defaults);
+    assert!(inputs.iter().any(|port| port.exec), "需要执行输入");
+    assert!(outputs.iter().any(|port| port.id == "body" && port.exec));
+    assert!(outputs.iter().any(|port| port.id == "index" && !port.exec));
+    assert!(outputs.iter().any(|port| port.id == "finally" && port.exec));
+    assert!(repeat.kind.params.iter().any(|param| param.id == "times"));
+}
+
 /// 动态输出挂在参数栏里，顶部端口列里不再有输出 —— 卡片高度不随输出个数涨。
+#[test]
+fn sequence_branch_names_are_editable_defaults_not_semantics() {
+    let kinds = crate::catalog::all();
+    let seq = kinds
+        .iter()
+        .find(|kind| kind.kind.id == "sequence")
+        .unwrap();
+    assert_eq!(seq.defaults["branch1"], serde_json::json!("分支 1"));
+
+    let mut graph = canvas(&["sequence"]);
+    let param = seq.kind.params.first().unwrap().clone();
+    assert!(graph.handle_control(
+        0,
+        &param,
+        Some(crate::ui::controls::ControlEvent::Changed(
+            serde_json::json!(3)
+        )),
+    ));
+    assert_eq!(
+        graph.nodes[0].params["branch2"],
+        serde_json::json!("分支 2")
+    );
+    assert_eq!(
+        graph.nodes[0].params["branch3"],
+        serde_json::json!("分支 3")
+    );
+    assert_eq!(
+        graph.nodes[0].params["branch1"],
+        serde_json::json!("分支 1")
+    );
+}
+
 #[test]
 fn dynamic_outputs_live_in_the_params_panel() {
     let kinds = crate::catalog::all();
@@ -988,6 +1158,24 @@ fn unknown_nodes_and_legacy_port_ids_survive_loading() {
         serde_json::to_value(back.to_workflow(&workflow)).unwrap(),
         serde_json::to_value(workflow).unwrap(),
     );
+}
+
+#[test]
+fn loading_a_workflow_fills_newly_added_default_params() {
+    let mut workflow = Workflow::new("旧变换");
+    workflow
+        .nodes
+        .push(starrytools_core::model::workflow::NodeInstance {
+            id: "tf".into(),
+            kind: "transform_image".into(),
+            position: starrytools_core::model::workflow::Position::default(),
+            params: Params::from_iter([("flipHorizontal".into(), serde_json::json!(true))]),
+        });
+    let graph = Graph::from_workflow(&workflow, &crate::catalog::all());
+    let params = &graph.nodes[0].params;
+    assert_eq!(params["mode"], serde_json::json!("flip"));
+    assert_eq!(params["flipHorizontal"], serde_json::json!(true));
+    assert_eq!(params["stretchWidth"], serde_json::json!(100.0));
 }
 
 #[test]

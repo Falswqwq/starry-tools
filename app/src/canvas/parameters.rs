@@ -78,10 +78,33 @@ impl Graph {
     ) -> bool {
         match event {
             Some(ControlEvent::Changed(value)) => {
-                self.nodes[i].params.insert(param.id.clone(), value);
+                self.nodes[i].params.insert(param.id.clone(), value.clone());
+                if let ParamSpec::Ports {
+                    label_prefix,
+                    default_label,
+                    ..
+                } = &param.spec
+                {
+                    let count = value.as_f64().unwrap_or(0.0).round().max(0.0) as usize;
+                    for index in 1..=count {
+                        let key = format!("{label_prefix}{index}");
+                        self.nodes[i].params.entry(key).or_insert_with(|| {
+                            serde_json::json!(
+                                starrytools_core::model::node_kind::ports_row_default_label(
+                                    default_label,
+                                    index
+                                )
+                            )
+                        });
+                    }
+                }
                 refresh_ports(&mut self.nodes[i]);
                 self.interaction.connect = None;
                 self.interaction.hovered_port = None;
+                true
+            }
+            Some(ControlEvent::SetOther { param, value }) => {
+                self.nodes[i].params.insert(param, value);
                 true
             }
 

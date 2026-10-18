@@ -153,6 +153,49 @@ fn set_node_ports_follow_the_selected_type() {
 }
 
 #[test]
+fn repeat_runs_the_body_with_indices_then_completes() {
+    let mut w = Workflow::new("repeat");
+    add(&mut w, "start", "start", json!({}));
+    add(&mut w, "repeat", "repeat", json!({"times": 3}));
+    add(&mut w, "body", "test_sink", json!({}));
+    add(&mut w, "done", "test_sink", json!({}));
+    link(&mut w, "start", "out", "repeat", "exec");
+    link(&mut w, "repeat", "body", "body", "exec");
+    link(&mut w, "repeat", "index", "body", "value");
+    link(&mut w, "repeat", "finally", "done", "exec");
+
+    let r = execute(&blueprint_registry(), &w);
+    assert!(r.ok, "{:?}", r);
+    let indices: Vec<_> = r
+        .nodes
+        .iter()
+        .filter(|n| n.node_id == "body")
+        .filter_map(|n| n.outputs.first())
+        .map(|out| out.summary.as_str())
+        .collect();
+    assert_eq!(indices, ["0", "1", "2"]);
+    assert_eq!(r.order.iter().filter(|id| *id == "body").count(), 3);
+    assert!(r.order.contains(&"done".into()), "全部完成后应走结束");
+}
+
+#[test]
+fn repeat_with_zero_times_skips_the_body_but_completes() {
+    let mut w = Workflow::new("repeat-zero");
+    add(&mut w, "start", "start", json!({}));
+    add(&mut w, "repeat", "repeat", json!({"times": 0}));
+    add(&mut w, "body", "test_sink", json!({}));
+    add(&mut w, "done", "test_sink", json!({}));
+    link(&mut w, "start", "out", "repeat", "exec");
+    link(&mut w, "repeat", "body", "body", "exec");
+    link(&mut w, "repeat", "finally", "done", "exec");
+
+    let r = execute(&blueprint_registry(), &w);
+    assert!(r.ok, "{:?}", r);
+    assert!(!r.order.contains(&"body".into()));
+    assert!(r.order.contains(&"done".into()));
+}
+
+#[test]
 fn variable_writes_are_visible_to_later_branches_without_cycles() {
     let reg = blueprint_registry();
     let r = execute(&reg, &fixture(3));

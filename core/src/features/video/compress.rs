@@ -541,6 +541,7 @@ fn run(args: &mut NodeArgs<'_>) -> Result<ValueMap, NodeError> {
                 fraction: fraction.map(|value| value.clamp(0.0, 1.0)),
                 frame: Some(frame.frame),
                 total_frames: total,
+                unit: None,
                 text: (frame.fps > 0.0).then(|| format!("{:.0} 帧/s", frame.fps)),
             },
         );

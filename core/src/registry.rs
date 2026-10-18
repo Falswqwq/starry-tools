@@ -52,6 +52,12 @@ pub enum ControlFlow {
     Sequence {
         output_prefix: String,
     },
+    Repeat {
+        count_param: String,
+        index_output: String,
+        body_output: String,
+        finally_output: String,
+    },
     Loop {
         list_input: String,
         item_output: String,
@@ -283,6 +289,8 @@ pub enum RegistrationError {
     Unknown { kind: &'static str, id: String },
     #[error("cyclic type interface: {0}")]
     TypeCycle(String),
+    #[error("invalid conversion: {from} -> {to}")]
+    InvalidConversion { from: String, to: String },
     #[error("the global registry is already initialized")]
     AlreadyInitialized,
 }
@@ -747,7 +755,7 @@ mod tests {
             TypeColor::rgb(0x16, 0x65, 0x34)
         );
         // 声明归属：只有逻辑节点带专色，其余节点走正常主题边线。
-        for id in ["sequence", "iterate"] {
+        for id in ["sequence", "iterate", "repeat"] {
             assert_eq!(
                 registry.get(id).unwrap().accent.as_deref(),
                 Some(crate::nodes::LOGIC_ACCENT),
@@ -764,6 +772,15 @@ mod tests {
             registry.get("sequence").unwrap().control_flow,
             Some(ControlFlow::Sequence {
                 output_prefix: "out".into(),
+            })
+        );
+        assert_eq!(
+            registry.get("repeat").unwrap().control_flow,
+            Some(ControlFlow::Repeat {
+                count_param: "times".into(),
+                index_output: "index".into(),
+                body_output: "body".into(),
+                finally_output: "finally".into(),
             })
         );
         assert_eq!(
